@@ -1,0 +1,727 @@
+package com.poctra.wallet.data
+
+import com.poctra.wallet.core.EvmCrypto
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.OutputStreamWriter
+import java.math.BigDecimal
+import java.math.BigInteger
+import java.net.HttpURLConnection
+import java.net.URL
+import kotlin.math.absoluteValue
+
+private const val NativeTradeCurrency = "0x0000000000000000000000000000000000000000"
+
+enum class TradeAsset(
+    val symbol: String,
+    val displayName: String,
+    val address: String,
+    val decimals: Int,
+) {
+    WOCT("wOCT", "Wrapped OCT", "0x4647e1fE715c9e23959022C2416C71867F5a6E80", 6),
+    ETH("ETH", "Ethereum", NativeTradeCurrency, 18),
+    USDT("USDT", "Tether USD", "0xdAC17F958D2ee523a2206206994597C13D831ec7", 6);
+
+    companion object {
+        const val NativeCurrency = NativeTradeCurrency
+    }
+}
+
+data class TradeBalances(
+    val woctRaw: BigInteger = BigInteger.ZERO,
+    val ethWei: BigInteger = BigInteger.ZERO,
+    val usdtRaw: BigInteger = BigInteger.ZERO,
+) {
+    fun formatted(asset: TradeAsset): String = when (asset) {
+        TradeAsset.WOCT -> EvmCrypto.formatUnits(woctRaw, asset.decimals)
+        TradeAsset.ETH -> EvmCrypto.formatEther(ethWei)
+        TradeAsset.USDT -> EvmCrypto.formatUnits(usdtRaw, asset.decimals)
+    }
+
+    fun raw(asset: TradeAsset): BigInteger = when (asset) {
+        TradeAsset.WOCT -> woctRaw
+        TradeAsset.ETH -> ethWei
+        TradeAsset.USDT -> usdtRaw
+    }
+}
+
+data class TradeQuote(
+    val amountOutRaw: BigInteger,
+    val amountOut: String,
+    val minimumOutRaw: BigInteger,
+    val minimumOut: String,
+    val gasEstimate: BigInteger,
+    val gasPriceWei: BigInteger,
+    val gasFeeEth: String,
+    val lowGasPriceWei: BigInteger,
+    val lowGasFeeEth: String,
+    val fastGasPriceWei: BigInteger,
+    val fastGasFeeEth: String,
+    val routeLabel: String,
+)
+
+enum class TradeChartTimeframe(
+    val label: String,
+    val apiFrame: String,
+    val aggregate: Int,
+    val limit: Int,
+) {
+    H1("1H", "hour", 1, 32),
+    H4("4H", "hour", 4, 32),
+    D1("1D", "day", 1, 32),
+    W1("1W", "day", 7, 24),
+}
+
+data class TradeCandle(
+    val timestamp: Long,
+    val open: Double,
+    val high: Double,
+    val low: Double,
+    val close: Double,
+)
+
+data class TradeSwapResult(
+    val success: Boolean,
+    val hash: String? = null,
+    val approvalHash: String? = null,
+    val permitHash: String? = null,
+    val error: String? = null,
+    val transactions: List<TradeSubmittedTransaction> = emptyList(),
+)
+
+enum class TradeSwapStage {
+    TokenApproval,
+    PermitApproval,
+    Swap,
+}
+
+data class TradeSubmittedTransaction(
+    val stage: TradeSwapStage,
+    val transaction: EvmSendResult,
+)
+
+class TradeRepository {
+    private val crypto = EvmCrypto()
+    private var activeEthereumRpcUrl = EthereumRpcUrl
+
+    fun configure(evmRpcUrl: String = EthereumRpcUrl) {
+        activeEthereumRpcUrl = evmRpcUrl.trim().ifBlank { EthereumRpcUrl }
+    }
+
+    fun deriveAddress(wallet: Wallet): String = crypto.deriveAddress(wallet)
+
+    fun parseAmount(value: String, asset: TradeAsset): BigInteger = EvmCrypto.parseUnits(value, asset.decimals)
+
+    fun formatAmount(value: BigInteger, asset: TradeAsset, scale: Int = 6): String =
+        EvmCrypto.formatUnits(value, asset.decimals, scale)
+
+    suspend fun fetchBalances(wallet: Wallet): TradeBalances = withContext(Dispatchers.IO) {
+        val owner = deriveAddress(wallet)
+        TradeBalances(
+            woctRaw = erc20BalanceRaw(TradeAsset.WOCT.address, owner),
+            ethWei = evmQuantity("eth_getBalance", JSONArray().put(owner).put("latest")),
+            usdtRaw = erc20BalanceRaw(TradeAsset.USDT.address, owner),
+        )
+    }
+
+    suspend fun quoteExactInput(
+        fromAsset: TradeAsset,
+        toAsset: TradeAsset,
+        amountText: String,
+        slippageBps: Int,
+    ): TradeQuote = withContext(Dispatchers.IO) {
+        val amountIn = parseAmount(amountText, fromAsset)
+        require(amountIn > BigInteger.ZERO) { "Enter a valid amount." }
+        require(isSupportedPair(fromAsset, toAsset)) { "Trade supports wOCT pairs with ETH or USDT." }
+        val pool = poolFor(fromAsset, toAsset)
+        val calldata = quoteExactInputSingleCalldata(pool, amountIn)
+        val result = evmString(
+            "eth_call",
+            JSONArray()
+                .put(JSONObject().put("to", V4QuoterAddress).put("data", calldata))
+                .put("latest"),
+        ).cleanHex()
+        require(result.length >= 128) { "Quote returned empty result." }
+        val amountOut = BigInteger(result.substring(0, 64), 16)
+        val gasEstimate = BigInteger(result.substring(64, 128), 16)
+        val gasPrice = evmQuantity("eth_gasPrice", JSONArray()).coerceAtLeast(BigInteger.ONE)
+        val lowGasPrice = gasPrice
+            .multiply(BigInteger.valueOf(90L))
+            .divide(BigInteger.valueOf(100L))
+            .coerceAtLeast(BigInteger.ONE)
+        val fastGasPrice = gasPrice
+            .multiply(BigInteger.valueOf(125L))
+            .divide(BigInteger.valueOf(100L))
+            .add(OneGweiWei)
+        val minimumOut = amountOut
+            .multiply(BigInteger.valueOf((10_000 - slippageBps.coerceIn(1, 5_000)).toLong()))
+            .divide(BigInteger.valueOf(10_000L))
+        TradeQuote(
+            amountOutRaw = amountOut,
+            amountOut = formatAmount(amountOut, toAsset),
+            minimumOutRaw = minimumOut,
+            minimumOut = formatAmount(minimumOut, toAsset),
+            gasEstimate = gasEstimate,
+            gasPriceWei = gasPrice,
+            gasFeeEth = EvmCrypto.formatEther(gasEstimate.multiply(gasPrice), 8),
+            lowGasPriceWei = lowGasPrice,
+            lowGasFeeEth = EvmCrypto.formatEther(gasEstimate.multiply(lowGasPrice), 8),
+            fastGasPriceWei = fastGasPrice,
+            fastGasFeeEth = EvmCrypto.formatEther(gasEstimate.multiply(fastGasPrice), 8),
+            routeLabel = "${fromAsset.symbol}/${toAsset.symbol} v4 0.30%",
+        )
+    }
+
+    suspend fun swapExactInput(
+        wallet: Wallet,
+        fromAsset: TradeAsset,
+        toAsset: TradeAsset,
+        amountText: String,
+        minimumOutRaw: BigInteger,
+        gasPriceWeiOverride: BigInteger? = null,
+    ): TradeSwapResult = withContext(Dispatchers.IO) {
+        runCatching {
+            require(isSupportedPair(fromAsset, toAsset)) { "Trade supports wOCT pairs with ETH or USDT." }
+            val amountIn = parseAmount(amountText, fromAsset)
+            require(amountIn > BigInteger.ZERO) { "Enter a valid amount." }
+            val owner = deriveAddress(wallet)
+            val balance = fetchBalances(wallet).raw(fromAsset)
+            require(balance >= amountIn) { "Insufficient ${fromAsset.symbol} balance." }
+            var nonceCursor = evmQuantity("eth_getTransactionCount", JSONArray().put(owner).put("pending"))
+            fun nextNonce(): BigInteger {
+                val nonce = nonceCursor
+                nonceCursor = nonceCursor.add(BigInteger.ONE)
+                return nonce
+            }
+
+            val transactions = mutableListOf<TradeSubmittedTransaction>()
+            if (fromAsset != TradeAsset.ETH) {
+                transactions += ensureErc20Approval(
+                    wallet = wallet,
+                    owner = owner,
+                    asset = fromAsset,
+                    amount = amountIn,
+                    gasPriceWeiOverride = gasPriceWeiOverride,
+                    nonceProvider = ::nextNonce,
+                )
+                val permit = approvePermit2(
+                    wallet = wallet,
+                    asset = fromAsset,
+                    amount = amountIn,
+                    gasPriceWeiOverride = gasPriceWeiOverride,
+                    nonceOverride = nextNonce(),
+                )
+                transactions += TradeSubmittedTransaction(TradeSwapStage.PermitApproval, permit)
+            }
+
+            val pool = poolFor(fromAsset, toAsset)
+            val executeData = universalRouterExecuteCalldata(pool, amountIn, minimumOutRaw)
+            val valueWei = if (fromAsset == TradeAsset.ETH) amountIn else BigInteger.ZERO
+            val swap = sendEvmTransaction(
+                wallet = wallet,
+                from = owner,
+                toAddress = UniversalRouterAddress,
+                dataHex = executeData,
+                valueWei = valueWei,
+                fallbackGas = SwapGasLimit,
+                nonceOverride = nextNonce(),
+                gasPriceWeiOverride = gasPriceWeiOverride,
+            )
+            transactions += TradeSubmittedTransaction(TradeSwapStage.Swap, swap)
+            TradeSwapResult(
+                success = true,
+                hash = swap.hash,
+                approvalHash = transactions.firstOrNull { it.stage == TradeSwapStage.TokenApproval }?.transaction?.hash,
+                permitHash = transactions.firstOrNull { it.stage == TradeSwapStage.PermitApproval }?.transaction?.hash,
+                transactions = transactions,
+            )
+        }.getOrElse { exception ->
+            TradeSwapResult(success = false, error = exception.message ?: "Swap failed.")
+        }
+    }
+
+    suspend fun speedUpTransaction(wallet: Wallet, pending: EvmSendResult): EvmSendResult = withContext(Dispatchers.IO) {
+        val from = deriveAddress(wallet)
+        val nonce = pending.nonce ?: throw IllegalArgumentException("Pending transaction nonce is unavailable.")
+        val toAddress = pending.toAddress ?: throw IllegalArgumentException("Pending transaction target is unavailable.")
+        val dataHex = pending.dataHex ?: "0x"
+        val currentGas = pending.gasPriceWei ?: evmQuantity("eth_gasPrice", JSONArray())
+        val networkGas = evmQuantity("eth_gasPrice", JSONArray())
+        val bumpedCurrent = currentGas
+            .multiply(BigInteger.valueOf(125L))
+            .divide(BigInteger.valueOf(100L))
+            .add(OneGweiWei)
+        val bumpedNetwork = networkGas
+            .multiply(BigInteger.valueOf(125L))
+            .divide(BigInteger.valueOf(100L))
+        val gasPrice = listOf(bumpedCurrent, bumpedNetwork)
+            .maxOrNull()
+            ?.coerceAtLeast(BigInteger.ONE)
+            ?: bumpedCurrent
+        sendEvmTransaction(
+            wallet = wallet,
+            from = from,
+            toAddress = toAddress,
+            dataHex = dataHex,
+            valueWei = pending.valueWei,
+            fallbackGas = pending.gasLimit ?: SwapGasLimit,
+            nonceOverride = nonce,
+            gasPriceWeiOverride = gasPrice,
+        )
+    }
+
+    suspend fun transactionStatus(hash: String): TransactionNetworkState = withContext(Dispatchers.IO) {
+        runCatching {
+            val result = evmRaw("eth_getTransactionReceipt", JSONArray().put(hash))
+            if (result == null || result == JSONObject.NULL) return@runCatching TransactionNetworkState(TransactionNetworkStatus.Pending)
+            val receipt = result as? JSONObject ?: return@runCatching TransactionNetworkState(TransactionNetworkStatus.Pending)
+            when (receipt.optString("status").lowercase()) {
+                "0x1" -> TransactionNetworkState(TransactionNetworkStatus.Confirmed)
+                "0x0" -> TransactionNetworkState(TransactionNetworkStatus.Rejected, "Swap reverted on-chain.")
+                else -> TransactionNetworkState(TransactionNetworkStatus.Pending)
+            }
+        }.getOrDefault(TransactionNetworkState(TransactionNetworkStatus.Pending))
+    }
+
+    fun maxAmount(balance: TradeBalances, asset: TradeAsset): String {
+        val raw = when (asset) {
+            TradeAsset.ETH -> balance.ethWei.subtract(EthGasReserveWei)
+            else -> balance.raw(asset)
+        }.let { if (it > BigInteger.ZERO) it else BigInteger.ZERO }
+        return formatAmount(raw, asset)
+    }
+
+    suspend fun fetchWoctCandles(timeframe: TradeChartTimeframe): List<TradeCandle> = withContext(Dispatchers.IO) {
+        val pool = findWoctPool()
+        val url = "$GeckoTerminalApi/networks/eth/pools/${pool.address}/ohlcv/${timeframe.apiFrame}" +
+            "?aggregate=${timeframe.aggregate}&limit=${timeframe.limit}&currency=usd&token=${pool.tokenSide}"
+        val json = getJson(url)
+        val list = json.optJSONObject("data")
+            ?.optJSONObject("attributes")
+            ?.optJSONArray("ohlcv_list")
+            ?: JSONArray()
+        buildList {
+            for (index in 0 until list.length()) {
+                val row = list.optJSONArray(index) ?: continue
+                if (row.length() < 5) continue
+                add(
+                    TradeCandle(
+                        timestamp = row.optLong(0),
+                        open = row.optDouble(1),
+                        high = row.optDouble(2),
+                        low = row.optDouble(3),
+                        close = row.optDouble(4),
+                    ),
+                )
+            }
+        }
+            .filter { it.open > 0.0 && it.high > 0.0 && it.low > 0.0 && it.close > 0.0 }
+            .sortedBy { it.timestamp }
+            .also { require(it.isNotEmpty()) { "wOCT chart data unavailable." } }
+    }
+
+    fun isSupportedPair(fromAsset: TradeAsset, toAsset: TradeAsset): Boolean =
+        fromAsset != toAsset &&
+            (fromAsset == TradeAsset.WOCT || toAsset == TradeAsset.WOCT) &&
+            (fromAsset == TradeAsset.ETH || fromAsset == TradeAsset.USDT || toAsset == TradeAsset.ETH || toAsset == TradeAsset.USDT)
+
+    private fun poolFor(fromAsset: TradeAsset, toAsset: TradeAsset): TradePool {
+        val currency0 = sortedCurrency0(fromAsset.address, toAsset.address)
+        val currency1 = if (currency0.equals(fromAsset.address, ignoreCase = true)) toAsset.address else fromAsset.address
+        return TradePool(
+            currency0 = currency0,
+            currency1 = currency1,
+            zeroForOne = currency0.equals(fromAsset.address, ignoreCase = true),
+            hooks = poolHooks(fromAsset, toAsset),
+            inputCurrency = fromAsset.address,
+            outputCurrency = toAsset.address,
+        )
+    }
+
+    private fun poolHooks(fromAsset: TradeAsset, toAsset: TradeAsset): String {
+        val isEthRoute = fromAsset == TradeAsset.ETH || toAsset == TradeAsset.ETH
+        return if (isEthRoute) WoctEthV4HookAddress else ZeroAddress
+    }
+
+    private fun findWoctPool(): ChartPool {
+        val json = getJson("$GeckoTerminalApi/networks/eth/tokens/${TradeAsset.WOCT.address}/pools?page=1")
+        val data = json.optJSONArray("data") ?: JSONArray()
+        val candidates = buildList {
+            for (index in 0 until data.length()) {
+                val pool = data.optJSONObject(index) ?: continue
+                val id = pool.optString("id").substringAfter("eth_", "")
+                if (id.isBlank()) continue
+                val attributes = pool.optJSONObject("attributes") ?: JSONObject()
+                val reserveUsd = attributes.optString("reserve_in_usd").toBigDecimalOrNull() ?: BigDecimal.ZERO
+                val relationships = pool.optJSONObject("relationships") ?: JSONObject()
+                val baseId = relationships.optJSONObject("base_token")
+                    ?.optJSONObject("data")
+                    ?.optString("id")
+                    .orEmpty()
+                    .lowercase()
+                val woctClean = TradeAsset.WOCT.address.cleanHex().lowercase()
+                val tokenSide = if (baseId.contains(woctClean)) "base" else "quote"
+                add(ChartPool(address = id, tokenSide = tokenSide, reserveUsd = reserveUsd))
+            }
+        }
+        return candidates.maxByOrNull { it.reserveUsd } ?: throw IllegalStateException("wOCT chart pool unavailable.")
+    }
+
+    private fun quoteExactInputSingleCalldata(pool: TradePool, amountIn: BigInteger): String {
+        val tupleHead = listOf(
+            addressWord(pool.currency0),
+            addressWord(pool.currency1),
+            BigInteger.valueOf(PoolFee.toLong()).toAbiWord(),
+            signedInt24Word(PoolTickSpacing),
+            addressWord(pool.hooks),
+            boolWord(pool.zeroForOne),
+            amountIn.toAbiWord(),
+            BigInteger.valueOf(256L).toAbiWord(),
+        ).joinToString("")
+        val hookData = BigInteger.ZERO.toAbiWord()
+        return "0x${selector("quoteExactInputSingle(((address,address,uint24,int24,address),bool,uint128,bytes))")}" +
+            BigInteger.valueOf(32L).toAbiWord() +
+            tupleHead +
+            hookData
+    }
+
+    private fun universalRouterExecuteCalldata(pool: TradePool, amountIn: BigInteger, minimumOut: BigInteger): String {
+        val commands = byteArrayOf(V4SwapCommand.toByte())
+        val actions = byteArrayOf(ActionSwapExactInSingle, ActionSettleAll, ActionTakeAll)
+        val swapParams = encodeExactInputSingleParams(pool, amountIn, minimumOut)
+        val settleParams = abiEncodeStatic(listOf(addressWord(pool.inputCurrency), MaxUint256Word))
+        val takeParams = abiEncodeStatic(listOf(addressWord(pool.outputCurrency), BigInteger.ZERO.toAbiWord()))
+        val routerInput = abiEncodeBytesAndBytesArray(actions, listOf(swapParams, settleParams, takeParams))
+        val inputs = abiEncodeBytesArray(listOf(routerInput.hexToBytes()))
+        val commandsEncoded = abiEncodeBytes(commands)
+        val inputsOffset = BigInteger.valueOf((96 + commandsEncoded.length / 2).toLong()).toAbiWord()
+        val deadline = BigInteger.valueOf(System.currentTimeMillis() / 1000L + 1_200L).toAbiWord()
+        return "0x${selector("execute(bytes,bytes[],uint256)")}" +
+            BigInteger.valueOf(96L).toAbiWord() +
+            inputsOffset +
+            deadline +
+            commandsEncoded +
+            inputs
+    }
+
+    private fun encodeExactInputSingleParams(pool: TradePool, amountIn: BigInteger, minimumOut: BigInteger): String {
+        val head = listOf(
+            addressWord(pool.currency0),
+            addressWord(pool.currency1),
+            BigInteger.valueOf(PoolFee.toLong()).toAbiWord(),
+            signedInt24Word(PoolTickSpacing),
+            addressWord(pool.hooks),
+            boolWord(pool.zeroForOne),
+            amountIn.toAbiWord(),
+            minimumOut.toAbiWord(),
+            BigInteger.ZERO.toAbiWord(),
+            BigInteger.valueOf(320L).toAbiWord(),
+        ).joinToString("")
+        return BigInteger.valueOf(32L).toAbiWord() + head + BigInteger.ZERO.toAbiWord()
+    }
+
+    private fun ensureErc20Approval(
+        wallet: Wallet,
+        owner: String,
+        asset: TradeAsset,
+        amount: BigInteger,
+        gasPriceWeiOverride: BigInteger?,
+        nonceProvider: () -> BigInteger,
+    ): List<TradeSubmittedTransaction> {
+        val current = erc20AllowanceRaw(asset.address, owner, Permit2Address)
+        if (current >= amount) return emptyList()
+        val approvals = mutableListOf<TradeSubmittedTransaction>()
+        if (asset == TradeAsset.USDT && current > BigInteger.ZERO) {
+            val reset = sendEvmTransaction(
+                wallet = wallet,
+                from = owner,
+                toAddress = asset.address,
+                dataHex = "0x095ea7b3${addressWord(Permit2Address)}${BigInteger.ZERO.toAbiWord()}",
+                valueWei = BigInteger.ZERO,
+                fallbackGas = ApproveGasLimit,
+                nonceOverride = nonceProvider(),
+                gasPriceWeiOverride = gasPriceWeiOverride,
+            )
+            approvals += TradeSubmittedTransaction(TradeSwapStage.TokenApproval, reset)
+        }
+        val approval = sendEvmTransaction(
+            wallet = wallet,
+            from = owner,
+            toAddress = asset.address,
+            dataHex = "0x095ea7b3${addressWord(Permit2Address)}${MaxUint256Word}",
+            valueWei = BigInteger.ZERO,
+            fallbackGas = ApproveGasLimit,
+            nonceOverride = nonceProvider(),
+            gasPriceWeiOverride = gasPriceWeiOverride,
+        )
+        approvals += TradeSubmittedTransaction(TradeSwapStage.TokenApproval, approval)
+        return approvals
+    }
+
+    private fun approvePermit2(
+        wallet: Wallet,
+        asset: TradeAsset,
+        amount: BigInteger,
+        gasPriceWeiOverride: BigInteger?,
+        nonceOverride: BigInteger,
+    ): EvmSendResult {
+        val expiration = BigInteger.valueOf(System.currentTimeMillis() / 1000L + 2_592_000L)
+        val calldata = "0x${selector("approve(address,address,uint160,uint48)")}" +
+            addressWord(asset.address) +
+            addressWord(UniversalRouterAddress) +
+            amount.toAbiWord() +
+            expiration.toAbiWord()
+        return sendEvmTransaction(
+            wallet = wallet,
+            from = deriveAddress(wallet),
+            toAddress = Permit2Address,
+            dataHex = calldata,
+            valueWei = BigInteger.ZERO,
+            fallbackGas = ApproveGasLimit,
+            nonceOverride = nonceOverride,
+            gasPriceWeiOverride = gasPriceWeiOverride,
+        )
+    }
+
+    private fun sendEvmTransaction(
+        wallet: Wallet,
+        from: String,
+        toAddress: String,
+        dataHex: String,
+        valueWei: BigInteger,
+        fallbackGas: BigInteger,
+        nonceOverride: BigInteger? = null,
+        gasPriceWeiOverride: BigInteger? = null,
+    ): EvmSendResult {
+        val nonce = nonceOverride ?: evmQuantity("eth_getTransactionCount", JSONArray().put(from).put("pending"))
+        val gasPrice = gasPriceWeiOverride ?: evmQuantity("eth_gasPrice", JSONArray())
+        val gasLimit = estimateGas(from, toAddress, dataHex, valueWei, fallbackGas)
+        val nativeBalance = evmQuantity("eth_getBalance", JSONArray().put(from).put("latest"))
+        require(nativeBalance >= valueWei.add(gasPrice.multiply(gasLimit))) { "Insufficient ETH for amount plus gas." }
+        val rawTx = crypto.signLegacyTransaction(
+            wallet = wallet,
+            nonce = nonce,
+            gasPriceWei = gasPrice,
+            gasLimit = gasLimit,
+            toAddress = toAddress,
+            valueWei = valueWei,
+            data = dataHex.hexToBytes(),
+            chainId = 1L,
+        )
+        val hash = evmString("eth_sendRawTransaction", JSONArray().put(rawTx))
+        return EvmSendResult(
+            success = true,
+            hash = hash,
+            nonce = nonce,
+            gasPriceWei = gasPrice,
+            gasLimit = gasLimit,
+            toAddress = toAddress,
+            dataHex = dataHex,
+            valueWei = valueWei,
+        )
+    }
+
+    private fun estimateGas(
+        from: String,
+        toAddress: String,
+        dataHex: String,
+        valueWei: BigInteger,
+        fallbackGas: BigInteger,
+    ): BigInteger {
+        return runCatching {
+            val tx = JSONObject()
+                .put("from", from)
+                .put("to", toAddress)
+                .put("value", valueWei.toQuantity())
+                .put("data", dataHex)
+            evmQuantity("eth_estimateGas", JSONArray().put(tx))
+                .multiply(BigInteger.valueOf(120))
+                .divide(BigInteger.valueOf(100))
+                .coerceAtLeast(fallbackGas)
+        }.getOrDefault(fallbackGas)
+    }
+
+    private fun erc20BalanceRaw(tokenAddress: String, ownerAddress: String): BigInteger {
+        val data = "0x70a08231${addressWord(ownerAddress)}"
+        return evmString(
+            "eth_call",
+            JSONArray()
+                .put(JSONObject().put("to", tokenAddress).put("data", data))
+                .put("latest"),
+        ).hexQuantityToBigInteger()
+    }
+
+    private fun erc20AllowanceRaw(tokenAddress: String, ownerAddress: String, spenderAddress: String): BigInteger {
+        val data = "0xdd62ed3e${addressWord(ownerAddress)}${addressWord(spenderAddress)}"
+        return evmString(
+            "eth_call",
+            JSONArray()
+                .put(JSONObject().put("to", tokenAddress).put("data", data))
+                .put("latest"),
+        ).hexQuantityToBigInteger()
+    }
+
+    private fun evmQuantity(method: String, params: JSONArray): BigInteger =
+        evmString(method, params).hexQuantityToBigInteger()
+
+    private fun evmString(method: String, params: JSONArray): String {
+        val result = evmRaw(method, params)
+        return result?.toString() ?: throw IllegalStateException("$method returned empty result.")
+    }
+
+    private fun evmRaw(method: String, params: JSONArray): Any? {
+        val payload = JSONObject()
+            .put("jsonrpc", "2.0")
+            .put("id", System.currentTimeMillis())
+            .put("method", method)
+            .put("params", params)
+        val connection = (URL(activeEthereumRpcUrl).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 12_000
+            readTimeout = 12_000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json")
+            setRequestProperty("User-Agent", PoctraUserAgent)
+        }
+        OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { writer ->
+            writer.write(payload.toString())
+        }
+        val stream = if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream ?: connection.inputStream
+        val body = stream.bufferedReader().use { it.readText() }
+        if (connection.responseCode !in 200..299) throw IllegalStateException("EVM RPC HTTP ${connection.responseCode}")
+        val json = JSONObject(body)
+        json.optJSONObject("error")?.let { error ->
+            throw IllegalStateException(error.optString("message", "EVM RPC error."))
+        }
+        return if (json.has("result")) json.get("result") else null
+    }
+
+    private fun getJson(url: String): JSONObject {
+        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 12_000
+            readTimeout = 12_000
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("User-Agent", PoctraUserAgent)
+        }
+        val stream = if (connection.responseCode in 200..299) {
+            connection.inputStream
+        } else {
+            connection.errorStream ?: connection.inputStream
+        }
+        val body = stream.bufferedReader().use { it.readText() }
+        if (connection.responseCode !in 200..299) throw IllegalStateException("Chart API HTTP ${connection.responseCode}")
+        return JSONObject(body)
+    }
+
+    private fun abiEncodeBytesAndBytesArray(bytesValue: ByteArray, array: List<String>): String =
+        BigInteger.valueOf(64L).toAbiWord() +
+            BigInteger.valueOf((64 + abiEncodeBytes(bytesValue).length / 2).toLong()).toAbiWord() +
+            abiEncodeBytes(bytesValue) +
+            abiEncodeBytesArray(array.map { it.hexToBytes() })
+
+    private fun abiEncodeBytesArray(items: List<ByteArray>): String {
+        val headsSize = items.size * 32
+        val encodedItems = items.map(::abiEncodeBytes)
+        var cursor = headsSize
+        val offsets = encodedItems.map { encoded ->
+            val offset = BigInteger.valueOf(cursor.toLong()).toAbiWord()
+            cursor += encoded.length / 2
+            offset
+        }
+        return BigInteger.valueOf(items.size.toLong()).toAbiWord() +
+            offsets.joinToString("") +
+            encodedItems.joinToString("")
+    }
+
+    private fun abiEncodeBytes(bytes: ByteArray): String {
+        val hex = bytes.toHex()
+        val paddedLength = ((bytes.size + 31) / 32) * 64
+        return BigInteger.valueOf(bytes.size.toLong()).toAbiWord() + hex.padEnd(paddedLength, '0')
+    }
+
+    private fun abiEncodeStatic(words: List<String>): String = words.joinToString("")
+
+    private fun selector(signature: String): String =
+        EvmCrypto.keccak(signature.toByteArray(Charsets.UTF_8)).take(4).toByteArray().toHex()
+
+    private fun sortedCurrency0(a: String, b: String): String {
+        val aValue = BigInteger(a.cleanHex().ifBlank { "0" }, 16)
+        val bValue = BigInteger(b.cleanHex().ifBlank { "0" }, 16)
+        return if (aValue <= bValue) a else b
+    }
+
+    private fun signedInt24Word(value: Int): String {
+        val normalized = if (value >= 0) {
+            BigInteger.valueOf(value.toLong())
+        } else {
+            BigInteger.ONE.shiftLeft(256).subtract(BigInteger.valueOf(value.absoluteValue.toLong()))
+        }
+        return normalized.toAbiWord()
+    }
+
+    private fun boolWord(value: Boolean): String = if (value) BigInteger.ONE.toAbiWord() else BigInteger.ZERO.toAbiWord()
+
+    private fun addressWord(address: String): String = address.cleanHex().lowercase().padStart(64, '0')
+
+    private fun BigInteger.toAbiWord(): String = toString(16).padStart(64, '0')
+
+    private fun BigInteger.toQuantity(): String = if (this == BigInteger.ZERO) "0x0" else "0x${toString(16)}"
+
+    private fun String.hexQuantityToBigInteger(): BigInteger {
+        val clean = cleanHex()
+        if (clean.isBlank()) return BigInteger.ZERO
+        return BigInteger(clean, 16)
+    }
+
+    private fun String.cleanHex(): String = removePrefix("0x").removePrefix("0X")
+
+    private fun String.hexToBytes(): ByteArray {
+        val clean = cleanHex()
+        require(clean.length % 2 == 0) { "Hex value has invalid length." }
+        return ByteArray(clean.length / 2) { index ->
+            clean.substring(index * 2, index * 2 + 2).toInt(16).toByte()
+        }
+    }
+
+    private fun ByteArray.toHex(): String = joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+
+    companion object {
+        private const val EthereumRpcUrl = "https://mainnet.infura.io/v3/f7ea6a596e8c4a038f8700e42e7c3494"
+        private const val GeckoTerminalApi = "https://api.geckoterminal.com/api/v2"
+        private const val PoctraUserAgent = "poctra-android"
+        private const val UniversalRouterAddress = "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af"
+        private const val Permit2Address = "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+        private const val V4QuoterAddress = "0x52f0e24d1c21c8a0cb1e5a5dd6198556bd9e1203"
+        private const val ZeroAddress = "0x0000000000000000000000000000000000000000"
+        private const val WoctEthV4HookAddress = "0x890681CfF5AD2069F020027f41f5f68F6a292000"
+        private const val PoolFee = 3000
+        private const val PoolTickSpacing = 60
+        private const val V4SwapCommand = 0x10
+        private const val ActionSwapExactInSingle: Byte = 0x06
+        private const val ActionSettleAll: Byte = 0x0c
+        private const val ActionTakeAll: Byte = 0x0f
+        private val EthGasReserveWei = BigInteger("5000000000000000")
+        private val OneGweiWei = BigInteger("1000000000")
+        private val ApproveGasLimit = BigInteger.valueOf(80_000L)
+        private val SwapGasLimit = BigInteger.valueOf(450_000L)
+        private val MaxUint256Word = "f".repeat(64)
+    }
+}
+
+private data class TradePool(
+    val currency0: String,
+    val currency1: String,
+    val zeroForOne: Boolean,
+    val hooks: String,
+    val inputCurrency: String,
+    val outputCurrency: String,
+)
+
+private data class ChartPool(
+    val address: String,
+    val tokenSide: String,
+    val reserveUsd: BigDecimal,
+)

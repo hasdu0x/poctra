@@ -1,3 +1,5 @@
+@file:Suppress("DEPRECATION")
+
 package com.poctra.wallet.security
 
 import android.app.Activity

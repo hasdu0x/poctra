@@ -105,6 +105,7 @@ data class TradeSubmittedTransaction(
 class TradeRepository {
     private val crypto = EvmCrypto()
     private var activeEthereumRpcUrl = EthereumRpcUrl
+    private var cachedWoctPool: ChartPool? = null
 
     fun configure(evmRpcUrl: String = EthereumRpcUrl) {
         activeEthereumRpcUrl = evmRpcUrl.trim().ifBlank { EthereumRpcUrl }
@@ -346,6 +347,7 @@ class TradeRepository {
     }
 
     private fun findWoctPool(): ChartPool {
+        cachedWoctPool?.let { return it }
         val json = getJson("$GeckoTerminalApi/networks/eth/tokens/${TradeAsset.WOCT.address}/pools?page=1")
         val data = json.optJSONArray("data") ?: JSONArray()
         val candidates = buildList {
@@ -366,7 +368,9 @@ class TradeRepository {
                 add(ChartPool(address = id, tokenSide = tokenSide, reserveUsd = reserveUsd))
             }
         }
-        return candidates.maxByOrNull { it.reserveUsd } ?: throw IllegalStateException("wOCT chart pool unavailable.")
+        return candidates.maxByOrNull { it.reserveUsd }
+            ?.also { cachedWoctPool = it }
+            ?: throw IllegalStateException("wOCT chart pool unavailable.")
     }
 
     private fun quoteExactInputSingleCalldata(pool: TradePool, amountIn: BigInteger): String {
@@ -585,17 +589,22 @@ class TradeRepository {
             setRequestProperty("Content-Type", "application/json")
             setRequestProperty("User-Agent", PoctraUserAgent)
         }
-        OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { writer ->
-            writer.write(payload.toString())
+        return try {
+            OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { writer ->
+                writer.write(payload.toString())
+            }
+            val responseCode = connection.responseCode
+            val stream = if (responseCode in 200..299) connection.inputStream else connection.errorStream ?: connection.inputStream
+            val body = stream.bufferedReader().use { it.readText() }
+            if (responseCode !in 200..299) throw IllegalStateException("EVM RPC HTTP $responseCode")
+            val json = JSONObject(body)
+            json.optJSONObject("error")?.let { error ->
+                throw IllegalStateException(error.optString("message", "EVM RPC error."))
+            }
+            if (json.has("result")) json.get("result") else null
+        } finally {
+            connection.disconnect()
         }
-        val stream = if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream ?: connection.inputStream
-        val body = stream.bufferedReader().use { it.readText() }
-        if (connection.responseCode !in 200..299) throw IllegalStateException("EVM RPC HTTP ${connection.responseCode}")
-        val json = JSONObject(body)
-        json.optJSONObject("error")?.let { error ->
-            throw IllegalStateException(error.optString("message", "EVM RPC error."))
-        }
-        return if (json.has("result")) json.get("result") else null
     }
 
     private fun getJson(url: String): JSONObject {
@@ -606,14 +615,19 @@ class TradeRepository {
             setRequestProperty("Accept", "application/json")
             setRequestProperty("User-Agent", PoctraUserAgent)
         }
-        val stream = if (connection.responseCode in 200..299) {
-            connection.inputStream
-        } else {
-            connection.errorStream ?: connection.inputStream
+        return try {
+            val responseCode = connection.responseCode
+            val stream = if (responseCode in 200..299) {
+                connection.inputStream
+            } else {
+                connection.errorStream ?: connection.inputStream
+            }
+            val body = stream.bufferedReader().use { it.readText() }
+            if (responseCode !in 200..299) throw IllegalStateException("Chart API HTTP $responseCode")
+            JSONObject(body)
+        } finally {
+            connection.disconnect()
         }
-        val body = stream.bufferedReader().use { it.readText() }
-        if (connection.responseCode !in 200..299) throw IllegalStateException("Chart API HTTP ${connection.responseCode}")
-        return JSONObject(body)
     }
 
     private fun abiEncodeBytesAndBytesArray(bytesValue: ByteArray, array: List<String>): String =

@@ -535,6 +535,7 @@ fun DAppRow(
     session: DAppSession,
     onRevoke: () -> Unit,
     onPermissionsClick: (() -> Unit)? = null,
+    riskLabels: List<String> = emptyList(),
     modifier: Modifier = Modifier,
 ) {
     Card(
@@ -597,6 +598,14 @@ fun DAppRow(
                     onClick = onPermissionsClick,
                 )
             }
+            if (riskLabels.isNotEmpty()) {
+                Spacer(Modifier.height(Space.x4))
+                Column(verticalArrangement = Arrangement.spacedBy(Space.x3)) {
+                    riskLabels.take(2).forEach { label ->
+                        DAppRiskLabel(label)
+                    }
+                }
+            }
             Spacer(Modifier.height(Space.x4))
             Text(
                 text = "Wallet ${shortAddress(session.walletAddress)}",
@@ -619,6 +628,23 @@ fun DAppRow(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun DAppRiskLabel(text: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(Radius.sm))
+            .background(Warning.copy(alpha = 0.14f))
+            .border(1.dp, Warning.copy(alpha = 0.45f), RoundedCornerShape(Radius.sm))
+            .padding(horizontal = Space.x4, vertical = Space.x3),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        GlyphIcon(Glyph.Info, modifier = Modifier.size(13.dp), color = Warning)
+        Spacer(Modifier.width(Space.x3))
+        Text(text, color = TextTertiary, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

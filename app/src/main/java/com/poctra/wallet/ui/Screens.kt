@@ -111,9 +111,17 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import com.poctra.wallet.AppRoute
+import com.poctra.wallet.ApprovalReviewItem
 import com.poctra.wallet.BridgeHistoryItem
+import com.poctra.wallet.ConsumerRiskItem
+import com.poctra.wallet.ConsumerRiskLevel
 import com.poctra.wallet.DashboardTab
+import com.poctra.wallet.DomainGuardRule
+import com.poctra.wallet.FundingProvider
 import com.poctra.wallet.PendingDAppRequest
+import com.poctra.wallet.PortfolioHolding
+import com.poctra.wallet.SimulationCheck
+import com.poctra.wallet.UnifiedActivityItem
 import com.poctra.wallet.PoctraController
 import com.poctra.wallet.TradeStep
 import com.poctra.wallet.data.AddressBookContact
@@ -144,6 +152,7 @@ import com.poctra.wallet.data.Wallet
 import com.poctra.wallet.data.WalletType
 import com.poctra.wallet.data.canonicalizeOrigin
 import com.poctra.wallet.security.DeviceSecurity
+import com.poctra.wallet.security.DAppUrlPolicy
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -179,6 +188,18 @@ fun PoctraApp(activity: Activity, controller: PoctraController) {
                 AppRoute.RpcAddNetwork -> AddRpcNetworkScreen(controller)
                 AppRoute.SecuritySettings -> SecuritySettingsScreen(activity, controller)
                 AppRoute.BackupSettings -> BackupSettingsScreen(activity, controller)
+                AppRoute.SecurityCenter -> SecurityCenterScreen(controller)
+                AppRoute.ActivityCenter -> ActivityCenterScreen(controller)
+                AppRoute.PaymentRequest -> PaymentRequestScreen(controller)
+                AppRoute.PortfolioAnalytics -> PortfolioAnalyticsScreen(controller)
+                AppRoute.PortfolioAssetHistory -> PortfolioAssetHistoryScreen(controller)
+                AppRoute.ApprovalDashboard -> ApprovalDashboardScreen(controller)
+                AppRoute.DomainGuard -> DomainGuardScreen(controller)
+                AppRoute.RecoveryPlan -> RecoveryPlanScreen(controller)
+                AppRoute.NotificationSettings -> NotificationSettingsScreen(controller)
+                AppRoute.FundingProviders -> FundingProvidersScreen(controller)
+                AppRoute.OctraProfile -> OctraProfileScreen(controller)
+                AppRoute.SimulationCenter -> SimulationCenterScreen(controller)
                 AppRoute.AppearanceSettings -> AppearanceSettingsScreen(controller)
                 AppRoute.ConnectedDApps -> ConnectedDAppsScreen(controller)
                 AppRoute.IdentityProviderSettings -> IdentityProviderSettingsScreen(controller)
@@ -646,6 +667,7 @@ private fun EvmSendReviewDialog(controller: PoctraController) {
                                 onCustomGasChange = {
                                     customGasGwei = it.filter { char -> char.isDigit() || char == '.' || char == ',' }
                                 },
+                                onRetryGas = controller::retryPreparedEvmSendGasEstimate,
                             )
                             Spacer(Modifier.height(Space.x6))
                             Row(horizontalArrangement = Arrangement.spacedBy(Space.x5)) {
@@ -684,6 +706,7 @@ private fun EvmSendReviewContent(
     customGasGwei: String,
     onSelectedGas: (BridgeFeePreset) -> Unit,
     onCustomGasChange: (String) -> Unit,
+    onRetryGas: () -> Unit,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Box(
@@ -729,6 +752,7 @@ private fun EvmSendReviewContent(
         customGasGwei = customGasGwei,
         onSelectedGas = onSelectedGas,
         onCustomGasChange = onCustomGasChange,
+        onRetryGas = onRetryGas,
     )
 }
 
@@ -741,6 +765,7 @@ private fun EvmSendGasPanel(
     customGasGwei: String,
     onSelectedGas: (BridgeFeePreset) -> Unit,
     onCustomGasChange: (String) -> Unit,
+    onRetryGas: () -> Unit,
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -771,6 +796,17 @@ private fun EvmSendGasPanel(
                     isError = !gasLoading,
                     compact = true,
                 )
+                if (!gasLoading) {
+                    Spacer(Modifier.height(Space.x4))
+                    PoctraButton(
+                        text = "Retry Gas",
+                        onClick = onRetryGas,
+                        modifier = Modifier.fillMaxWidth(),
+                        variant = ButtonVariant.Ghost,
+                        compact = true,
+                        leadingGlyph = Glyph.Refresh,
+                    )
+                }
             } else {
                 BridgeFeePresetRow(
                     selected = selectedGas,
@@ -1418,6 +1454,11 @@ private fun PinSetupPane(
     var localError by remember { mutableStateOf<String?>(null) }
 
     Column(Modifier.fillMaxWidth()) {
+        StateBanner(
+            text = "PIN is a local fallback. Use fingerprint when available and avoid simple repeated or sequential digits.",
+            isError = false,
+        )
+        Spacer(Modifier.height(Space.x6))
         PinField(
             value = if (confirming) confirmPin else firstPin,
             onValueChange = {
@@ -1432,7 +1473,12 @@ private fun PinSetupPane(
             text = if (confirming) "Save PIN" else "Continue",
             onClick = {
                 if (!confirming) {
-                    if (firstPin.length != 6) localError = "PIN must be exactly 6 digits." else confirming = true
+                    localError = when {
+                        firstPin.length != 6 -> "PIN must be exactly 6 digits."
+                        isWeakPin(firstPin) -> "Choose a less predictable PIN."
+                        else -> null
+                    }
+                    if (localError == null) confirming = true
                 } else if (firstPin != confirmPin) {
                     localError = "PINs do not match."
                     confirmPin = ""
@@ -1453,6 +1499,14 @@ private fun PinSetupPane(
             enabled = !busy,
         )
     }
+}
+
+private fun isWeakPin(pin: String): Boolean {
+    if (pin.toSet().size <= 2) return true
+    val digits = pin.map { it.digitToIntOrNull() ?: return true }
+    val ascending = digits.zipWithNext().all { (a, b) -> b == (a + 1) % 10 }
+    val descending = digits.zipWithNext().all { (a, b) -> b == (a + 9) % 10 }
+    return ascending || descending
 }
 
 @Composable
@@ -1737,13 +1791,15 @@ private fun DashboardTopBar(
         )
         Spacer(Modifier.width(Space.x5))
         val status = controller.rpcStatus
-        NetworkBadge(
+        OverviewNetworkChip(
             text = status?.network ?: controller.activeRpcNetwork?.networkType ?: "mainnet",
             state = when (status?.state) {
                 RpcStatus.State.Connected -> "connected"
                 RpcStatus.State.Failed -> "failed"
                 else -> "checking"
             },
+            onClick = controller::openRpcManagement,
+            enabled = !controller.busy,
         )
         Spacer(Modifier.width(Space.x5))
         IconCircleButton(
@@ -1751,6 +1807,45 @@ private fun DashboardTopBar(
             contentDescription = "Settings",
             onClick = controller::openSettings,
             enabled = !controller.busy,
+        )
+    }
+}
+
+@Composable
+private fun OverviewNetworkChip(
+    text: String,
+    state: String?,
+    onClick: () -> Unit,
+    enabled: Boolean,
+) {
+    val borderColor = when (state) {
+        "connected" -> SurfaceRaised
+        "failed" -> ErrorRed
+        else -> TextSecondary
+    }
+    Row(
+        modifier = Modifier
+            .height(44.dp)
+            .clip(RoundedCornerShape(Radius.md))
+            .background(if (enabled) SurfaceStrong else SurfaceMuted)
+            .border(1.dp, borderColor.copy(alpha = 0.65f), RoundedCornerShape(Radius.md))
+            .clickable(enabled = enabled, onClick = onClick)
+            .semantics { contentDescription = "Open Octra RPC network settings" }
+            .padding(horizontal = Space.x5),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        GlyphIcon(
+            glyph = Glyph.Wifi,
+            modifier = Modifier.size(16.dp),
+            color = if (state == "failed") ErrorRed else SurfaceRaised,
+        )
+        Spacer(Modifier.width(Space.x2))
+        Text(
+            text = text.lowercase(),
+            color = TextTertiary,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
         )
     }
 }
@@ -2197,6 +2292,13 @@ private fun walletTypeLabel(wallet: com.poctra.wallet.data.Wallet): String = whe
     com.poctra.wallet.data.WalletType.ImportedEthereumPrivateKey -> "Imported (EVM Key)"
 }
 
+fun walletTypeLabel(type: WalletType): String = when (type) {
+    WalletType.Generated -> "Generated"
+    WalletType.ImportedPrivateKey -> "Imported (Key)"
+    WalletType.ImportedMnemonic -> "Imported (Mnemonic)"
+    WalletType.ImportedEthereumPrivateKey -> "Imported (EVM Key)"
+}
+
 @Composable
 private fun OverviewContent(
     controller: PoctraController,
@@ -2261,6 +2363,17 @@ private fun RecentActivity(controller: PoctraController, address: String) {
     }
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text("Recent Activity", color = TextSecondary, style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(1f))
+        Text(
+            text = "All",
+            modifier = Modifier
+                .clip(RoundedCornerShape(Radius.sm))
+                .clickable(onClick = controller::openActivityCenter)
+                .padding(horizontal = Space.x4, vertical = Space.x2),
+            color = SurfaceRaised,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(Modifier.width(Space.x4))
         if (syncingActivity) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 CircularProgressIndicator(
@@ -2279,22 +2392,17 @@ private fun RecentActivity(controller: PoctraController, address: String) {
     } else if (controller.recentTransactions.isEmpty()) {
         EmptyPanel("No activity yet")
     } else {
-        Column(Modifier.fillMaxWidth()) {
-            controller.recentTransactions.forEachIndexed { index, tx ->
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(Space.x4),
+        ) {
+            controller.recentTransactions.forEach { tx ->
                 RecentActivityRow(
                     tx = tx,
                     address = address,
                     identityName = controller.identityNameForAddress(if (tx.isOutgoing(address)) tx.to else tx.from),
                     onClick = { controller.openTransactionDetails(tx) },
                 )
-                if (index != controller.recentTransactions.lastIndex) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(1.dp)
-                            .background(BorderLine),
-                    )
-                }
             }
         }
         Spacer(Modifier.height(Space.x6))
@@ -2341,8 +2449,11 @@ private fun RecentActivityRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .clip(RoundedCornerShape(Radius.md))
+            .background(SurfaceStrong)
+            .border(1.dp, BorderLine.copy(alpha = 0.72f), RoundedCornerShape(Radius.md))
             .clickable(onClick = onClick)
-            .padding(vertical = Space.x6),
+            .padding(Space.x5),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
@@ -2416,7 +2527,7 @@ private fun OpTypeBadge(text: String) {
                 },
             )
             .border(1.dp, BorderLine, RoundedCornerShape(Radius.sm))
-            .padding(horizontal = Space.x3, vertical = 0.dp),
+            .padding(horizontal = Space.x3, vertical = Space.x1),
         color = TextTertiary,
         style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 12.sp),
         maxLines = 1,
@@ -2591,12 +2702,6 @@ private fun TradeContent(controller: PoctraController) {
     var showReview by remember { mutableStateOf(false) }
     var openedReviewKey by remember { mutableStateOf<String?>(null) }
     var dismissedReviewKey by remember { mutableStateOf<String?>(null) }
-
-    LaunchedEffect(controller.activeEvmNetwork?.id) {
-        controller.clearTradeQuote()
-        controller.refreshTrade()
-        controller.refreshTradeChart()
-    }
 
     LaunchedEffect(fromAsset, toAsset, amount, slippageBps) {
         val clean = amount.replace(",", ".").trim()
@@ -2809,7 +2914,8 @@ private fun TradeMiniChart(controller: PoctraController) {
                 Spacer(Modifier.width(Space.x4))
                 SmallRefreshButton(
                     loading = controller.tradeChartLoading,
-                    onClick = { controller.refreshTradeChart() },
+                    enabled = !controller.tradeChartRefreshCoolingDown,
+                    onClick = { controller.forceRefreshTradeChart() },
                 )
             }
             Spacer(Modifier.height(Space.x5))
@@ -2856,20 +2962,25 @@ private fun TradeMiniChart(controller: PoctraController) {
 }
 
 @Composable
-private fun SmallRefreshButton(loading: Boolean, onClick: () -> Unit) {
+private fun SmallRefreshButton(loading: Boolean, onClick: () -> Unit, enabled: Boolean = true) {
+    val interactive = enabled && !loading
     Box(
         modifier = Modifier
             .size(30.dp)
             .clip(RoundedCornerShape(Radius.sm))
-            .background(SurfaceMuted)
+            .background(if (interactive) SurfaceMuted else SurfaceMuted.copy(alpha = 0.55f))
             .border(1.dp, BorderLine, RoundedCornerShape(Radius.sm))
-            .clickable(enabled = !loading, onClick = onClick),
+            .clickable(enabled = interactive, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         if (loading) {
             CircularProgressIndicator(modifier = Modifier.size(14.dp), color = SurfaceRaised, strokeWidth = 2.dp)
         } else {
-            GlyphIcon(Glyph.Refresh, modifier = Modifier.size(15.dp), color = TextTertiary)
+            GlyphIcon(
+                Glyph.Refresh,
+                modifier = Modifier.size(15.dp),
+                color = if (interactive) TextTertiary else TextSecondary,
+            )
         }
     }
 }
@@ -3040,7 +3151,7 @@ private fun TradeSwapCard(
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
         border = BorderStroke(1.dp, BorderLine),
     ) {
-        Column(Modifier.padding(Space.x7)) {
+        Column(Modifier.padding(Space.x6)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("Swap", color = TextTertiary, fontWeight = FontWeight.SemiBold)
@@ -3055,7 +3166,7 @@ private fun TradeSwapCard(
                     onClick = controller::refreshTrade,
                 )
             }
-            Spacer(Modifier.height(Space.x6))
+            Spacer(Modifier.height(Space.x5))
             TradeAssetInputRow(
                 label = "From",
                 asset = fromAsset,
@@ -3068,16 +3179,9 @@ private fun TradeSwapCard(
                 enabled = !controller.tradeBusy,
                 isError = localError != null,
             )
-            Spacer(Modifier.height(Space.x5))
-            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                IconCircleButton(
-                    glyph = Glyph.Trade,
-                    contentDescription = "Swap pair",
-                    onClick = onSwapPair,
-                    enabled = !controller.tradeBusy,
-                )
-            }
-            Spacer(Modifier.height(Space.x5))
+            Spacer(Modifier.height(Space.x4))
+            TradeSwapDirectionButton(onClick = onSwapPair, enabled = !controller.tradeBusy)
+            Spacer(Modifier.height(Space.x4))
             TradeAssetOutputRow(
                 label = "To",
                 asset = toAsset,
@@ -3088,16 +3192,20 @@ private fun TradeSwapCard(
                 enabled = !controller.tradeBusy,
             )
             if (localError != null) {
-                Spacer(Modifier.height(Space.x5))
+                Spacer(Modifier.height(Space.x4))
                 StateBanner(localError, isError = true, compact = true)
             }
-            Spacer(Modifier.height(Space.x6))
+            Spacer(Modifier.height(Space.x5))
             TradeSlippageRow(slippageBps = slippageBps, onChange = onSlippageChange, enabled = !controller.tradeBusy)
             if (controller.tradeQuote == null || controller.tradeQuoteLoading || controller.tradeQuoteError != null) {
-                Spacer(Modifier.height(Space.x6))
-                TradeQuotePanel(controller, slippageBps)
+                Spacer(Modifier.height(Space.x5))
+                TradeQuotePanel(
+                    controller = controller,
+                    slippageBps = slippageBps,
+                    onRetry = { controller.requestTradeQuote(fromAsset, toAsset, amount, slippageBps) },
+                )
             }
-            Spacer(Modifier.height(Space.x7))
+            Spacer(Modifier.height(Space.x6))
             PoctraButton(
                 text = "Swap",
                 onClick = onSubmit,
@@ -3610,34 +3718,40 @@ private fun TradeAssetInputRow(
     enabled: Boolean,
     isError: Boolean,
 ) {
-    Column {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(label, color = TextSecondary, style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(1f))
-            Text(
-                "Balance $balance ${asset.symbol}",
-                color = TextSecondary,
-                style = MaterialTheme.typography.labelSmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        Spacer(Modifier.height(Space.x4))
-        Row(horizontalArrangement = Arrangement.spacedBy(Space.x5), verticalAlignment = Alignment.CenterVertically) {
-            TradeAssetSelector(
-                asset = asset,
-                selectableAssets = selectableAssets,
-                onSelect = onAssetChange,
-                enabled = enabled,
-                modifier = Modifier.weight(1.12f),
-            )
-            TradeAmountField(
-                value = amount,
-                onValueChange = { raw -> onAmountChange(raw.filter { it.isDigit() || it == '.' || it == ',' }) },
-                modifier = Modifier.weight(1.18f),
-                isError = isError,
-                enabled = enabled,
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(Radius.md),
+        colors = CardDefaults.cardColors(containerColor = SurfaceBase),
+        border = BorderStroke(1.dp, if (isError) ErrorRed else BorderLine),
+    ) {
+        Column(Modifier.padding(horizontal = Space.x5, vertical = Space.x4)) {
+            TradeAssetPanelHeader(
+                label = label,
+                balanceLabel = "Balance $balance ${asset.symbol}",
+                showMax = true,
+                maxEnabled = enabled,
                 onMax = onMax,
             )
+            Spacer(Modifier.height(Space.x3))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(Space.x4),
+            ) {
+                TradeAmountField(
+                    value = amount,
+                    onValueChange = { raw -> onAmountChange(raw.filter { it.isDigit() || it == '.' || it == ',' }) },
+                    modifier = Modifier.weight(1f),
+                    enabled = enabled,
+                )
+                TradeAssetSelector(
+                    asset = asset,
+                    selectableAssets = selectableAssets,
+                    onSelect = onAssetChange,
+                    enabled = enabled,
+                    modifier = Modifier.width(128.dp),
+                )
+            }
         }
     }
 }
@@ -3646,52 +3760,116 @@ private fun TradeAssetInputRow(
 private fun TradeAmountField(
     value: String,
     onValueChange: (String) -> Unit,
-    isError: Boolean,
     enabled: Boolean,
-    onMax: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Card(
-        modifier = modifier.height(58.dp),
-        shape = RoundedCornerShape(Radius.md),
-        colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-        border = BorderStroke(1.dp, if (isError) ErrorRed else BorderLine),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = Space.x5),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            BasicTextField(
-                value = value,
-                onValueChange = onValueChange,
-                modifier = Modifier.weight(1f),
-                enabled = enabled,
-                singleLine = true,
-                textStyle = MaterialTheme.typography.bodyLarge.copy(color = TextTertiary, fontWeight = FontWeight.SemiBold),
-                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                cursorBrush = SolidColor(SurfaceRaised),
-                decorationBox = { innerTextField ->
-                    Box {
-                        if (value.isBlank()) {
-                            Text("0.0", color = TextSecondary, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
-                        }
-                        innerTextField()
-                    }
-                },
-            )
+    BasicTextField(
+        value = value,
+        onValueChange = onValueChange,
+        modifier = modifier.height(42.dp),
+        enabled = enabled,
+        singleLine = true,
+        textStyle = MaterialTheme.typography.titleMedium.copy(
+            color = TextTertiary,
+            fontWeight = FontWeight.SemiBold,
+        ),
+        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+        cursorBrush = SolidColor(SurfaceRaised),
+        decorationBox = { innerTextField ->
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                if (value.isBlank()) {
+                    Text(
+                        "0.0",
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+                innerTextField()
+            }
+        },
+    )
+}
+
+@Composable
+private fun TradeAssetPanelHeader(
+    label: String,
+    balanceLabel: String,
+    showMax: Boolean,
+    maxEnabled: Boolean,
+    onMax: (() -> Unit)?,
+) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            label,
+            color = TextSecondary,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.weight(0.42f),
+            maxLines = 1,
+        )
+        Text(
+            balanceLabel,
+            color = TextSecondary,
+            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 11.sp),
+            modifier = Modifier.weight(1f),
+            textAlign = TextAlign.End,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (showMax && onMax != null) {
+            Spacer(Modifier.width(Space.x3))
             Text(
                 "Max",
                 modifier = Modifier
                     .clip(RoundedCornerShape(Radius.sm))
-                    .clickable(enabled = enabled, onClick = onMax)
-                    .padding(horizontal = Space.x3, vertical = Space.x2),
-                color = if (enabled) SurfaceRaised else TextSecondary,
-                style = MaterialTheme.typography.labelSmall,
+                    .clickable(enabled = maxEnabled, onClick = onMax)
+                    .padding(horizontal = Space.x2, vertical = Space.x1),
+                color = if (maxEnabled) SurfaceRaised else TextSecondary,
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 11.sp),
                 fontWeight = FontWeight.SemiBold,
             )
         }
+    }
+}
+
+@Composable
+private fun TradeSwapDirectionButton(onClick: () -> Unit, enabled: Boolean) {
+    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Box(
+            modifier = Modifier
+                .size(34.dp)
+                .clip(RoundedCornerShape(Radius.md))
+                .background(if (enabled) SurfaceBase else SurfaceMuted)
+                .border(1.dp, BorderLine, RoundedCornerShape(Radius.md))
+                .clickable(enabled = enabled, onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            GlyphIcon(
+                Glyph.Trade,
+                modifier = Modifier.size(15.dp),
+                color = if (enabled) TextTertiary else TextSecondary.copy(alpha = 0.45f),
+            )
+        }
+    }
+}
+
+@Composable
+private fun TradeOutputAmount(value: String, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier.height(42.dp),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(
+            text = value.ifBlank { "0.0" },
+            color = if (value.isBlank()) TextSecondary else TextTertiary,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -3705,42 +3883,37 @@ private fun TradeAssetOutputRow(
     onAssetChange: (TradeAsset) -> Unit,
     enabled: Boolean,
 ) {
-    Column {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(label, color = TextSecondary, style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(1f))
-            Text("Balance $balance ${asset.symbol}", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
-        }
-        Spacer(Modifier.height(Space.x4))
-        Row(horizontalArrangement = Arrangement.spacedBy(Space.x5), verticalAlignment = Alignment.CenterVertically) {
-            TradeAssetSelector(
-                asset = asset,
-                selectableAssets = selectableAssets,
-                onSelect = onAssetChange,
-                enabled = enabled,
-                modifier = Modifier.weight(1.12f),
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(Radius.md),
+        colors = CardDefaults.cardColors(containerColor = SurfaceMuted.copy(alpha = 0.48f)),
+        border = BorderStroke(1.dp, BorderLine),
+    ) {
+        Column(Modifier.padding(horizontal = Space.x5, vertical = Space.x4)) {
+            TradeAssetPanelHeader(
+                label = label,
+                balanceLabel = "Balance $balance ${asset.symbol}",
+                showMax = false,
+                maxEnabled = false,
+                onMax = null,
             )
-            Card(
-                modifier = Modifier
-                    .weight(1.18f)
-                    .height(58.dp),
-                shape = RoundedCornerShape(Radius.md),
-                colors = CardDefaults.cardColors(containerColor = SurfaceMuted.copy(alpha = 0.6f)),
-                border = BorderStroke(1.dp, BorderLine),
+            Spacer(Modifier.height(Space.x3))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(Space.x4),
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = Space.x6),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = amount.ifBlank { "0.0" },
-                        color = if (amount.isBlank()) TextSecondary else TextTertiary,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
+                TradeOutputAmount(
+                    value = amount,
+                    modifier = Modifier.weight(1f),
+                )
+                TradeAssetSelector(
+                    asset = asset,
+                    selectableAssets = selectableAssets,
+                    onSelect = onAssetChange,
+                    enabled = enabled,
+                    modifier = Modifier.width(128.dp),
+                )
             }
         }
     }
@@ -3759,26 +3932,37 @@ private fun TradeAssetSelector(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(58.dp)
+                .height(42.dp)
                 .clip(RoundedCornerShape(Radius.md))
-                .background(SurfaceBase)
+                .background(SurfaceStrong)
                 .border(1.dp, BorderLine, RoundedCornerShape(Radius.md))
                 .clickable(enabled = enabled) { expanded = true }
-                .padding(horizontal = Space.x5),
+                .padding(horizontal = Space.x4),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             TradeAssetIcon(asset)
-            Spacer(Modifier.width(Space.x4))
-            Text(
-                tradeAssetLabel(asset),
-                color = TextTertiary,
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.SemiBold,
+            Spacer(Modifier.width(Space.x3))
+            Column(
                 modifier = Modifier.weight(1f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            GlyphIcon(Glyph.ChevronDown, modifier = Modifier.size(14.dp), color = TextSecondary)
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Text(
+                    asset.symbol,
+                    color = TextTertiary,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    asset.displayName,
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 8.sp, lineHeight = 9.sp),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            GlyphIcon(Glyph.ChevronDown, modifier = Modifier.size(12.dp), color = TextSecondary)
         }
         DropdownMenu(
             expanded = expanded,
@@ -3802,7 +3986,7 @@ private fun TradeAssetSelector(
 private fun TradeAssetIcon(asset: TradeAsset) {
     Box(
         modifier = Modifier
-            .size(28.dp)
+            .size(24.dp)
             .clip(RoundedCornerShape(Radius.sm))
             .background(if (asset == TradeAsset.WOCT) SurfaceRaised.copy(alpha = 0.18f) else SurfaceMuted),
         contentAlignment = Alignment.Center,
@@ -3811,13 +3995,13 @@ private fun TradeAssetIcon(asset: TradeAsset) {
             Image(
                 painter = painterResource(com.poctra.wallet.R.drawable.octra_logo),
                 contentDescription = "wOCT",
-                modifier = Modifier.size(17.dp),
+                modifier = Modifier.size(14.dp),
             )
         } else {
             Image(
                 painter = painterResource(tradeAssetIconRes(asset)),
                 contentDescription = asset.symbol,
-                modifier = Modifier.size(18.dp),
+                modifier = Modifier.size(15.dp),
             )
         }
     }
@@ -3852,7 +4036,11 @@ private fun TradeSlippageRow(slippageBps: Int, onChange: (Int) -> Unit, enabled:
 }
 
 @Composable
-private fun TradeQuotePanel(controller: PoctraController, slippageBps: Int) {
+private fun TradeQuotePanel(
+    controller: PoctraController,
+    slippageBps: Int,
+    onRetry: () -> Unit,
+) {
     when {
         controller.tradeQuoteLoading -> {
             Row(
@@ -3867,7 +4055,12 @@ private fun TradeQuotePanel(controller: PoctraController, slippageBps: Int) {
             }
         }
         controller.tradeQuoteError != null -> {
-            TradeInfoHint(controller.tradeQuoteError.orEmpty(), isError = true)
+            TradeInfoHint(
+                text = controller.tradeQuoteError.orEmpty(),
+                isError = true,
+                onRetry = onRetry,
+                retryEnabled = !controller.tradeQuoteLoading,
+            )
         }
         controller.tradeQuote != null -> {
             val quote = controller.tradeQuote ?: return
@@ -3895,7 +4088,12 @@ private fun TradeQuotePanel(controller: PoctraController, slippageBps: Int) {
 }
 
 @Composable
-private fun TradeInfoHint(text: String, isError: Boolean) {
+private fun TradeInfoHint(
+    text: String,
+    isError: Boolean,
+    onRetry: (() -> Unit)? = null,
+    retryEnabled: Boolean = true,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -3917,6 +4115,17 @@ private fun TradeInfoHint(text: String, isError: Boolean) {
             style = MaterialTheme.typography.labelSmall,
             modifier = Modifier.weight(1f),
         )
+        if (onRetry != null) {
+            Spacer(Modifier.width(Space.x4))
+            PoctraButton(
+                text = "Retry",
+                onClick = onRetry,
+                variant = ButtonVariant.Ghost,
+                compact = true,
+                enabled = retryEnabled,
+                leadingGlyph = Glyph.Refresh,
+            )
+        }
     }
 }
 
@@ -3935,8 +4144,8 @@ private fun ExploreDAppsContent(controller: PoctraController) {
     val sites = listOf(
         DAppSite(
             title = "Octra Identity",
-            url = "https://devnet.octra.id",
-            subtitle = "Devnet identity dApp",
+            url = "https://octra.id",
+            subtitle = "Octra identity dApp",
             iconRes = com.poctra.wallet.R.drawable.ic_octra_identity,
         ),
     )
@@ -4055,6 +4264,7 @@ private fun BrowserToolbarButton(
 
 @Composable
 @SuppressLint("SetJavaScriptEnabled")
+@Suppress("DEPRECATION")
 private fun DAppBrowserScreen(controller: PoctraController) {
     val url = controller.selectedDAppUrl.ifBlank { "https://octra.org" }
     val displayUrl = controller.circleDisplayUrl()
@@ -4129,6 +4339,14 @@ private fun DAppBrowserScreen(controller: PoctraController) {
                                         controller.openDAppBrowser("oct://", nextUrl)
                                         return true
                                     }
+                                    if (request.isForMainFrame) {
+                                        val allowed = runCatching { DAppUrlPolicy.normalizeBrowserUrl(nextUrl) }.isSuccess
+                                        if (!allowed) {
+                                            pageLoading = false
+                                            pageError = "This dApp URL is blocked by Phishing Guard."
+                                            return true
+                                        }
+                                    }
                                     return false
                                 }
 
@@ -4175,12 +4393,16 @@ private fun DAppBrowserScreen(controller: PoctraController) {
                             settings.setSupportMultipleWindows(false)
                             settings.allowFileAccess = false
                             settings.allowContentAccess = false
+                            settings.allowFileAccessFromFileURLs = false
+                            settings.allowUniversalAccessFromFileURLs = false
                             settings.mediaPlaybackRequiresUserGesture = true
+                            isSaveEnabled = false
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                                 settings.safeBrowsingEnabled = true
                             }
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                                 settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                                CookieManager.getInstance().setAcceptThirdPartyCookies(this, false)
                             }
                             addJavascriptInterface(
                                 PoctraProviderBridge(
@@ -4284,6 +4506,15 @@ private fun dAppWebResourceResponse(
     if (!scheme.equals("http", ignoreCase = true) && !scheme.equals("https", ignoreCase = true)) return null
     if (requestUri.host.equals(PoctraController.CircleBrowserHost, ignoreCase = true)) return null
 
+    runCatching { DAppUrlPolicy.normalizeBrowserUrl(requestUri.toString()) }.getOrElse { error ->
+        return circleHtmlResponse(
+            title = "Blocked dApp URL",
+            message = error.message ?: "This dApp URL is blocked by Phishing Guard.",
+            statusCode = 403,
+            reasonPhrase = "Forbidden",
+        )
+    }
+
     return runCatching {
         injectedDAppDocumentResponse(
             url = requestUri.toString(),
@@ -4299,7 +4530,7 @@ private fun injectedDAppDocumentResponse(
     bridgeToken: String,
 ): WebResourceResponse? {
     val connection = (URL(url).openConnection() as HttpURLConnection).apply {
-        instanceFollowRedirects = true
+        instanceFollowRedirects = false
         connectTimeout = 10_000
         readTimeout = 15_000
         requestMethod = "GET"
@@ -4319,7 +4550,8 @@ private fun injectedDAppDocumentResponse(
                 value.isNotBlank() &&
                 !key.equals("Host", ignoreCase = true) &&
                 !key.equals("Accept-Encoding", ignoreCase = true) &&
-                !key.equals("Content-Length", ignoreCase = true)
+                !key.equals("Content-Length", ignoreCase = true) &&
+                !key.equals("Cookie", ignoreCase = true)
             ) {
                 setRequestProperty(key, value)
             }
@@ -4329,37 +4561,83 @@ private fun injectedDAppDocumentResponse(
         }
     }
 
-    val statusCode = connection.responseCode.takeIf { it >= 100 } ?: 200
-    val reasonPhrase = connection.responseMessage?.takeIf { it.isNotBlank() } ?: "OK"
-    val contentType = connection.contentType.orEmpty()
-    val mimeType = contentType.substringBefore(';').trim().ifBlank { "text/html" }
-    val charsetName = responseCharset(contentType)
-    val source = if (statusCode >= 400) connection.errorStream else connection.inputStream
-    val body = source?.use { it.readBytes() } ?: ByteArray(0)
-    val headers = filteredWebHeaders(connection.headerFields)
+    return try {
+        val statusCode = connection.responseCode.takeIf { it >= 100 } ?: 200
+        val reasonPhrase = connection.responseMessage?.takeIf { it.isNotBlank() } ?: "OK"
+        if (statusCode in 300..399) {
+            dAppRedirectResponse(url, connection.getHeaderField("Location"))
+        } else {
+            val contentType = connection.contentType.orEmpty()
+            val mimeType = contentType.substringBefore(';').trim().ifBlank { "text/html" }
+            val charsetName = responseCharset(contentType)
+            val source = if (statusCode >= 400) connection.errorStream else connection.inputStream
+            val body = source?.use { it.readBytes() } ?: ByteArray(0)
+            val headers = filteredWebHeaders(connection.headerFields)
 
-    return if (mimeType.equals("text/html", ignoreCase = true) || mimeType.equals("application/xhtml+xml", ignoreCase = true)) {
-        val charset = runCatching { Charset.forName(charsetName) }.getOrDefault(Charsets.UTF_8)
-        val html = body.toString(charset)
-        val injected = injectDAppProviderRuntime(html, bridgeToken).toByteArray(charset)
-        WebResourceResponse(
-            mimeType,
-            charsetName,
-            statusCode,
-            reasonPhrase,
-            headers + mapOf("Cache-Control" to "no-store"),
-            ByteArrayInputStream(injected),
-        )
-    } else {
-        WebResourceResponse(
-            mimeType,
-            charsetName,
-            statusCode,
-            reasonPhrase,
-            headers,
-            ByteArrayInputStream(body),
+            if (mimeType.equals("text/html", ignoreCase = true) || mimeType.equals("application/xhtml+xml", ignoreCase = true)) {
+                val charset = runCatching { Charset.forName(charsetName) }.getOrDefault(Charsets.UTF_8)
+                val html = body.toString(charset)
+                val injected = injectDAppProviderRuntime(html, bridgeToken).toByteArray(charset)
+                WebResourceResponse(
+                    mimeType,
+                    charsetName,
+                    statusCode,
+                    reasonPhrase,
+                    headers + mapOf("Cache-Control" to "no-store"),
+                    ByteArrayInputStream(injected),
+                )
+            } else {
+                WebResourceResponse(
+                    mimeType,
+                    charsetName,
+                    statusCode,
+                    reasonPhrase,
+                    headers,
+                    ByteArrayInputStream(body),
+                )
+            }
+        }
+    } finally {
+        connection.disconnect()
+    }
+}
+
+private fun dAppRedirectResponse(baseUrl: String, location: String?): WebResourceResponse {
+    val targetUrl = location
+        ?.takeIf { it.isNotBlank() }
+        ?.let { runCatching { URL(URL(baseUrl), it).toString() }.getOrNull() }
+    val safeTargetUrl = targetUrl?.let {
+        runCatching { DAppUrlPolicy.normalizeBrowserUrl(it) }.getOrNull()
+    }
+    if (safeTargetUrl.isNullOrBlank()) {
+        return circleHtmlResponse(
+            title = "Blocked dApp redirect",
+            message = "This dApp tried to redirect to a URL blocked by Phishing Guard.",
+            statusCode = 403,
+            reasonPhrase = "Forbidden",
         )
     }
+
+    val html = """
+        <!doctype html>
+        <html>
+        <head>
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <meta http-equiv="refresh" content="0; url=${escapeHtml(safeTargetUrl)}" />
+        </head>
+        <body>
+          <script>window.location.replace(${JSONObject.quote(safeTargetUrl)});</script>
+        </body>
+        </html>
+    """.trimIndent()
+    return WebResourceResponse(
+        "text/html",
+        "UTF-8",
+        200,
+        "OK",
+        mapOf("Cache-Control" to "no-store", "X-Content-Type-Options" to "nosniff"),
+        ByteArrayInputStream(html.toByteArray(Charsets.UTF_8)),
+    )
 }
 
 private fun filteredWebHeaders(raw: Map<String?, List<String>>): Map<String, String> {
@@ -4633,13 +4911,25 @@ private fun poctraProviderScript(bridgeToken: String): String = """
       function dispatchEventSafely(event) {
         try { window.dispatchEvent(event); } catch (_) {}
       }
+      function customEvent(name, detail) {
+        try {
+          return new CustomEvent(name, { detail: detail });
+        } catch (_) {
+          try {
+            var event = document.createEvent('CustomEvent');
+            event.initCustomEvent(name, false, false, detail);
+            return event;
+          } catch (_) {
+            return null;
+          }
+        }
+      }
       function announceProvider(provider, info) {
-        dispatchEventSafely(new CustomEvent('octra:announceProvider', {
-          detail: { provider: provider, info: info }
-        }));
-        dispatchEventSafely(new CustomEvent('octraLoaded', {
-          detail: { provider: provider, info: info }
-        }));
+        var detail = { provider: provider, info: info };
+        var announceEvent = customEvent('octra:announceProvider', detail);
+        if (announceEvent) dispatchEventSafely(announceEvent);
+        var loadedEvent = customEvent('octraLoaded', detail);
+        if (loadedEvent) dispatchEventSafely(loadedEvent);
         dispatchEventSafely(new Event('octra#initialized'));
         dispatchEventSafely(new Event('poctra#initialized'));
       }
@@ -4756,8 +5046,14 @@ private fun poctraProviderScript(bridgeToken: String): String = """
             params: params === undefined ? [{ permissions: ['read_address', 'read_balance', 'read_public_key', 'contract_calls'] }] : params
           });
         },
+        requestAccounts: function (params) {
+          return provider.connect(params);
+        },
         enable: function () {
           return provider.connect();
+        },
+        disconnect: function () {
+          return provider.request({ method: 'octra_disconnect' });
         }
       };
       function emit(event) {
@@ -4774,12 +5070,17 @@ private fun poctraProviderScript(bridgeToken: String): String = """
         announceProvider(provider, info);
       }
       window.addEventListener('octra:requestProvider', announce);
+      document.addEventListener('DOMContentLoaded', announce);
+      window.addEventListener('load', announce);
+      window.addEventListener('focus', announce);
       announce();
       setTimeout(announce, 0);
       setTimeout(announce, 250);
       setTimeout(announce, 1000);
       setTimeout(announce, 2500);
       setTimeout(announce, 5000);
+      setTimeout(announce, 9000);
+      setTimeout(announce, 15000);
     })();
 """.trimIndent()
 
@@ -4987,7 +5288,7 @@ private fun WalletActionButton(
 }
 
 @Composable
-private fun EmptyPanel(text: String) {
+fun EmptyPanel(text: String) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -5168,6 +5469,17 @@ private fun SendScreen(controller: PoctraController) {
                 enabled = !controller.feeLoading,
                 loading = controller.feeLoading,
             )
+        }
+        val sendRisks = controller.octraRecipientRiskItems(
+            recipientInput = recipient,
+            resolvedAddress = recipientLookup.resolution?.address,
+            amount = amount,
+        )
+        if (sendRisks.isNotEmpty()) {
+            Spacer(Modifier.height(Space.x6))
+            Column(verticalArrangement = Arrangement.spacedBy(Space.x4)) {
+                sendRisks.forEach { ConsumerRiskRow(it) }
+            }
         }
         Spacer(Modifier.height(Space.x6))
         PoctraButton(
@@ -5450,6 +5762,17 @@ private fun SendAssetScreen(controller: PoctraController) {
             "Token transfer uses a contract call, so OCT is required for gas.",
             isError = false,
         )
+        val assetSendRisks = controller.octraRecipientRiskItems(
+            recipientInput = recipient,
+            resolvedAddress = recipientLookup.resolution?.address,
+            amount = "",
+        )
+        if (assetSendRisks.isNotEmpty()) {
+            Spacer(Modifier.height(Space.x6))
+            Column(verticalArrangement = Arrangement.spacedBy(Space.x4)) {
+                assetSendRisks.forEach { ConsumerRiskRow(it) }
+            }
+        }
         Spacer(Modifier.height(Space.x8))
         PoctraButton(
             text = "Send ${token.symbol}",
@@ -5514,7 +5837,9 @@ private fun ReceiveScreen(controller: PoctraController) {
         QrCodeView(text = wallet.address)
         Spacer(Modifier.height(Space.x7))
         Card(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = controller::toggleDarkMode),
             shape = RoundedCornerShape(Radius.md),
             colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
             border = BorderStroke(1.dp, BorderLine),
@@ -5535,6 +5860,14 @@ private fun ReceiveScreen(controller: PoctraController) {
             },
             modifier = Modifier.fillMaxWidth(),
             leadingGlyph = Glyph.Copy,
+        )
+        Spacer(Modifier.height(Space.x5))
+        PoctraButton(
+            text = "Request Payment",
+            onClick = controller::openPaymentRequest,
+            modifier = Modifier.fillMaxWidth(),
+            variant = ButtonVariant.Ghost,
+            leadingGlyph = Glyph.Receive,
         )
     }
 }
@@ -5697,6 +6030,7 @@ private fun BridgeScreen(controller: PoctraController) {
             gasEstimate = controller.bridgeEvmGasEstimate,
             gasLoading = controller.bridgeGasLoading,
             started = dialogStarted,
+            onRetryGas = { controller.refreshBridgeReviewEstimates(dialogAmount) },
             onDismiss = {
                 showReview = false
                 if (!controller.bridgeBusy) reviewStarted = false
@@ -5893,7 +6227,7 @@ private fun BridgeHistoryScreen(controller: PoctraController) {
             EmptyPanel("No bridge history yet")
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(Space.x5)) {
-                controller.bridgeHistory.forEach { item ->
+                controller.visibleBridgeHistory.forEach { item ->
                     BridgeHistoryRow(
                         item = item,
                         busy = controller.bridgeBusy,
@@ -5907,6 +6241,16 @@ private fun BridgeHistoryScreen(controller: PoctraController) {
                         onOpenEvm = item.evmTxHash?.let { hash ->
                             { controller.openDAppBrowser("Ethereum Bridge", "https://etherscan.io/tx/$hash") }
                         },
+                    )
+                }
+                if (controller.bridgeHistoryCanLoadMore) {
+                    PoctraButton(
+                        text = "Load More",
+                        onClick = controller::loadMoreBridgeHistory,
+                        modifier = Modifier.fillMaxWidth(),
+                        variant = ButtonVariant.Ghost,
+                        leadingGlyph = Glyph.Refresh,
+                        compact = true,
                     )
                 }
             }
@@ -5942,6 +6286,7 @@ private fun BridgeHistoryScreen(controller: PoctraController) {
             showBridgeDetails = reviewItem.direction != BridgeDirection.OctToWoct,
             showOctraFee = false,
             showEvmGas = reviewItem.direction == BridgeDirection.OctToWoct,
+            onRetryGas = { controller.refreshBridgeReviewEstimates(dialogAmount) },
             onDismiss = {
                 if (!controller.bridgeBusy) reviewItemId = null
                 controller.dismissBridgeDialog()
@@ -6448,6 +6793,7 @@ private fun BridgeReviewSheet(
     showBridgeDetails: Boolean = true,
     showOctraFee: Boolean = direction == BridgeDirection.OctToWoct,
     showEvmGas: Boolean = true,
+    onRetryGas: () -> Unit,
     onDismiss: () -> Unit,
     onConfirm: (Long, String?) -> Unit,
 ) {
@@ -6546,6 +6892,7 @@ private fun BridgeReviewSheet(
                             showBridgeDetails = showBridgeDetails,
                             showOctraFee = showOctraFee,
                             showEvmGas = showEvmGas,
+                            onRetryGas = onRetryGas,
                         )
                         Spacer(Modifier.height(Space.x6))
                         Row(horizontalArrangement = Arrangement.spacedBy(Space.x5)) {
@@ -6600,6 +6947,7 @@ private fun BridgeReviewContent(
     showBridgeDetails: Boolean,
     showOctraFee: Boolean,
     showEvmGas: Boolean,
+    onRetryGas: () -> Unit,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Box(
@@ -6654,6 +7002,7 @@ private fun BridgeReviewContent(
         onCustomGasChange = onCustomGasChange,
         showOctraFee = showOctraFee,
         showEvmGas = showEvmGas,
+        onRetryGas = onRetryGas,
     )
     if (note.isNotBlank()) {
         Spacer(Modifier.height(Space.x5))
@@ -6681,6 +7030,7 @@ private fun BridgeReviewFeePanel(
     onCustomGasChange: (String) -> Unit,
     showOctraFee: Boolean,
     showEvmGas: Boolean,
+    onRetryGas: () -> Unit,
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -6745,7 +7095,22 @@ private fun BridgeReviewFeePanel(
                 }
                 Spacer(Modifier.height(Space.x3))
                 if (gasEstimate == null) {
-                    StateBanner("Gas estimate unavailable. The bridge will use the active RPC gas price.", isError = false, compact = true)
+                    StateBanner(
+                        text = if (gasLoading) "Fetching gas estimate..." else "Gas estimate unavailable. The bridge will use the active RPC gas price.",
+                        isError = false,
+                        compact = true,
+                    )
+                    if (!gasLoading) {
+                        Spacer(Modifier.height(Space.x4))
+                        PoctraButton(
+                            text = "Retry Gas",
+                            onClick = onRetryGas,
+                            modifier = Modifier.fillMaxWidth(),
+                            variant = ButtonVariant.Ghost,
+                            compact = true,
+                            leadingGlyph = Glyph.Refresh,
+                        )
+                    }
                 } else {
                     BridgeFeePresetRow(
                         selected = selectedGas,
@@ -7510,10 +7875,6 @@ private fun bridgeStepIndex(direction: BridgeDirection, currentStep: BridgeStep)
 
 @Composable
 private fun EvmWalletScreen(controller: PoctraController) {
-    LaunchedEffect(Unit) {
-        controller.refreshEvmDashboard()
-    }
-
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -7625,10 +7986,6 @@ private fun EvmWalletScreen(controller: PoctraController) {
 
 @Composable
 private fun EvmActivityScreen(controller: PoctraController) {
-    LaunchedEffect(Unit) {
-        controller.refreshEvmHistory()
-    }
-
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -7677,10 +8034,6 @@ private fun EvmSendScreen(controller: PoctraController) {
     }
     var localError by remember { mutableStateOf<String?>(null) }
     val recipientLookup = rememberEvmRecipientLookup(controller, recipient)
-
-    LaunchedEffect(Unit) {
-        controller.refreshEvmAccount()
-    }
 
     Column(
         modifier = Modifier
@@ -7767,6 +8120,17 @@ private fun EvmSendScreen(controller: PoctraController) {
                 }
             },
         )
+        val evmSendRisks = controller.evmSendPreflightItems(
+            recipientInput = recipient,
+            resolvedAddress = recipientLookup.resolution?.address,
+            amount = if (selectedNft != null) "0" else amount,
+        )
+        if (evmSendRisks.isNotEmpty()) {
+            Spacer(Modifier.height(Space.x6))
+            Column(verticalArrangement = Arrangement.spacedBy(Space.x4)) {
+                evmSendRisks.forEach { ConsumerRiskRow(it) }
+            }
+        }
         Spacer(Modifier.height(Space.x6))
         EvmGasInfoCard(controller = controller, selectedToken = selectedToken, selectedNft = selectedNft)
     }
@@ -7775,10 +8139,6 @@ private fun EvmSendScreen(controller: PoctraController) {
 @Composable
 private fun EvmReceiveScreen(controller: PoctraController) {
     val clipboard = LocalClipboardManager.current
-
-    LaunchedEffect(Unit) {
-        controller.refreshEvmAccount()
-    }
 
     Column(
         modifier = Modifier
@@ -8794,13 +9154,13 @@ private fun EvmActivityList(controller: PoctraController) {
             Spacer(Modifier.height(Space.x5))
         }
         Column(Modifier.fillMaxWidth()) {
-            controller.evmTransactions.forEachIndexed { index, tx ->
+            controller.visibleEvmTransactions.forEachIndexed { index, tx ->
                 EvmActivityRow(
                     tx = tx,
                     address = controller.evmAccount?.address.orEmpty(),
                     onClick = { controller.openEvmTransaction(tx) },
                 )
-                if (index != controller.evmTransactions.lastIndex) {
+                if (index != controller.visibleEvmTransactions.lastIndex) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -8809,6 +9169,17 @@ private fun EvmActivityList(controller: PoctraController) {
                     )
                 }
             }
+        }
+        if (controller.evmActivityCanLoadMore) {
+            Spacer(Modifier.height(Space.x5))
+            PoctraButton(
+                text = "Load More",
+                onClick = controller::loadMoreEvmActivity,
+                modifier = Modifier.fillMaxWidth(),
+                variant = ButtonVariant.Ghost,
+                leadingGlyph = Glyph.Refresh,
+                compact = true,
+            )
         }
     }
 }
@@ -9236,7 +9607,7 @@ private fun TransactionDetailsScreen(controller: PoctraController) {
 }
 
 @Composable
-private fun DetailLine(
+fun DetailLine(
     label: String,
     value: String,
     actionLabel: String? = null,
@@ -9268,7 +9639,7 @@ private fun DetailLine(
 }
 
 @Composable
-private fun DetailSeparator() {
+fun DetailSeparator() {
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -9393,11 +9764,24 @@ private fun SettingsScreen(controller: PoctraController) {
         )
         Spacer(Modifier.height(Space.x8))
         Column(verticalArrangement = Arrangement.spacedBy(Space.x5)) {
+            SettingsSectionTitle("Wallet")
             SettingsDestinationButton(
-                title = "RPC Management",
-                subtitle = controller.activeRpcNetwork?.let { "${it.name} - ${it.networkType}" } ?: controller.currentRpcUrl,
-                glyph = Glyph.Wifi,
-                onClick = controller::openRpcManagement,
+                title = "Portfolio",
+                subtitle = if (controller.portfolioHoldings.isEmpty()) "Track wallet value" else "${controller.portfolioHoldings.size} holdings",
+                glyph = Glyph.Assets,
+                onClick = controller::openPortfolioAnalytics,
+            )
+            SettingsDestinationButton(
+                title = "Octra Profile",
+                subtitle = controller.wallet?.address?.let { controller.walletIdentityNames[it] ?: shortAddress(it) } ?: "Identity and addresses",
+                glyph = Glyph.Wallet,
+                onClick = controller::openOctraProfile,
+            )
+            SettingsDestinationButton(
+                title = "Activity Center",
+                subtitle = if (controller.unifiedActivity.isEmpty()) "Review all wallet activity" else "${controller.unifiedActivity.size} recent events",
+                glyph = Glyph.History,
+                onClick = controller::openActivityCenter,
             )
             SettingsDestinationButton(
                 title = "Address Book",
@@ -9405,11 +9789,12 @@ private fun SettingsScreen(controller: PoctraController) {
                 glyph = Glyph.AddressBook,
                 onClick = controller::openAddressBook,
             )
+            SettingsSectionTitle("Security")
             SettingsDestinationButton(
-                title = "Octra Identity Provider",
-                subtitle = controller.activeIdentityProvider?.let { "${it.name} - ${shortAddress(it.contractAddress)}" } ?: "Resolve foo.oct recipients",
-                glyph = Glyph.Browser,
-                onClick = controller::openIdentityProviderSettings,
+                title = "Security Center",
+                subtitle = securityCenterSubtitle(controller),
+                glyph = Glyph.Fingerprint,
+                onClick = controller::openSecurityCenter,
             )
             SettingsDestinationButton(
                 title = "Update Security",
@@ -9424,16 +9809,67 @@ private fun SettingsScreen(controller: PoctraController) {
                 onClick = controller::openBackupSettings,
             )
             SettingsDestinationButton(
+                title = "Recovery Plan",
+                subtitle = "Backup, lock, and restore readiness",
+                glyph = Glyph.Download,
+                onClick = controller::openRecoveryPlan,
+            )
+            SettingsDestinationButton(
+                title = "Transaction Simulation",
+                subtitle = "Preflight network, recipient, and gas checks",
+                glyph = Glyph.Check,
+                onClick = controller::openSimulationCenter,
+            )
+            SettingsDestinationButton(
+                title = "Approvals",
+                subtitle = "Review ERC20 spending permissions",
+                glyph = Glyph.Revoke,
+                onClick = controller::openApprovalDashboard,
+            )
+            SettingsDestinationButton(
+                title = "Phishing Guard",
+                subtitle = "${controller.domainGuardRules.count { !it.trusted }} blocked, ${controller.domainGuardRules.count { it.trusted }} trusted",
+                glyph = Glyph.Browser,
+                onClick = controller::openDomainGuard,
+            )
+            SettingsSectionTitle("Networks")
+            SettingsDestinationButton(
+                title = "RPC Management",
+                subtitle = controller.activeRpcNetwork?.let { "${it.name} - ${it.networkType}" } ?: controller.currentRpcUrl,
+                glyph = Glyph.Wifi,
+                onClick = controller::openRpcManagement,
+            )
+            SettingsDestinationButton(
+                title = "Octra Identity Provider",
+                subtitle = controller.activeIdentityProvider?.let { "${it.name} - ${shortAddress(it.contractAddress)}" } ?: "Resolve foo.oct recipients",
+                glyph = Glyph.Browser,
+                onClick = controller::openIdentityProviderSettings,
+            )
+            SettingsSectionTitle("dApps")
+            SettingsDestinationButton(
                 title = "Connected dApps",
                 subtitle = if (controller.dApps.isEmpty()) "No connected dApps" else "${controller.dApps.size} connected",
                 glyph = Glyph.Explore,
                 onClick = controller::openConnectedDApps,
             )
             SettingsDestinationButton(
+                title = "Funding Providers",
+                subtitle = "Configure on-ramp and off-ramp links",
+                glyph = Glyph.External,
+                onClick = controller::openFundingProviders,
+            )
+            SettingsSectionTitle("App")
+            SettingsDestinationButton(
+                title = "Notifications",
+                subtitle = "Transaction, bridge, price, and security alerts",
+                glyph = Glyph.Info,
+                onClick = controller::openNotificationSettings,
+            )
+            SettingsDestinationButton(
                 title = "Dark Mode",
                 subtitle = if (controller.darkMode) "Dark mode enabled" else "Light mode enabled",
                 glyph = if (controller.darkMode) Glyph.Moon else Glyph.Sun,
-                onClick = controller::openAppearanceSettings,
+                onClick = controller::toggleDarkMode,
             )
             SettingsDestinationButton(
                 title = "About",
@@ -9581,6 +10017,9 @@ private fun LegacySettingsScreen(activity: Activity, controller: PoctraControlle
                                         session = session,
                                         onRevoke = { pendingRevoke = session },
                                         onPermissionsClick = { pendingPermissions = session },
+                                        riskLabels = controller.dAppRiskItems(session)
+                                            .filter { it.level.ordinal >= ConsumerRiskLevel.Warning.ordinal }
+                                            .map { it.title },
                                     )
                                 }
                             }
@@ -9658,6 +10097,19 @@ private enum class SettingsPanel {
 }
 
 @Composable
+private fun SettingsSectionTitle(title: String) {
+    Text(
+        text = title,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = Space.x4),
+        color = TextSecondary,
+        style = MaterialTheme.typography.labelSmall,
+        fontWeight = FontWeight.SemiBold,
+    )
+}
+
+@Composable
 private fun SettingsDestinationButton(
     title: String,
     subtitle: String,
@@ -9721,7 +10173,7 @@ private fun CompactScreenIntro(glyph: Glyph, description: String) {
 }
 
 @Composable
-private fun SettingsDetailScreen(
+fun SettingsDetailScreen(
     title: String,
     description: String,
     glyph: Glyph,
@@ -10066,13 +10518,17 @@ private fun AppearanceSettingsScreen(controller: PoctraController) {
         onBack = controller::closeSettingsDetail,
     ) {
         Card(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = controller::toggleDarkMode),
             shape = RoundedCornerShape(Radius.md),
             colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
             border = BorderStroke(1.dp, BorderLine),
         ) {
             Row(
-                modifier = Modifier.padding(Space.x7),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(Space.x7),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(
@@ -10094,7 +10550,6 @@ private fun AppearanceSettingsScreen(controller: PoctraController) {
                     if (controller.darkMode) "On" else "Off",
                     modifier = Modifier
                         .clip(RoundedCornerShape(Radius.sm))
-                        .clickable(onClick = controller::toggleDarkMode)
                         .background(SurfaceRaised)
                         .padding(horizontal = Space.x5, vertical = Space.x3),
                     color = PrimaryContent,
@@ -10125,6 +10580,9 @@ private fun ConnectedDAppsScreen(controller: PoctraController) {
                         session = session,
                         onRevoke = { pendingRevoke = session },
                         onPermissionsClick = { pendingPermissions = session },
+                        riskLabels = controller.dAppRiskItems(session)
+                            .filter { it.level.ordinal >= ConsumerRiskLevel.Warning.ordinal }
+                            .map { it.title },
                     )
                 }
             }
@@ -10520,6 +10978,58 @@ private fun AddressBookScreen(controller: PoctraController) {
                 }
             }
         }
+        val suggestions = controller.recentRecipientSuggestions()
+        if (suggestions.isNotEmpty() && !controller.choosingAddressBookRecipient) {
+            Spacer(Modifier.height(Space.x8))
+            Text("Recent recipients", color = TextSecondary, style = MaterialTheme.typography.labelSmall, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(Space.x5))
+            Column(verticalArrangement = Arrangement.spacedBy(Space.x5)) {
+                suggestions.forEach { suggestion ->
+                    SuggestedContactRow(
+                        contact = suggestion,
+                        onSave = { controller.saveRecentRecipient(suggestion) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SuggestedContactRow(contact: AddressBookContact, onSave: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(Radius.md),
+        colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
+        border = BorderStroke(1.dp, BorderLine),
+    ) {
+        Row(
+            modifier = Modifier.padding(Space.x6),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(RoundedCornerShape(Radius.md))
+                    .background(SurfaceRaised.copy(alpha = 0.16f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                GlyphIcon(Glyph.History, modifier = Modifier.size(18.dp), color = SurfaceRaised)
+            }
+            Spacer(Modifier.width(Space.x5))
+            Column(Modifier.weight(1f)) {
+                Text(contact.label, color = TextTertiary, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(shortAddress(contact.address), color = TextSecondary, style = MaterialTheme.typography.bodyMedium)
+            }
+            Spacer(Modifier.width(Space.x4))
+            PoctraButton(
+                text = "Save",
+                onClick = onSave,
+                compact = true,
+                variant = ButtonVariant.Ghost,
+                leadingGlyph = Glyph.Plus,
+            )
+        }
     }
 }
 
@@ -10804,7 +11314,7 @@ private fun AboutScreen(controller: PoctraController) {
             border = BorderStroke(1.dp, BorderLine),
         ) {
             Column(Modifier.padding(horizontal = Space.x7, vertical = Space.x2)) {
-                DetailLine("Version", "Debug")
+                DetailLine("Version", "alpha v1.0.0")
                 DetailSeparator()
                 DetailLine("Active Network", controller.activeRpcNetwork?.networkType ?: "mainnet")
                 DetailSeparator()

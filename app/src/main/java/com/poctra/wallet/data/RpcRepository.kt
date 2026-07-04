@@ -62,7 +62,7 @@ class RpcRepository(context: Context) {
         if (normalized.isEmpty() || !seeded) {
             val legacy = defaultNetworkFromLegacy()
             val activeId = prefs.getString(KeyActiveRpcId, null)
-                ?: networks.firstOrNull { it.id == DefaultDevnetId }?.id
+                ?: networks.firstOrNull { it.id == DefaultMainnetId }?.id
                 ?: networks.firstOrNull { it.url == legacy.url }?.id
                 ?: networks.firstOrNull()?.id
             prefs.edit()
@@ -71,7 +71,7 @@ class RpcRepository(context: Context) {
                 .apply()
             persistNetworks(networks)
         }
-        ensureDevnetDefault(networks)
+        ensureMainnetDefault(networks)
         return networks
     }
 
@@ -80,7 +80,7 @@ class RpcRepository(context: Context) {
         val activeId = prefs.getString(KeyActiveRpcId, null)
         return networks.firstOrNull { it.id == activeId }
             ?: networks.firstOrNull { it.url == prefs.getString(KeyRpcUrl, null)?.trim()?.trimEnd('/') }
-            ?: networks.firstOrNull { it.id == DefaultDevnetId }
+            ?: networks.firstOrNull { it.id == DefaultMainnetId }
             ?: networks.first()
     }
 
@@ -371,11 +371,11 @@ class RpcRepository(context: Context) {
         }.getOrDefault(TransactionNetworkState(TransactionNetworkStatus.NotFound))
     }
 
-    suspend fun fetchTransactionHistory(address: String, limit: Int = 11): List<TransactionHistoryItem> =
+    suspend fun fetchTransactionHistory(address: String, limit: Int = 11, url: String = currentUrl()): List<TransactionHistoryItem> =
         withContext(Dispatchers.IO) {
             val confirmed = runCatching {
                 val json = postRpc(
-                    url = currentUrl(),
+                    url = url,
                     payload = JSONObject()
                         .put("jsonrpc", "2.0")
                         .put("id", 1)
@@ -389,7 +389,7 @@ class RpcRepository(context: Context) {
                         val item = recent.optJSONObject(index) ?: continue
                         val hash = item.optString("hash", item.optString("tx_hash"))
                         if (hash.isBlank()) continue
-                        val tx = runCatching { fetchTransactionDetails(hash, address) }.getOrElse {
+                        val tx = runCatching { fetchTransactionDetails(hash, address, url) }.getOrElse {
                             TransactionHistoryItem(
                                 hash = hash,
                                 from = item.optString("from", "unknown"),
@@ -406,17 +406,17 @@ class RpcRepository(context: Context) {
                 }
             }.getOrDefault(emptyList())
 
-            val pending = fetchPendingTransactions(address)
+            val pending = fetchPendingTransactions(address, url)
             (confirmed + pending)
                 .distinctBy { it.hash }
                 .sortedByDescending { it.timestamp }
                 .take(limit)
         }
 
-    suspend fun fetchRecommendedFee(opType: String = "standard"): Long = withContext(Dispatchers.IO) {
+    suspend fun fetchRecommendedFee(opType: String = "standard", url: String = currentUrl()): Long = withContext(Dispatchers.IO) {
         runCatching {
             val json = postRpc(
-                url = currentUrl(),
+                url = url,
                 payload = JSONObject()
                     .put("jsonrpc", "2.0")
                     .put("id", 1)
@@ -432,11 +432,11 @@ class RpcRepository(context: Context) {
         }.getOrDefault(feeFallback(opType))
     }
 
-    suspend fun fetchOctraTokens(walletAddress: String, savedAddresses: List<String>): List<OctraToken> =
+    suspend fun fetchOctraTokens(walletAddress: String, savedAddresses: List<String>, url: String = currentUrl()): List<OctraToken> =
         withContext(Dispatchers.IO) {
             val fetched = runCatching {
                 val json = postRpc(
-                    url = currentUrl(),
+                    url = url,
                     payload = JSONObject()
                         .put("jsonrpc", "2.0")
                         .put("id", 1)
@@ -453,24 +453,25 @@ class RpcRepository(context: Context) {
 
             val known = fetched.map { it.address }.toSet()
             val missing = savedAddresses.filterNot { it in known }
-            val lookedUp = missing.mapNotNull { lookupOctraToken(it, walletAddress) }
+            val lookedUp = missing.mapNotNull { lookupOctraToken(it, walletAddress, url) }
             fetched + lookedUp
         }
 
-    suspend fun lookupOctraToken(contractAddress: String, walletAddress: String): OctraToken? =
+    suspend fun lookupOctraToken(contractAddress: String, walletAddress: String, url: String = currentUrl()): OctraToken? =
         withContext(Dispatchers.IO) {
             if (!contractAddress.startsWith("oct") || contractAddress.length != 47) return@withContext null
 
-            val name = contractCall(contractAddress, "get_name", JSONArray(), walletAddress)
-            val symbol = contractCall(contractAddress, "get_symbol", JSONArray(), walletAddress)
-            val decimals = contractCall(contractAddress, "decimals", JSONArray(), walletAddress)
+            val name = contractCall(contractAddress, "get_name", JSONArray(), walletAddress, url)
+            val symbol = contractCall(contractAddress, "get_symbol", JSONArray(), walletAddress, url)
+            val decimals = contractCall(contractAddress, "decimals", JSONArray(), walletAddress, url)
             val balance = contractCall(
                 contractAddress = contractAddress,
                 method = "balance_of",
                 params = JSONArray().put(walletAddress),
                 walletAddress = walletAddress,
+                url = url,
             )
-            val supply = contractCall(contractAddress, "get_total_supply", JSONArray(), walletAddress)
+            val supply = contractCall(contractAddress, "get_total_supply", JSONArray(), walletAddress, url)
 
             if (name.isNullOrBlank() && symbol.isNullOrBlank()) return@withContext null
 
@@ -695,9 +696,9 @@ class RpcRepository(context: Context) {
             .put("public_key", Base64.encodeToString(publicKey, Base64.NO_WRAP))
     }
 
-    private fun fetchTransactionDetails(hash: String, address: String): TransactionHistoryItem {
+    private fun fetchTransactionDetails(hash: String, address: String, url: String = currentUrl()): TransactionHistoryItem {
         val json = postRpc(
-            url = currentUrl(),
+            url = url,
             payload = JSONObject()
                 .put("jsonrpc", "2.0")
                 .put("id", 1)
@@ -729,10 +730,10 @@ class RpcRepository(context: Context) {
         )
     }
 
-    private fun fetchPendingTransactions(address: String): List<TransactionHistoryItem> {
+    private fun fetchPendingTransactions(address: String, url: String = currentUrl()): List<TransactionHistoryItem> {
         return runCatching {
             val json = postRpc(
-                url = currentUrl(),
+                url = url,
                 payload = JSONObject()
                     .put("jsonrpc", "2.0")
                     .put("id", 1)
@@ -777,20 +778,25 @@ class RpcRepository(context: Context) {
             setRequestProperty("Content-Type", "application/json")
         }
 
-        OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { writer ->
-            writer.write(payload.toString())
-        }
+        return try {
+            OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { writer ->
+                writer.write(payload.toString())
+            }
 
-        val stream = if (connection.responseCode in 200..299) {
-            connection.inputStream
-        } else {
-            connection.errorStream ?: connection.inputStream
+            val responseCode = connection.responseCode
+            val stream = if (responseCode in 200..299) {
+                connection.inputStream
+            } else {
+                connection.errorStream ?: connection.inputStream
+            }
+            val body = stream.bufferedReader().use { it.readText() }
+            if (responseCode !in 200..299) {
+                throw IllegalStateException("HTTP $responseCode")
+            }
+            JSONObject(body)
+        } finally {
+            connection.disconnect()
         }
-        val body = stream.bufferedReader().use { it.readText() }
-        if (connection.responseCode !in 200..299) {
-            throw IllegalStateException("HTTP ${connection.responseCode}")
-        }
-        return JSONObject(body)
     }
 
     private fun contractCall(
@@ -798,10 +804,11 @@ class RpcRepository(context: Context) {
         method: String,
         params: JSONArray,
         walletAddress: String,
+        url: String = currentUrl(),
     ): String? {
         return runCatching {
             val json = postRpc(
-                url = currentUrl(),
+                url = url,
                 payload = JSONObject()
                     .put("jsonrpc", "2.0")
                     .put("id", 1)
@@ -828,7 +835,7 @@ class RpcRepository(context: Context) {
 
     private fun defaultNetworkFromLegacy(): RpcNetwork {
         val legacyUrl = prefs.getString(KeyRpcUrl, null)?.trim()?.trimEnd('/').orEmpty()
-        val url = legacyUrl.ifBlank { DefaultDevnetUrl }
+        val url = legacyUrl.ifBlank { DefaultMainnetUrl }
         val type = if (url.lowercase().contains("devnet") || url.contains("165.227.225.79")) "devnet" else "mainnet"
         return when (url) {
             DefaultMainnetUrl -> defaultMainnetNetwork()
@@ -880,7 +887,7 @@ class RpcRepository(context: Context) {
         val array = JSONArray().apply { networks.forEach { put(it.toJson()) } }
         val activeId = prefs.getString(KeyActiveRpcId, null)
         val active = networks.firstOrNull { it.id == activeId }
-            ?: networks.firstOrNull { it.id == DefaultDevnetId }
+            ?: networks.firstOrNull { it.id == DefaultMainnetId }
             ?: networks.firstOrNull()
         prefs.edit()
             .putString(KeyRpcNetworks, array.toString())
@@ -889,20 +896,20 @@ class RpcRepository(context: Context) {
             .apply()
     }
 
-    private fun ensureDevnetDefault(networks: List<RpcNetwork>) {
-        if (prefs.getBoolean(KeyDevnetDefaultMigrated, false)) return
+    private fun ensureMainnetDefault(networks: List<RpcNetwork>) {
+        if (prefs.getBoolean(KeyMainnetDefaultMigrated, false)) return
         val activeId = prefs.getString(KeyActiveRpcId, null)
         val activeUrl = prefs.getString(KeyRpcUrl, null)?.trim()?.trimEnd('/').orEmpty()
-        val shouldUseDevnet = activeId.isNullOrBlank() ||
-            activeId == DefaultMainnetId ||
+        val shouldUseMainnet = activeId.isNullOrBlank() ||
+            activeId == DefaultDevnetId ||
             activeUrl.isBlank() ||
-            activeUrl == DefaultMainnetUrl
-        val devnet = networks.firstOrNull { it.id == DefaultDevnetId }
-        val editor = prefs.edit().putBoolean(KeyDevnetDefaultMigrated, true)
-        if (shouldUseDevnet && devnet != null) {
+            activeUrl == DefaultDevnetUrl
+        val mainnet = networks.firstOrNull { it.id == DefaultMainnetId }
+        val editor = prefs.edit().putBoolean(KeyMainnetDefaultMigrated, true)
+        if (shouldUseMainnet && mainnet != null) {
             editor
-                .putString(KeyActiveRpcId, devnet.id)
-                .putString(KeyRpcUrl, devnet.url)
+                .putString(KeyActiveRpcId, mainnet.id)
+                .putString(KeyRpcUrl, mainnet.url)
         }
         editor.apply()
     }
@@ -949,7 +956,7 @@ class RpcRepository(context: Context) {
         private const val KeyRpcNetworks = "rpc_networks"
         private const val KeyActiveRpcId = "active_rpc_id"
         private const val KeyDefaultRpcSeeded = "default_rpc_seeded"
-        private const val KeyDevnetDefaultMigrated = "devnet_default_migrated"
+        private const val KeyMainnetDefaultMigrated = "mainnet_default_migrated"
         private const val MicroUnits = 1_000_000L
     }
 }

@@ -20,6 +20,7 @@ import com.poctra.wallet.data.BridgeRepository
 import com.poctra.wallet.data.BridgeStatus
 import com.poctra.wallet.data.BridgeStep
 import com.poctra.wallet.data.CircleAsset
+import com.poctra.wallet.data.ConsumerSettingsRepository
 import com.poctra.wallet.data.DAppSession
 import com.poctra.wallet.data.DAppSessionRepository
 import com.poctra.wallet.data.EvmAccountSnapshot
@@ -51,11 +52,13 @@ import com.poctra.wallet.data.TradeSwapStage
 import com.poctra.wallet.data.SubmittedTransaction
 import com.poctra.wallet.data.TransactionFinality
 import com.poctra.wallet.data.Wallet
+import com.poctra.wallet.data.WalletType
 import com.poctra.wallet.data.WalletVault
 import com.poctra.wallet.data.TransactionNetworkState
 import com.poctra.wallet.data.TransactionNetworkStatus
 import com.poctra.wallet.data.canonicalizeOrigin
 import com.poctra.wallet.data.hostLabel
+import com.poctra.wallet.security.DAppUrlPolicy
 import com.poctra.wallet.security.DeviceSecurity
 import com.poctra.wallet.security.SecureWalletStore
 import kotlinx.coroutines.CoroutineScope
@@ -86,6 +89,18 @@ enum class AppRoute {
     RpcAddNetwork,
     SecuritySettings,
     BackupSettings,
+    SecurityCenter,
+    ActivityCenter,
+    PaymentRequest,
+    PortfolioAnalytics,
+    PortfolioAssetHistory,
+    ApprovalDashboard,
+    DomainGuard,
+    RecoveryPlan,
+    NotificationSettings,
+    FundingProviders,
+    OctraProfile,
+    SimulationCenter,
     AppearanceSettings,
     ConnectedDApps,
     IdentityProviderSettings,
@@ -189,6 +204,11 @@ enum class TradeStep {
     Failed,
 }
 
+private data class TradeChartCacheEntry(
+    val candles: List<TradeCandle>,
+    val fetchedAtMs: Long,
+)
+
 data class PendingDAppRequest(
     val origin: String,
     val title: String,
@@ -207,11 +227,13 @@ class PoctraController(private val activity: Activity) {
     private val appContext = activity.applicationContext
     private val uiPrefs = appContext.getSharedPreferences("poctra_ui", Context.MODE_PRIVATE)
     private val bridgePrefs = appContext.getSharedPreferences("poctra_bridge", Context.MODE_PRIVATE)
+    private val tradePrefs = appContext.getSharedPreferences("poctra_trade", Context.MODE_PRIVATE)
     private val walletCrypto = WalletCrypto(appContext)
     private val secureStore = SecureWalletStore(appContext)
     private val rpcRepository = RpcRepository(appContext)
     private val dAppSessionRepository = DAppSessionRepository(appContext)
     private val addressBookRepository = AddressBookRepository(appContext)
+    private val consumerSettingsRepository = ConsumerSettingsRepository(appContext)
     private val assetRepository = AssetRepository(appContext)
     private val identityProviderRepository = OctraIdentityProviderRepository(appContext)
     private val evmRepository = EvmRepository(appContext)
@@ -261,6 +283,38 @@ class PoctraController(private val activity: Activity) {
     var dApps by mutableStateOf<List<DAppSession>>(emptyList())
         private set
     var addressBookContacts by mutableStateOf<List<AddressBookContact>>(emptyList())
+        private set
+    var securityRisks by mutableStateOf<List<ConsumerRiskItem>>(emptyList())
+        private set
+    var unifiedActivity by mutableStateOf<List<UnifiedActivityItem>>(emptyList())
+        private set
+    var activityCenterLimit by mutableStateOf(InitialActivityLimit)
+        private set
+    var paymentRequestDraft by mutableStateOf<PaymentRequestDraft?>(null)
+        private set
+    var portfolioHoldings by mutableStateOf<List<PortfolioHolding>>(emptyList())
+        private set
+    var selectedPortfolioHolding by mutableStateOf<PortfolioHolding?>(null)
+        private set
+    var portfolioAssetActivity by mutableStateOf<List<UnifiedActivityItem>>(emptyList())
+        private set
+    var portfolioRefreshLoading by mutableStateOf(false)
+        private set
+    var activityCenterRefreshLoading by mutableStateOf(false)
+        private set
+    var simulationRefreshLoading by mutableStateOf(false)
+        private set
+    var approvalReviews by mutableStateOf<List<ApprovalReviewItem>>(emptyList())
+        private set
+    var approvalReviewLoading by mutableStateOf(false)
+        private set
+    var domainGuardRules by mutableStateOf<List<DomainGuardRule>>(emptyList())
+        private set
+    var notificationPreferences by mutableStateOf(consumerSettingsRepository.notificationPreferences())
+        private set
+    var fundingProviders by mutableStateOf(consumerSettingsRepository.fundingProviders())
+        private set
+    var simulationChecks by mutableStateOf<List<SimulationCheck>>(emptyList())
         private set
     var availableBalance by mutableStateOf(0.0)
         private set
@@ -333,6 +387,8 @@ class PoctraController(private val activity: Activity) {
         private set
     var evmTransactions by mutableStateOf<List<EvmTransaction>>(emptyList())
         private set
+    var evmHistoryVisibleLimit by mutableStateOf(InitialActivityLimit)
+        private set
     var evmAssetsLoading by mutableStateOf(false)
         private set
     var evmHistoryLoading by mutableStateOf(false)
@@ -383,6 +439,8 @@ class PoctraController(private val activity: Activity) {
     var bridgeEvmTxHash by mutableStateOf<String?>(null)
         private set
     var bridgeHistory by mutableStateOf<List<BridgeHistoryItem>>(emptyList())
+        private set
+    var bridgeHistoryLimit by mutableStateOf(InitialActivityLimit)
         private set
     var bridgeDialogVisible by mutableStateOf(false)
         private set
@@ -448,6 +506,8 @@ class PoctraController(private val activity: Activity) {
         private set
     var tradeLastPrice by mutableStateOf("--")
         private set
+    var tradeChartRefreshCoolingDown by mutableStateOf(false)
+        private set
     var pendingDAppRequest by mutableStateOf<PendingDAppRequest?>(null)
         private set
 
@@ -457,23 +517,43 @@ class PoctraController(private val activity: Activity) {
     private var dAppReturnRoute: AppRoute = AppRoute.Dashboard
     private var dAppReturnTab: DashboardTab = DashboardTab.Explore
     private var addressBookReturnRoute: AppRoute = AppRoute.Settings
+    private var activityCenterReturnRoute: AppRoute = AppRoute.Settings
+    private val settingsDetailBackStack = mutableListOf<AppRoute>()
     private var pendingRecipientAddress: String? = null
     private var pendingRecipientIdentityName: String? = null
     private var pendingDAppAction: (suspend () -> String)? = null
     private var pendingDAppSuccess: ((String) -> Unit)? = null
     private var pendingDAppError: ((Int, String) -> Unit)? = null
+    private var busyOperationCount = 0
     private var lastPriceFetchAt = 0L
+    private var rpcStatusRequestSerial = 0L
+    private var balanceRequestSerial = 0L
+    private var assetsRequestSerial = 0L
     private var historyRequestSerial = 0L
+    private var feeRequestSerial = 0L
+    private var evmAccountRequestSerial = 0L
+    private var evmAssetsRequestSerial = 0L
+    private var evmHistoryRequestSerial = 0L
+    private var bridgeBalanceRequestSerial = 0L
+    private var bridgeReviewRequestSerial = 0L
+    private var bridgeHistoryRequestSerial = 0L
+    private var tradeBalanceRequestSerial = 0L
+    private var transactionPollingCount = 0
+    private var evmSendPollSerial = 0L
     private var identityLookupSerial = 0L
     private var addressIdentityLookupSerial = 0L
     private var addressIdentityCacheKey: String? = null
     private var addressIdentityMisses: Set<String> = emptySet()
     private var tradeChartRequestSerial = 0L
+    private var tradeChartInFlightKey: String? = null
+    private var tradeChartCooldownSerial = 0L
     private var tradeQuoteRequestSerial = 0L
     private var circleResolveSerial = 0L
+    private var approvalReviewRequestSerial = 0L
+    private var portfolioRefreshSerial = 0L
     private var tradePendingEvmTransaction by mutableStateOf<EvmSendResult?>(null)
     private val circleResourceModeCache = ConcurrentHashMap<String, String>()
-    private val tradeChartCache = mutableMapOf<TradeChartTimeframe, List<TradeCandle>>()
+    private val tradeChartCache = mutableMapOf<String, TradeChartCacheEntry>()
 
     val biometricAvailable: Boolean
         get() = DeviceSecurity.isBiometricAvailable(activity)
@@ -483,6 +563,42 @@ class PoctraController(private val activity: Activity) {
 
     val currentRpcUrl: String
         get() = activeRpcNetwork?.url ?: rpcRepository.currentUrl()
+
+    val visibleUnifiedActivity: List<UnifiedActivityItem>
+        get() = unifiedActivity.take(activityCenterLimit)
+
+    val activityCenterCanLoadMore: Boolean
+        get() = unifiedActivity.size > activityCenterLimit
+
+    val visibleBridgeHistory: List<BridgeHistoryItem>
+        get() = bridgeHistory.take(bridgeHistoryLimit)
+
+    val bridgeHistoryCanLoadMore: Boolean
+        get() = bridgeHistory.size > bridgeHistoryLimit
+
+    val visibleEvmTransactions: List<EvmTransaction>
+        get() = evmTransactions.take(evmHistoryVisibleLimit)
+
+    val evmActivityCanLoadMore: Boolean
+        get() = evmTransactions.size > evmHistoryVisibleLimit
+
+    private fun isActiveWallet(address: String): Boolean =
+        wallet?.address?.equals(address, ignoreCase = true) == true
+
+    private fun isActiveRpcSnapshot(walletAddress: String, rpcUrl: String): Boolean =
+        isActiveWallet(walletAddress) && currentRpcUrl.equals(rpcUrl, ignoreCase = true)
+
+    private fun isActiveEvmSnapshot(walletAddress: String, networkId: String): Boolean =
+        isActiveWallet(walletAddress) &&
+            (activeEvmNetwork ?: runCatching { evmRepository.activeNetwork() }.getOrNull())?.id == networkId
+
+    private fun isActiveEvmNetworkSnapshot(networkId: String?): Boolean =
+        (activeEvmNetwork ?: runCatching { evmRepository.activeNetwork() }.getOrNull())?.id == networkId
+
+    private fun isActiveBridgeSnapshot(walletAddress: String, octraNetworkId: String, evmNetworkId: String): Boolean =
+        isActiveWallet(walletAddress) &&
+            (activeRpcNetwork ?: runCatching { rpcRepository.activeNetwork() }.getOrNull())?.id == octraNetworkId &&
+            (activeEvmNetwork ?: runCatching { evmRepository.activeNetwork() }.getOrNull())?.id == evmNetworkId
 
     val tradeNetworkSupported: Boolean
         get() = (activeEvmNetwork ?: runCatching { evmRepository.activeNetwork() }.getOrNull())?.chainId == 1L
@@ -591,6 +707,10 @@ class PoctraController(private val activity: Activity) {
         if (!bridgeInProgress) bridgeBusy = false
         if (!tradeInProgress) tradeBusy = false
         evmSending = false
+        evmSendPollSerial++
+        transactionPollingCount = 0
+        transactionStatusPolling = false
+        busyOperationCount = 0
         busy = false
         route = AppRoute.Unlock
     }
@@ -678,11 +798,31 @@ class PoctraController(private val activity: Activity) {
     private fun restoreAfterUnlock() {
         dashboardTab = unlockReturnTab
         route = unlockReturnRoute
-        refreshDashboard()
         when (route) {
             AppRoute.Bridge,
             AppRoute.BridgeHistory -> {
                 bridgeHistory = loadBridgeHistory()
+            }
+            AppRoute.Dashboard -> when (dashboardTab) {
+                DashboardTab.Overview -> refreshDashboard()
+                DashboardTab.Assets -> {
+                    dApps = connectedDAppSessions()
+                    refreshRpcStatus()
+                    refreshIdentityProviders()
+                    refreshWalletIdentityNames()
+                    refreshBalance()
+                    refreshOctPrice()
+                    refreshAssets()
+                    refreshEvmDashboard()
+                }
+                DashboardTab.Trade -> {
+                    dApps = connectedDAppSessions()
+                    refreshTrade()
+                    refreshTradeChart()
+                }
+                DashboardTab.Explore -> {
+                    dApps = connectedDAppSessions()
+                }
             }
             AppRoute.Evm,
             AppRoute.EvmSend,
@@ -690,10 +830,6 @@ class PoctraController(private val activity: Activity) {
             AppRoute.EvmActivity,
             AppRoute.EvmNetwork -> refreshEvmDashboard()
             else -> Unit
-        }
-        if (route == AppRoute.Dashboard && dashboardTab == DashboardTab.Trade) {
-            refreshTrade()
-            refreshTradeChart()
         }
     }
 
@@ -743,16 +879,26 @@ class PoctraController(private val activity: Activity) {
     }
 
     fun openSettings() {
+        settingsDetailBackStack.clear()
         rpcNetworks = rpcRepository.rpcNetworks()
         activeRpcNetwork = rpcRepository.activeNetwork()
         dApps = connectedDAppSessions()
         addressBookContacts = addressBookRepository.contacts()
         refreshIdentityProviders()
         refreshWalletIdentityNames()
+        refreshConsumerInsights()
+        refreshPortfolioHoldings()
+        refreshAssets()
+        refreshEvmDashboard()
+        refreshSimulationChecks()
+        domainGuardRules = consumerSettingsRepository.domainGuardRules()
+        notificationPreferences = consumerSettingsRepository.notificationPreferences()
+        fundingProviders = consumerSettingsRepository.fundingProviders()
         route = AppRoute.Settings
     }
 
     fun closeSettings() {
+        settingsDetailBackStack.clear()
         route = AppRoute.Dashboard
     }
 
@@ -765,7 +911,7 @@ class PoctraController(private val activity: Activity) {
     }
 
     fun openRpcManagement() {
-        openRpcManagement(returnRoute = AppRoute.Settings)
+        openRpcManagement(returnRoute = if (route == AppRoute.Settings) AppRoute.Settings else route)
     }
 
     fun openRpcManagementFromBridge() {
@@ -783,6 +929,11 @@ class PoctraController(private val activity: Activity) {
         route = rpcManagementReturnRoute
     }
 
+    private fun openSettingsDetail(target: AppRoute) {
+        if (route != target) settingsDetailBackStack += route
+        route = target
+    }
+
     fun openAddRpcNetwork() {
         route = AppRoute.RpcAddNetwork
     }
@@ -792,25 +943,193 @@ class PoctraController(private val activity: Activity) {
     }
 
     fun openSecuritySettings() {
-        route = AppRoute.SecuritySettings
+        openSettingsDetail(AppRoute.SecuritySettings)
     }
 
     fun openBackupSettings() {
-        route = AppRoute.BackupSettings
+        openSettingsDetail(AppRoute.BackupSettings)
+    }
+
+    fun openSecurityCenter() {
+        dApps = connectedDAppSessions()
+        addressBookContacts = addressBookRepository.contacts()
+        refreshConsumerInsights()
+        openSettingsDetail(AppRoute.SecurityCenter)
+    }
+
+    fun openActivityCenter() {
+        if (route != AppRoute.ActivityCenter) activityCenterReturnRoute = route
+        activityCenterLimit = InitialActivityLimit
+        refreshUnifiedActivity()
+        route = AppRoute.ActivityCenter
+        refreshActivityCenter()
+    }
+
+    fun loadMoreActivityCenter() {
+        activityCenterLimit = (activityCenterLimit + ActivityPageSize).coerceAtMost(MaxUnifiedActivityItems)
+    }
+
+    fun refreshActivityCenter() {
+        if (activityCenterRefreshLoading) return
+        activityCenterRefreshLoading = true
+        refreshDashboard()
+        refreshEvmHistory()
+        refreshBridgeHistory()
+        dApps = connectedDAppSessions()
+        scope.launch {
+            try {
+                val deadline = System.currentTimeMillis() + ActivityCenterSyncTimeoutMs
+                while (activityCenterDataLoading() && System.currentTimeMillis() < deadline) {
+                    delay(150)
+                }
+                refreshUnifiedActivity()
+            } finally {
+                activityCenterRefreshLoading = false
+            }
+        }
+    }
+
+    private fun activityCenterDataLoading(): Boolean =
+        historyLoading || evmHistoryLoading || bridgeHistoryLoading
+
+    fun closeActivityCenter() {
+        route = when (activityCenterReturnRoute) {
+            AppRoute.Dashboard -> AppRoute.Dashboard
+            else -> AppRoute.Settings
+        }
+    }
+
+    fun openPaymentRequest() {
+        val activeWallet = wallet ?: return showError("Unlock wallet first.")
+        val label = walletIdentityNames[activeWallet.address]
+            ?: activeWallet.name.ifBlank { "poctra" }
+        paymentRequestDraft = PaymentRequestDraft(
+            address = activeWallet.address,
+            label = label,
+        )
+        route = AppRoute.PaymentRequest
+    }
+
+    fun updatePaymentRequest(amount: String, asset: String, memo: String) {
+        paymentRequestDraft = paymentRequestDraft?.copy(
+            amount = amount.filter { it.isDigit() || it == '.' || it == ',' }.take(24),
+            asset = asset.trim().uppercase().take(12).ifBlank { "OCT" },
+            memo = memo.take(48),
+        )
+    }
+
+    fun closePaymentRequest() {
+        paymentRequestDraft = null
+        route = AppRoute.Receive
+    }
+
+    fun openPortfolioAnalytics() {
+        syncPortfolioHoldingsAfterDataChange()
+        openSettingsDetail(AppRoute.PortfolioAnalytics)
+        refreshPortfolioAnalytics()
+    }
+
+    fun refreshPortfolioAnalytics() {
+        if (portfolioRefreshLoading) return
+        val requestSerial = ++portfolioRefreshSerial
+        portfolioRefreshLoading = true
+        refreshDashboard()
+        refreshEvmDashboard()
+        scope.launch {
+            try {
+                val deadline = System.currentTimeMillis() + 15_000L
+                while (requestSerial == portfolioRefreshSerial && portfolioDataLoading() && System.currentTimeMillis() < deadline) {
+                    delay(150)
+                }
+                if (requestSerial != portfolioRefreshSerial) return@launch
+                syncPortfolioHoldingsAfterDataChange()
+            } finally {
+                if (requestSerial == portfolioRefreshSerial) portfolioRefreshLoading = false
+            }
+        }
+    }
+
+    fun openPortfolioAssetHistory(holding: PortfolioHolding) {
+        selectedPortfolioHolding = holding
+        portfolioAssetActivity = buildPortfolioAssetActivity(holding)
+        openSettingsDetail(AppRoute.PortfolioAssetHistory)
+    }
+
+    fun closePortfolioAssetHistory() {
+        selectedPortfolioHolding = null
+        portfolioAssetActivity = emptyList()
+        closeSettingsDetail()
+    }
+
+    fun openPortfolioActivityExplorer(item: UnifiedActivityItem) {
+        val url = item.explorerUrl ?: return showError("Explorer link is not available for this activity.")
+        openDAppBrowser(item.title, url)
+    }
+
+    fun openApprovalDashboard() {
+        refreshApprovalReviews()
+        openSettingsDetail(AppRoute.ApprovalDashboard)
+    }
+
+    fun openDomainGuard() {
+        domainGuardRules = consumerSettingsRepository.domainGuardRules()
+        openSettingsDetail(AppRoute.DomainGuard)
+    }
+
+    fun openRecoveryPlan() {
+        openSettingsDetail(AppRoute.RecoveryPlan)
+    }
+
+    fun openNotificationSettings() {
+        notificationPreferences = consumerSettingsRepository.notificationPreferences()
+        openSettingsDetail(AppRoute.NotificationSettings)
+    }
+
+    fun openFundingProviders() {
+        fundingProviders = consumerSettingsRepository.fundingProviders()
+        openSettingsDetail(AppRoute.FundingProviders)
+    }
+
+    fun openOctraProfile() {
+        refreshWalletIdentityNames()
+        refreshPortfolioHoldings()
+        openSettingsDetail(AppRoute.OctraProfile)
+    }
+
+    fun openSimulationCenter() {
+        refreshSimulationChecks()
+        openSettingsDetail(AppRoute.SimulationCenter)
+    }
+
+    fun refreshSimulationCenterChecks() {
+        if (simulationRefreshLoading) return
+        simulationRefreshLoading = true
+        refreshRpcStatus()
+        refreshEvmDashboard()
+        dApps = connectedDAppSessions()
+        scope.launch {
+            try {
+                delay(700)
+                refreshSimulationChecks()
+            } finally {
+                simulationRefreshLoading = false
+            }
+        }
     }
 
     fun openAppearanceSettings() {
-        route = AppRoute.AppearanceSettings
+        openSettingsDetail(AppRoute.AppearanceSettings)
     }
 
     fun openConnectedDApps() {
         dApps = connectedDAppSessions()
-        route = AppRoute.ConnectedDApps
+        refreshConsumerInsights()
+        openSettingsDetail(AppRoute.ConnectedDApps)
     }
 
     fun openIdentityProviderSettings() {
         refreshIdentityProviders()
-        route = AppRoute.IdentityProviderSettings
+        openSettingsDetail(AppRoute.IdentityProviderSettings)
     }
 
     fun openAddIdentityProvider() {
@@ -856,7 +1175,11 @@ class PoctraController(private val activity: Activity) {
     }
 
     fun closeSettingsDetail() {
-        route = AppRoute.Settings
+        route = if (settingsDetailBackStack.isEmpty()) {
+            AppRoute.Settings
+        } else {
+            settingsDetailBackStack.removeAt(settingsDetailBackStack.lastIndex)
+        }
     }
 
     fun openAddressBook() {
@@ -918,6 +1241,41 @@ class PoctraController(private val activity: Activity) {
     fun removeAddressBookContact(id: String) {
         addressBookContacts = addressBookRepository.remove(id)
         showMessage("Contact removed.")
+    }
+
+    fun recentRecipientSuggestions(): List<AddressBookContact> {
+        val active = wallet?.address ?: return emptyList()
+        val saved = addressBookContacts.map { it.address.lowercase() }.toSet()
+        return recentTransactions
+            .mapNotNull { tx ->
+                val candidate = when {
+                    tx.from.equals(active, ignoreCase = true) -> tx.to
+                    tx.to.equals(active, ignoreCase = true) -> tx.from
+                    else -> null
+                }?.trim().orEmpty()
+                if (!isOctraAddress(candidate)) return@mapNotNull null
+                if (candidate.equals(active, ignoreCase = true) || candidate.lowercase() in saved) return@mapNotNull null
+                AddressBookContact(
+                    id = "suggestion-${candidate.hashCode()}",
+                    label = identityNamesByAddress[candidate.lowercase()] ?: "Recent ${shortAddress(candidate)}",
+                    address = candidate,
+                    note = "Recent activity",
+                    identityName = identityNamesByAddress[candidate.lowercase()],
+                    createdAt = tx.timestamp.toLong(),
+                )
+            }
+            .distinctBy { it.address.lowercase() }
+            .take(5)
+    }
+
+    fun saveRecentRecipient(contact: AddressBookContact) {
+        addressBookContacts = addressBookRepository.save(
+            contact.copy(
+                id = "contact-${System.currentTimeMillis()}",
+                label = contact.label.ifBlank { "Recent ${shortAddress(contact.address)}" },
+            ),
+        )
+        showMessage("Recent recipient saved.")
     }
 
     fun selectAddressBookContact(contact: AddressBookContact) {
@@ -1134,9 +1492,14 @@ class PoctraController(private val activity: Activity) {
     }
 
     fun openBridgeHistory() {
+        bridgeHistoryLimit = InitialActivityLimit
         bridgeHistory = loadBridgeHistory()
         route = AppRoute.BridgeHistory
-        refreshBridgeHistory()
+        if (bridgeHistory.isEmpty()) refreshBridgeHistory()
+    }
+
+    fun loadMoreBridgeHistory() {
+        bridgeHistoryLimit = (bridgeHistoryLimit + ActivityPageSize).coerceAtMost(MaxBridgeHistoryItems)
     }
 
     fun closeBridgeHistory() {
@@ -1170,24 +1533,30 @@ class PoctraController(private val activity: Activity) {
     fun refreshBridgeHistory() {
         val activeWallet = wallet ?: return
         if (bridgeHistoryLoading) return
+        val requestSerial = ++bridgeHistoryRequestSerial
         configureBridgeRepositoryOrWarn()?.let { warning ->
             showError(warning)
             return
         }
+        val octraNetwork = activeRpcNetwork ?: rpcRepository.activeNetwork()
+        val evmNetwork = activeEvmNetwork ?: evmRepository.activeNetwork()
+        val walletAddress = activeWallet.address
         bridgeHistoryLoading = true
         scope.launch {
             try {
                 val chainItems = withContext(Dispatchers.IO) {
                     bridgeRepository.fetchOnChainHistory(activeWallet)
                 }
+                if (requestSerial != bridgeHistoryRequestSerial || !isActiveBridgeSnapshot(walletAddress, octraNetwork.id, evmNetwork.id)) return@launch
                 val merged = mergeBridgeHistory(loadBridgeHistory(), chainItems)
                 bridgeHistory = merged
                 persistBridgeHistory(merged)
                 bridgeError = null
             } catch (exception: Exception) {
+                if (requestSerial != bridgeHistoryRequestSerial) return@launch
                 showError(exception.message ?: "Bridge history refresh failed.")
             } finally {
-                bridgeHistoryLoading = false
+                if (requestSerial == bridgeHistoryRequestSerial) bridgeHistoryLoading = false
             }
         }
     }
@@ -1202,11 +1571,16 @@ class PoctraController(private val activity: Activity) {
 
     fun refreshBridgeBalances() {
         val activeWallet = wallet ?: return
+        val requestSerial = ++bridgeBalanceRequestSerial
         configureBridgeRepositoryOrWarn()?.let { warning ->
             bridgeError = warning
             bridgeStatus = BridgeStatus(error = warning)
+            bridgeLoading = false
             return
         }
+        val octraNetwork = activeRpcNetwork ?: rpcRepository.activeNetwork()
+        val evmNetwork = activeEvmNetwork ?: evmRepository.activeNetwork()
+        val walletAddress = activeWallet.address
         bridgeLoading = true
         scope.launch {
             try {
@@ -1216,13 +1590,15 @@ class PoctraController(private val activity: Activity) {
                 val nextStatus = withContext(Dispatchers.IO) {
                     bridgeRepository.fetchStatus(activeWallet)
                 }
+                if (requestSerial != bridgeBalanceRequestSerial || !isActiveBridgeSnapshot(walletAddress, octraNetwork.id, evmNetwork.id)) return@launch
                 bridgeBalances = nextBalances
                 bridgeStatus = nextStatus
                 bridgeError = null
             } catch (exception: Exception) {
+                if (requestSerial != bridgeBalanceRequestSerial) return@launch
                 bridgeError = exception.message ?: "Bridge balances failed to sync."
             } finally {
-                bridgeLoading = false
+                if (requestSerial == bridgeBalanceRequestSerial) bridgeLoading = false
             }
         }
     }
@@ -1234,12 +1610,16 @@ class PoctraController(private val activity: Activity) {
 
     fun refreshBridgeReviewEstimates(amountText: String) {
         val activeWallet = wallet ?: return
+        val requestSerial = ++bridgeReviewRequestSerial
         refreshRecommendedFee("call")
         configureBridgeRepositoryOrWarn()?.let {
             bridgeEvmGasEstimate = null
             bridgeGasLoading = false
             return
         }
+        val octraNetwork = activeRpcNetwork ?: rpcRepository.activeNetwork()
+        val evmNetwork = activeEvmNetwork ?: evmRepository.activeNetwork()
+        val walletAddress = activeWallet.address
         val amountRaw = runCatching { bridgeRepository.parseAmount(amountText) }
             .getOrDefault(BigInteger.ONE)
             .takeIf { it > BigInteger.ZERO }
@@ -1248,13 +1628,16 @@ class PoctraController(private val activity: Activity) {
         bridgeGasLoading = true
         scope.launch {
             try {
-                bridgeEvmGasEstimate = withContext(Dispatchers.IO) {
+                val estimate = withContext(Dispatchers.IO) {
                     bridgeRepository.estimateBridgeEvmGas(activeWallet, direction, amountRaw)
                 }
+                if (requestSerial != bridgeReviewRequestSerial || !isActiveBridgeSnapshot(walletAddress, octraNetwork.id, evmNetwork.id)) return@launch
+                bridgeEvmGasEstimate = estimate
             } catch (_: Exception) {
+                if (requestSerial != bridgeReviewRequestSerial) return@launch
                 bridgeEvmGasEstimate = null
             } finally {
-                bridgeGasLoading = false
+                if (requestSerial == bridgeReviewRequestSerial) bridgeGasLoading = false
             }
         }
     }
@@ -1290,19 +1673,19 @@ class PoctraController(private val activity: Activity) {
                     val item = runCatching { BridgeHistoryItem.fromJson(array.getJSONObject(index)) }.getOrNull()
                     if (item != null && item.id.isNotBlank()) add(item)
                 }
-            }
+            }.sortedBridgeHistory()
         }.getOrDefault(emptyList())
     }
 
     private fun persistBridgeHistory(items: List<BridgeHistoryItem>) {
         val array = JSONArray()
-        items.take(MaxBridgeHistoryItems).forEach { array.put(it.toJson()) }
+        items.sortedBridgeHistory().forEach { array.put(it.toJson()) }
         bridgePrefs.edit().putString(KeyBridgeHistory, array.toString()).apply()
     }
 
     private fun upsertBridgeHistory(item: BridgeHistoryItem) {
         val updated = item.copy(updatedAt = System.currentTimeMillis())
-        val next = (listOf(updated) + bridgeHistory.filterNot { it.id == item.id }).take(MaxBridgeHistoryItems)
+        val next = (listOf(updated) + bridgeHistory.filterNot { it.id == item.id }).sortedBridgeHistory()
         bridgeHistory = next
         persistBridgeHistory(next)
     }
@@ -1314,7 +1697,7 @@ class PoctraController(private val activity: Activity) {
         val source = if (bridgeHistory.any { it.id == itemId }) bridgeHistory else loadBridgeHistory()
         val current = source.firstOrNull { it.id == itemId } ?: return
         val updated = transform(current).copy(updatedAt = System.currentTimeMillis())
-        val next = (listOf(updated) + source.filterNot { it.id == itemId }).take(MaxBridgeHistoryItems)
+        val next = (listOf(updated) + source.filterNot { it.id == itemId }).sortedBridgeHistory()
         bridgeHistory = next
         persistBridgeHistory(next)
     }
@@ -1353,9 +1736,15 @@ class PoctraController(private val activity: Activity) {
         }
         return (mergedChain + localItems.filterNot { it.id in consumedLocalIds })
             .distinctBy { it.id }
-            .sortedByDescending { it.updatedAt }
-            .take(MaxBridgeHistoryItems)
+            .sortedBridgeHistory()
     }
+
+    private fun List<BridgeHistoryItem>.sortedBridgeHistory(): List<BridgeHistoryItem> =
+        sortedWith(
+            compareByDescending<BridgeHistoryItem> { maxOf(it.updatedAt, it.createdAt) }
+                .thenByDescending { it.createdAt }
+                .thenByDescending { it.id },
+        ).take(MaxBridgeHistoryItems)
 
     private fun mergeBridgeHistoryItem(
         local: BridgeHistoryItem?,
@@ -2000,6 +2389,7 @@ class PoctraController(private val activity: Activity) {
 
     fun refreshTrade() {
         val activeWallet = wallet ?: return
+        val requestSerial = ++tradeBalanceRequestSerial
         configureTradeRepositoryOrWarn("syncing trade data")?.let { warning ->
             tradeBalances = TradeBalances()
             tradeQuote = null
@@ -2008,63 +2398,217 @@ class PoctraController(private val activity: Activity) {
             tradeLoading = false
             return
         }
+        val network = activeEvmNetwork ?: evmRepository.activeNetwork()
+        val walletAddress = activeWallet.address
         tradeLoading = true
         scope.launch {
             try {
-                tradeBalances = withContext(Dispatchers.IO) {
+                val balances = withContext(Dispatchers.IO) {
                     tradeRepository.fetchBalances(activeWallet)
                 }
+                if (requestSerial != tradeBalanceRequestSerial || !isActiveEvmSnapshot(walletAddress, network.id)) return@launch
+                tradeBalances = balances
                 tradeQuoteError = null
             } catch (exception: Exception) {
+                if (requestSerial != tradeBalanceRequestSerial) return@launch
                 tradeQuoteError = exception.message ?: "Trade balances failed to sync."
             } finally {
-                tradeLoading = false
+                if (requestSerial == tradeBalanceRequestSerial) tradeLoading = false
             }
         }
     }
 
     fun refreshTradeChart(timeframe: TradeChartTimeframe = tradeChartTimeframe) {
-        val requestId = ++tradeChartRequestSerial
+        refreshTradeChartInternal(timeframe = timeframe, forceNetwork = false, userInitiated = false)
+    }
+
+    fun forceRefreshTradeChart() {
+        refreshTradeChartInternal(timeframe = tradeChartTimeframe, forceNetwork = true, userInitiated = true)
+    }
+
+    private fun refreshTradeChartInternal(
+        timeframe: TradeChartTimeframe,
+        forceNetwork: Boolean,
+        userInitiated: Boolean,
+    ) {
+        val network = activeEvmNetwork ?: runCatching { evmRepository.activeNetwork() }.getOrNull()
+        val requestNetworkId = network?.id
         tradeChartTimeframe = timeframe
-        val cached = tradeChartCache[timeframe]
-        if (cached != null) {
-            tradeCandles = cached
-            tradeLastPrice = cached.lastOrNull()?.close?.let { "$${"%.6f".format(it)}" } ?: "--"
-        } else {
+        if (network?.chainId != 1L) {
             tradeCandles = emptyList()
             tradeLastPrice = "--"
-        }
-        tradeChartError = null
-        if (!tradeNetworkSupported) {
             tradeChartError = "wOCT chart is available on Ethereum Mainnet."
             tradeChartLoading = false
             return
         }
+
+        val cacheKey = tradeChartCacheKey(requestNetworkId, timeframe)
+        val cached = tradeChartCacheEntry(requestNetworkId, timeframe)
+        cached?.let { applyTradeChartCache(it) } ?: run {
+            tradeCandles = emptyList()
+            tradeLastPrice = "--"
+        }
+        tradeChartError = null
+
+        val now = System.currentTimeMillis()
+        val cacheIsFresh = cached != null && now - cached.fetchedAtMs < timeframe.tradeChartCacheTtlMs()
+        if (!forceNetwork && cacheIsFresh) {
+            tradeChartLoading = false
+            return
+        }
+
+        tradeChartInFlightKey?.let { inFlight ->
+            if (inFlight == cacheKey) {
+                tradeChartLoading = cached == null
+                return
+            }
+            tradeChartRequestSerial++
+        }
+
+        if (tradeChartRefreshCoolingDown) {
+            tradeChartError = if (cached != null) {
+                "Using cached chart. Refresh is cooling down."
+            } else {
+                "Chart refresh is cooling down. Try again shortly."
+            }
+            tradeChartLoading = false
+            return
+        }
+
+        val requestId = ++tradeChartRequestSerial
+        tradeChartInFlightKey = cacheKey
+        if (userInitiated) startTradeChartCooldown(TradeChartManualCooldownMs)
         tradeChartLoading = true
         scope.launch {
             try {
                 val candles = withContext(Dispatchers.IO) {
                     tradeRepository.fetchWoctCandles(timeframe)
                 }
-                if (requestId != tradeChartRequestSerial) return@launch
-                tradeChartCache[timeframe] = candles
-                tradeCandles = candles
-                tradeLastPrice = tradeCandles.lastOrNull()?.close?.let { "$${"%.6f".format(it)}" } ?: "--"
+                if (requestId != tradeChartRequestSerial || !isActiveEvmNetworkSnapshot(requestNetworkId)) return@launch
+                val entry = TradeChartCacheEntry(candles = candles, fetchedAtMs = System.currentTimeMillis())
+                tradeChartCache[cacheKey] = entry
+                persistTradeChartCache(requestNetworkId, timeframe, entry)
+                applyTradeChartCache(entry)
                 tradeChartError = null
             } catch (exception: Exception) {
-                if (requestId != tradeChartRequestSerial) return@launch
-                val fallback = tradeChartCache[timeframe] ?: tradeCandles.takeIf { it.isNotEmpty() }
+                if (requestId != tradeChartRequestSerial || !isActiveEvmNetworkSnapshot(requestNetworkId)) return@launch
+                val fallback = tradeChartCacheEntry(requestNetworkId, timeframe)
+                    ?: tradeCandles.takeIf { it.isNotEmpty() }?.let {
+                        TradeChartCacheEntry(it, fetchedAtMs = 0L)
+                    }
                 if (fallback != null) {
-                    tradeCandles = fallback
-                    tradeLastPrice = fallback.lastOrNull()?.close?.let { "$${"%.6f".format(it)}" } ?: tradeLastPrice
+                    applyTradeChartCache(fallback)
                 } else {
                     tradeCandles = emptyList()
                     tradeLastPrice = "--"
                 }
-                tradeChartError = exception.message ?: "wOCT chart failed to load."
+                if (isTradeChartRateLimited(exception)) startTradeChartCooldown(TradeChartRateLimitCooldownMs)
+                tradeChartError = tradeChartErrorMessage(exception, fallback != null)
             } finally {
-                if (requestId == tradeChartRequestSerial) tradeChartLoading = false
+                if (tradeChartInFlightKey == cacheKey) tradeChartInFlightKey = null
+                if (requestId == tradeChartRequestSerial && isActiveEvmNetworkSnapshot(requestNetworkId)) tradeChartLoading = false
             }
+        }
+    }
+
+    private fun tradeChartCacheEntry(
+        networkId: String?,
+        timeframe: TradeChartTimeframe,
+    ): TradeChartCacheEntry? {
+        val key = tradeChartCacheKey(networkId, timeframe)
+        return tradeChartCache[key] ?: loadPersistedTradeChartCache(networkId, timeframe)?.also {
+            tradeChartCache[key] = it
+        }
+    }
+
+    private fun applyTradeChartCache(entry: TradeChartCacheEntry) {
+        tradeCandles = entry.candles
+        tradeLastPrice = entry.candles.lastOrNull()?.close?.let { "$${"%.6f".format(it)}" } ?: "--"
+    }
+
+    private fun persistTradeChartCache(
+        networkId: String?,
+        timeframe: TradeChartTimeframe,
+        entry: TradeChartCacheEntry,
+    ) {
+        val candles = JSONArray()
+        entry.candles.forEach { candle ->
+            candles.put(
+                JSONArray()
+                    .put(candle.timestamp)
+                    .put(candle.open)
+                    .put(candle.high)
+                    .put(candle.low)
+                    .put(candle.close),
+            )
+        }
+        val payload = JSONObject()
+            .put("fetchedAtMs", entry.fetchedAtMs)
+            .put("candles", candles)
+        tradePrefs.edit()
+            .putString(tradeChartCacheKey(networkId, timeframe), payload.toString())
+            .apply()
+    }
+
+    private fun loadPersistedTradeChartCache(
+        networkId: String?,
+        timeframe: TradeChartTimeframe,
+    ): TradeChartCacheEntry? {
+        val raw = tradePrefs.getString(tradeChartCacheKey(networkId, timeframe), null) ?: return null
+        return runCatching {
+            val json = JSONObject(raw)
+            val candles = json.optJSONArray("candles") ?: JSONArray()
+            val parsed = buildList {
+                for (index in 0 until candles.length()) {
+                    val row = candles.optJSONArray(index) ?: continue
+                    if (row.length() < 5) continue
+                    add(
+                        TradeCandle(
+                            timestamp = row.optLong(0),
+                            open = row.optDouble(1),
+                            high = row.optDouble(2),
+                            low = row.optDouble(3),
+                            close = row.optDouble(4),
+                        ),
+                    )
+                }
+            }
+            TradeChartCacheEntry(
+                candles = parsed.filter { it.open > 0.0 && it.high > 0.0 && it.low > 0.0 && it.close > 0.0 },
+                fetchedAtMs = json.optLong("fetchedAtMs", 0L),
+            ).takeIf { it.candles.isNotEmpty() }
+        }.getOrNull()
+    }
+
+    private fun tradeChartCacheKey(networkId: String?, timeframe: TradeChartTimeframe): String =
+        "$KeyTradeChartCachePrefix${networkId.orEmpty().ifBlank { "ethereum" }}_${timeframe.name}"
+
+    private fun TradeChartTimeframe.tradeChartCacheTtlMs(): Long = when (this) {
+        TradeChartTimeframe.H1 -> 2 * 60_000L
+        TradeChartTimeframe.H4 -> 10 * 60_000L
+        TradeChartTimeframe.D1 -> 60 * 60_000L
+        TradeChartTimeframe.W1 -> 6 * 60 * 60_000L
+    }
+
+    private fun startTradeChartCooldown(durationMs: Long) {
+        val serial = ++tradeChartCooldownSerial
+        tradeChartRefreshCoolingDown = true
+        scope.launch {
+            delay(durationMs)
+            if (serial == tradeChartCooldownSerial) tradeChartRefreshCoolingDown = false
+        }
+    }
+
+    private fun isTradeChartRateLimited(exception: Exception): Boolean =
+        exception.message.orEmpty().lowercase().contains("429")
+
+    private fun tradeChartErrorMessage(exception: Exception, usingCache: Boolean): String {
+        val rateLimited = isTradeChartRateLimited(exception)
+        return when {
+            rateLimited && usingCache -> "Chart provider is rate limited. Using cached chart."
+            rateLimited -> "Chart provider is rate limited. Try again shortly."
+            usingCache -> "Live chart refresh failed. Using cached chart."
+            else -> exception.message ?: "wOCT chart failed to load."
         }
     }
 
@@ -2428,8 +2972,13 @@ class PoctraController(private val activity: Activity) {
     }
 
     fun openEvmActivity() {
+        evmHistoryVisibleLimit = InitialActivityLimit
         refreshEvmHistory()
         route = AppRoute.EvmActivity
+    }
+
+    fun loadMoreEvmActivity() {
+        evmHistoryVisibleLimit = (evmHistoryVisibleLimit + ActivityPageSize).coerceAtMost(MaxEvmActivityItems)
     }
 
     fun closeEvmActivity() {
@@ -2525,12 +3074,48 @@ class PoctraController(private val activity: Activity) {
         selectedCircleTarget = null
         selectedCircleError = null
         selectedDAppDisplayUrl = null
-        if (isOctraCircleInput(url)) {
-            openOctraCircleBrowser(title, url)
+        val cleanUrl = url.trim()
+        val octraSpec = parseCircleInputSpec(cleanUrl)
+        if (cleanUrl.startsWith("oct://", ignoreCase = true) && octraSpec == null) {
+            showError("Enter a valid oct:// identity or Octra address.")
+            return
+        }
+        when {
+            isOctraCircleInput(cleanUrl) -> {
+                openOctraCircleBrowser(title, cleanUrl)
+                return
+            }
+            octraSpec?.identityName != null -> {
+                openOctraCircleBrowser(title, cleanUrl)
+                return
+            }
+            octraSpec?.host?.let(::isOctraAddress) == true -> {
+                openOctraAddressExplorer(title, octraSpec.host, octraSpec.host)
+                return
+            }
+        }
+        val browserUrl = runCatching { DAppUrlPolicy.normalizeBrowserUrl(cleanUrl) }.getOrElse { error ->
+            showError(error.message ?: "Enter a valid dApp URL.")
+            return
+        }
+        val rule = consumerSettingsRepository.domainGuardRuleForUrl(browserUrl)
+        if (rule != null && !rule.trusted) {
+            showError("Blocked by Phishing Guard: ${rule.host}")
             return
         }
         selectedDAppTitle = title
-        selectedDAppUrl = if (url.startsWith("http://") || url.startsWith("https://")) url else "https://$url"
+        selectedDAppUrl = browserUrl
+        route = AppRoute.DAppBrowser
+    }
+
+    private fun openOctraAddressExplorer(title: String, address: String, displayLabel: String) {
+        val url = explorerAddressUrl(address) ?: run {
+            showError("Explorer URL is not configured for the active Octra network.")
+            return
+        }
+        selectedDAppTitle = title
+        selectedDAppUrl = url
+        selectedDAppDisplayUrl = displayLabel
         route = AppRoute.DAppBrowser
     }
 
@@ -2553,7 +3138,8 @@ class PoctraController(private val activity: Activity) {
         }
     }
 
-    fun isOctraCircleInput(value: String): Boolean = parseCircleInputSpec(value) != null
+    fun isOctraCircleInput(value: String): Boolean =
+        value.trim().startsWith("oct://", ignoreCase = true) && parseCircleInputSpec(value) != null
 
     fun isCircleBrowserUrl(value: String): Boolean =
         value.startsWith("https://$CircleBrowserHost/", ignoreCase = true)
@@ -2586,9 +3172,15 @@ class PoctraController(private val activity: Activity) {
         "${activeRpcNetwork?.id.orEmpty()}:$circleId"
 
     private fun openOctraCircleBrowser(title: String, rawInput: String) {
-        selectedDAppTitle = title.takeIf { it.isNotBlank() && it != "dApp" } ?: "oct://"
+        val spec = parseCircleInputSpec(rawInput)
+        selectedDAppTitle = when {
+            title.isNotBlank() && title != "dApp" -> title
+            spec?.explicitScheme == true -> "oct://"
+            spec?.identityName != null -> spec.identityName
+            else -> "oct://"
+        }
         selectedDAppUrl = circleLoadingUrl(rawInput)
-        selectedDAppDisplayUrl = circleDisplayUri(parseCircleInputSpec(rawInput), rawInput)
+        selectedDAppDisplayUrl = if (spec?.explicitScheme == true) circleDisplayUri(spec, rawInput) else rawInput.trim()
         selectedCircleTarget = null
         selectedCircleError = null
         route = AppRoute.DAppBrowser
@@ -2616,10 +3208,19 @@ class PoctraController(private val activity: Activity) {
                 }
                 .onFailure { exception ->
                     if (serial != circleResolveSerial) return@onFailure
+                    val failureSpec = parseCircleInputSpec(rawInput)
                     selectedCircleTarget = null
                     selectedCircleError = exception.message ?: "Unable to open oct:// resource."
-                    selectedDAppDisplayUrl = circleDisplayUri(parseCircleInputSpec(rawInput), rawInput)
-                    selectedDAppTitle = "oct://"
+                    selectedDAppDisplayUrl = if (failureSpec?.explicitScheme == true) {
+                        circleDisplayUri(failureSpec, rawInput)
+                    } else {
+                        rawInput.trim()
+                    }
+                    selectedDAppTitle = when {
+                        failureSpec?.explicitScheme == true -> "oct://"
+                        failureSpec?.identityName != null -> failureSpec.identityName
+                        else -> "Octra"
+                    }
                     selectedDAppUrl = circleErrorUrl(rawInput)
                 }
         }
@@ -2645,7 +3246,7 @@ class PoctraController(private val activity: Activity) {
             return OctraCircleOpenResult.ExplorerAddress(
                 title = spec.identityName ?: shortAddress(circleId),
                 url = url,
-                displayUrl = displayUri,
+                displayUrl = spec.identityName ?: circleId,
             )
         }
         val label = spec.identityName?.let { "$it (oct://)" } ?: shortAddress(circleId)
@@ -2804,15 +3405,18 @@ class PoctraController(private val activity: Activity) {
     }
 
     fun refreshRpcStatus() {
+        val requestSerial = ++rpcStatusRequestSerial
         scope.launch {
             try {
                 rpcNetworks = rpcRepository.rpcNetworks()
                 val active = rpcRepository.activeNetwork()
+                if (requestSerial != rpcStatusRequestSerial) return@launch
                 activeRpcNetwork = active
                 rpcStatus = RpcStatus(RpcStatus.State.Checking, active.url, active.networkType)
                 val status = rpcRepository.checkStatus(active.url)
-                if (activeRpcNetwork?.id == active.id) rpcStatus = status
+                if (requestSerial == rpcStatusRequestSerial && activeRpcNetwork?.id == active.id) rpcStatus = status
             } catch (exception: Exception) {
+                if (requestSerial != rpcStatusRequestSerial) return@launch
                 val url = runCatching { currentRpcUrl }.getOrDefault("")
                 rpcStatus = RpcStatus(
                     state = RpcStatus.State.Failed,
@@ -2851,6 +3455,695 @@ class PoctraController(private val activity: Activity) {
             }
         }
     }
+
+    private fun refreshConsumerInsights() {
+        securityRisks = buildSecurityRisks()
+        refreshUnifiedActivity()
+    }
+
+    private fun refreshPortfolioHoldings() {
+        val holdings = mutableListOf<PortfolioHolding>()
+        val octSubtitle = activeRpcNetwork?.let { "${it.name} - ${it.networkType}" } ?: "Octra"
+        holdings += PortfolioHolding(
+            title = "OCT",
+            subtitle = octSubtitle,
+            balance = tokenBalance.amount,
+            fiatEstimate = tokenBalance.fiatEstimate,
+            source = "Octra",
+            riskLevel = if (rpcStatus?.state == RpcStatus.State.Failed) ConsumerRiskLevel.Warning else ConsumerRiskLevel.Safe,
+            assetId = "octra:native",
+            symbol = "OCT",
+            network = activeRpcNetwork?.networkType ?: "Octra",
+            valueUsd = (octUsdPrice ?: 0.0) * availableBalance,
+        )
+        octraTokens.forEach { token ->
+            holdings += PortfolioHolding(
+                title = token.symbol,
+                subtitle = token.name,
+                balance = token.formattedBalance,
+                fiatEstimate = "OCS01 asset",
+                source = "Octra",
+                riskLevel = ConsumerRiskLevel.Notice,
+                assetId = "octra:${token.address.lowercase()}",
+                symbol = token.symbol,
+                network = activeRpcNetwork?.networkType ?: "Octra",
+                assetAddress = token.address,
+            )
+        }
+        val evmNetwork = activeEvmNetwork ?: runCatching { evmRepository.activeNetwork() }.getOrNull()
+        val account = evmAccount
+        if (evmNetwork != null && account != null) {
+            holdings += PortfolioHolding(
+                title = evmNetwork.symbol,
+                subtitle = evmNetwork.name,
+                balance = account.balance,
+                fiatEstimate = account.fiatEstimate,
+                source = "EVM",
+                riskLevel = if (account.connected) ConsumerRiskLevel.Safe else ConsumerRiskLevel.Warning,
+                assetId = "evm:native:${evmNetwork.chainId}",
+                symbol = evmNetwork.symbol,
+                network = evmNetwork.name,
+                valueUsd = parseUsdEstimate(account.fiatEstimate),
+            )
+        }
+        evmTokens.forEach { token ->
+            val fiatEstimate = tokenFiatEstimate(token)
+            holdings += PortfolioHolding(
+                title = token.symbol,
+                subtitle = token.name,
+                balance = token.balance,
+                fiatEstimate = fiatEstimate,
+                source = evmNetwork?.name ?: "EVM",
+                riskLevel = ConsumerRiskLevel.Safe,
+                assetId = "evm:${token.chainId}:${token.address.lowercase()}",
+                symbol = token.symbol,
+                network = evmNetwork?.name ?: "EVM",
+                assetAddress = token.address,
+                valueUsd = parseUsdEstimate(fiatEstimate),
+            )
+        }
+        if (evmNfts.isNotEmpty()) {
+            holdings += PortfolioHolding(
+                title = "NFTs",
+                subtitle = evmNetwork?.name ?: "EVM collectibles",
+                balance = evmNfts.count { it.owned }.takeIf { it > 0 }?.toString() ?: evmNfts.size.toString(),
+                fiatEstimate = "Collectibles",
+                source = "EVM",
+                riskLevel = ConsumerRiskLevel.Notice,
+                assetId = "evm:nft:${evmNetwork?.chainId ?: 0L}",
+                symbol = "NFT",
+                network = evmNetwork?.name ?: "EVM",
+            )
+        }
+        val merged = mergePortfolioHoldingsWithCache(holdings)
+        portfolioHoldings = merged
+        if (merged.isNotEmpty()) persistPortfolioHoldings(merged)
+    }
+
+    private fun mergePortfolioHoldingsWithCache(current: List<PortfolioHolding>): List<PortfolioHolding> {
+        val cached = loadPortfolioHoldings()
+        if (cached.isEmpty()) return current
+        val currentIds = current.map { it.assetId }.toSet()
+        val currentNetwork = activeEvmNetwork?.name
+        val fallback = cached.filter { holding ->
+            holding.assetId !in currentIds &&
+                when {
+                    holding.assetId.startsWith("evm:") -> currentNetwork == null || holding.network == currentNetwork
+                    holding.assetId.startsWith("octra:") -> holding.assetId != "octra:native"
+                    else -> false
+                }
+        }
+        return (current + fallback).distinctBy { it.assetId }
+    }
+
+    private fun persistPortfolioHoldings(holdings: List<PortfolioHolding>) {
+        val array = JSONArray()
+        holdings.forEach { holding ->
+            array.put(
+                JSONObject()
+                    .put("title", holding.title)
+                    .put("subtitle", holding.subtitle)
+                    .put("balance", holding.balance)
+                    .put("fiatEstimate", holding.fiatEstimate)
+                    .put("source", holding.source)
+                    .put("riskLevel", holding.riskLevel.name)
+                    .put("assetId", holding.assetId)
+                    .put("symbol", holding.symbol)
+                    .put("network", holding.network)
+                    .put("assetAddress", holding.assetAddress)
+                    .put("valueUsd", holding.valueUsd),
+            )
+        }
+        uiPrefs.edit().putString(KeyPortfolioHoldings, array.toString()).apply()
+    }
+
+    private fun loadPortfolioHoldings(): List<PortfolioHolding> {
+        val raw = uiPrefs.getString(KeyPortfolioHoldings, null) ?: return emptyList()
+        return runCatching {
+            val array = JSONArray(raw)
+            buildList {
+                for (index in 0 until array.length()) {
+                    val item = array.optJSONObject(index) ?: continue
+                    add(
+                        PortfolioHolding(
+                            title = item.optString("title"),
+                            subtitle = item.optString("subtitle"),
+                            balance = item.optString("balance"),
+                            fiatEstimate = item.optString("fiatEstimate"),
+                            source = item.optString("source"),
+                            riskLevel = runCatching {
+                                ConsumerRiskLevel.valueOf(item.optString("riskLevel"))
+                            }.getOrDefault(ConsumerRiskLevel.Notice),
+                            assetId = item.optString("assetId"),
+                            symbol = item.optString("symbol"),
+                            network = item.optString("network"),
+                            assetAddress = item.optString("assetAddress").ifBlank { null },
+                            valueUsd = item.optDouble("valueUsd", 0.0),
+                        ),
+                    )
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun buildPortfolioAssetActivity(holding: PortfolioHolding): List<UnifiedActivityItem> {
+        val activeWallet = wallet
+        val octraActivity = when {
+            holding.assetId == "octra:native" -> recentTransactions.map { tx ->
+                val outgoing = activeWallet?.let { tx.isOutgoing(it.address) } ?: false
+                UnifiedActivityItem(
+                    id = "octra:${tx.hash}",
+                    title = if (outgoing) "Sent OCT" else "Received OCT",
+                    subtitle = "${tx.opType.lowercase()} - ${tx.hash.take(10)}...",
+                    amount = "${if (outgoing) "-" else "+"}${formatOctraAmount(tx.amount)} OCT",
+                    status = tx.status.ifBlank { "confirmed" },
+                    timestamp = normalizeActivityTimestamp(tx.timestamp.toLong()),
+                    glyph = if (outgoing) "send" else "receive",
+                    source = "Octra",
+                    explorerUrl = explorerTxUrl(tx.hash),
+                    assetSymbol = "OCT",
+                )
+            }
+            holding.assetId.startsWith("octra:") -> recentTransactions
+                .filter { tx ->
+                    tx.opType.contains("token", ignoreCase = true) ||
+                        tx.opType.contains("call", ignoreCase = true) ||
+                        tx.message?.contains(holding.symbol, ignoreCase = true) == true ||
+                        tx.message?.contains(holding.assetAddress.orEmpty(), ignoreCase = true) == true
+                }
+                .map { tx ->
+                    UnifiedActivityItem(
+                        id = "octra:${holding.assetId}:${tx.hash}",
+                        title = "${holding.symbol} contract activity",
+                        subtitle = "${tx.opType.lowercase()} - ${tx.hash.take(10)}...",
+                        amount = "${formatOctraAmount(tx.amount)} OCT gas",
+                        status = tx.status.ifBlank { "confirmed" },
+                        timestamp = normalizeActivityTimestamp(tx.timestamp.toLong()),
+                        glyph = "assets",
+                        source = "Octra",
+                        explorerUrl = explorerTxUrl(tx.hash),
+                        assetSymbol = holding.symbol,
+                    )
+                }
+            else -> emptyList()
+        }
+
+        val network = activeEvmNetwork ?: runCatching { evmRepository.activeNetwork() }.getOrNull()
+        val evmAddress = evmAccount?.address
+        val evmActivity = if (holding.assetId.startsWith("evm:") && network != null) {
+            evmTransactions
+                .filter { tx ->
+                    when {
+                        holding.assetId.startsWith("evm:native:") ->
+                            tx.tokenAddress.isNullOrBlank() && tx.symbol.equals(holding.symbol, ignoreCase = true)
+                        holding.assetId.startsWith("evm:nft:") ->
+                            tx.type.contains("nft", ignoreCase = true) || tx.symbol.equals("NFT", ignoreCase = true)
+                        else ->
+                            tx.tokenAddress?.equals(holding.assetAddress.orEmpty(), ignoreCase = true) == true ||
+                                tx.symbol.equals(holding.symbol, ignoreCase = true)
+                    }
+                }
+                .map { tx ->
+                    val outgoing = evmAddress?.let { tx.isOutgoing(it) } ?: false
+                    UnifiedActivityItem(
+                        id = "evm:${holding.assetId}:${tx.hash}:${tx.symbol}",
+                        title = if (outgoing) "Sent ${tx.symbol}" else "Received ${tx.symbol}",
+                        subtitle = "${tx.type.lowercase()} - ${tx.hash.take(10)}...",
+                        amount = "${if (outgoing) "-" else "+"}${tx.value} ${tx.symbol}",
+                        status = tx.status.ifBlank { "confirmed" },
+                        timestamp = normalizeActivityTimestamp(tx.timestamp),
+                        glyph = if (outgoing) "send" else "receive",
+                        source = network.name,
+                        explorerUrl = evmRepository.explorerTxUrl(network, tx.hash),
+                        assetSymbol = tx.symbol,
+                    )
+                }
+        } else {
+            emptyList()
+        }
+
+        return (octraActivity + evmActivity)
+            .distinctBy { it.id }
+            .sortedByDescending { it.timestamp }
+            .take(50)
+    }
+
+    private fun portfolioDataLoading(): Boolean =
+        tokenBalance.isLoading || assetsLoading || evmLoading || evmAssetsLoading || priceLoading
+
+    private fun syncPortfolioHoldingsAfterDataChange() {
+        val selectedAssetId = selectedPortfolioHolding?.assetId
+        refreshPortfolioHoldings()
+        if (selectedAssetId != null) {
+            val nextHolding = portfolioHoldings.firstOrNull { it.assetId == selectedAssetId } ?: selectedPortfolioHolding
+            selectedPortfolioHolding = nextHolding
+            portfolioAssetActivity = nextHolding?.let(::buildPortfolioAssetActivity).orEmpty()
+        }
+    }
+
+    fun refreshApprovalReviews() {
+        val activeWallet = wallet ?: return showError("Unlock wallet first.")
+        val network = activeEvmNetwork ?: evmRepository.activeNetwork()
+        val owner = evmAccount?.address ?: evmRepository.deriveAddress(activeWallet)
+        val tokens = evmTokens.filter { it.chainId == network.chainId }
+        val requestSerial = ++approvalReviewRequestSerial
+        approvalReviewLoading = true
+        scope.launch {
+            try {
+                val items = withContext(Dispatchers.IO) {
+                    buildList {
+                        tokens.forEach { token ->
+                            approvalSpenders().forEach spenderLoop@{ spender ->
+                                val allowance = runCatching {
+                                    evmRepository.erc20Allowance(token, owner, spender.address, network)
+                                }.getOrElse { error ->
+                                    add(
+                                        ApprovalReviewItem(
+                                            id = "${token.address}:${spender.address}",
+                                            tokenSymbol = token.symbol,
+                                            tokenName = token.name,
+                                            tokenAddress = token.address,
+                                            spenderName = spender.name,
+                                            spenderAddress = spender.address,
+                                            allowance = "Unavailable",
+                                            networkName = network.name,
+                                            level = ConsumerRiskLevel.Notice,
+                                            error = error.message ?: "Allowance lookup failed.",
+                                        ),
+                                    )
+                                    null
+                                } ?: return@spenderLoop
+                                if (allowance > BigInteger.ZERO) {
+                                    add(
+                                        ApprovalReviewItem(
+                                            id = "${token.address}:${spender.address}",
+                                            tokenSymbol = token.symbol,
+                                            tokenName = token.name,
+                                            tokenAddress = token.address,
+                                            spenderName = spender.name,
+                                            spenderAddress = spender.address,
+                                            allowance = "${formatTokenUnits(allowance, token.decimals)} ${token.symbol}",
+                                            networkName = network.name,
+                                            level = if (allowance > ApprovalLargeAllowanceRaw) ConsumerRiskLevel.Warning else ConsumerRiskLevel.Notice,
+                                        ),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                if (requestSerial == approvalReviewRequestSerial) {
+                    approvalReviews = items.sortedByDescending { it.level.ordinal }
+                }
+            } finally {
+                if (requestSerial == approvalReviewRequestSerial) approvalReviewLoading = false
+            }
+        }
+    }
+
+    fun revokeApproval(review: ApprovalReviewItem) {
+        val activeWallet = wallet ?: return showError("Unlock wallet first.")
+        val network = activeEvmNetwork ?: evmRepository.activeNetwork()
+        val token = evmTokens.firstOrNull {
+            it.chainId == network.chainId && it.address.equals(review.tokenAddress, ignoreCase = true)
+        } ?: return showError("Token is no longer available.")
+        beginSubmittedTransaction(review.spenderAddress, 0.0)
+        runBusy {
+            val result = withContext(Dispatchers.IO) {
+                evmRepository.revokeErc20Allowance(activeWallet, token, review.spenderAddress, network)
+            }
+            if (!result.success) {
+                updateSubmittedTransactionResult(
+                    hash = result.hash,
+                    recipientAddress = review.spenderAddress,
+                    amount = 0.0,
+                    status = TransactionFinality.Rejected,
+                    reason = result.error ?: "Revoke rejected.",
+                )
+                return@runBusy
+            }
+            val hash = result.hash ?: throw IllegalStateException("Revoke did not return a transaction hash.")
+            evmSendPendingTransaction = result
+            updateSubmittedTransactionResult(hash, review.spenderAddress, 0.0, TransactionFinality.Accepted)
+            pollEvmTransaction(hash, network)
+            refreshApprovalReviews()
+        }
+    }
+
+    fun addDomainGuardRule(input: String, trusted: Boolean) {
+        val next = runCatching { consumerSettingsRepository.saveDomainRule(input, trusted) }.getOrElse {
+            showError(it.message ?: "Enter a valid domain.")
+            return
+        }
+        domainGuardRules = next
+        val host = runCatching { DAppUrlPolicy.normalizeDomainHost(input) }.getOrDefault("Domain")
+        showMessage(if (trusted) "$host trusted." else "$host blocked.")
+    }
+
+    fun removeDomainGuardRule(host: String) {
+        domainGuardRules = consumerSettingsRepository.removeDomainRule(host)
+        showMessage("Domain rule removed.")
+    }
+
+    fun setNotificationPreference(key: String, enabled: Boolean) {
+        val next = when (key) {
+            "security" -> notificationPreferences.copy(securityAlerts = enabled)
+            "transactions" -> notificationPreferences.copy(transactionAlerts = enabled)
+            "bridge" -> notificationPreferences.copy(bridgeAlerts = enabled)
+            "price" -> notificationPreferences.copy(priceAlerts = enabled)
+            else -> notificationPreferences
+        }
+        notificationPreferences = consumerSettingsRepository.saveNotificationPreferences(next)
+    }
+
+    fun saveFundingProvider(id: String, url: String, enabled: Boolean) {
+        fundingProviders = runCatching {
+            consumerSettingsRepository.saveFundingProvider(id, url, enabled)
+        }.getOrElse { error ->
+            showError(error.message ?: "Enter a valid HTTPS provider URL.")
+            return
+        }
+        showMessage("Funding provider updated.")
+    }
+
+    fun openFundingProvider(provider: FundingProvider) {
+        if (!provider.enabled || provider.url.isBlank()) {
+            showError("Configure and enable this provider first.")
+            return
+        }
+        openDAppBrowser(provider.name, provider.url)
+    }
+
+    fun refreshSimulationChecks() {
+        val checks = mutableListOf<SimulationCheck>()
+        val activeWallet = wallet
+        checks += if (activeWallet != null) {
+            SimulationCheck("Wallet unlocked", "Local preflight can compare balance, fee, recipient format, and active network.", ConsumerRiskLevel.Safe)
+        } else {
+            SimulationCheck("Wallet locked", "Unlock wallet to simulate sends before signing.", ConsumerRiskLevel.Warning)
+        }
+        checks += when (rpcStatus?.state) {
+            RpcStatus.State.Connected -> SimulationCheck("Octra RPC ready", currentRpcUrl, ConsumerRiskLevel.Safe)
+            RpcStatus.State.Failed -> SimulationCheck("Octra RPC unavailable", rpcStatus?.message ?: "Active RPC failed.", ConsumerRiskLevel.Warning)
+            else -> SimulationCheck("Octra RPC not checked", "Refresh Overview before high-value actions.", ConsumerRiskLevel.Notice)
+        }
+        val account = evmAccount
+        checks += if (account?.connected == true) {
+            SimulationCheck("EVM gas ready", "${activeEvmNetwork?.name ?: "EVM"} gas price ${account.gasPriceGwei} Gwei.", ConsumerRiskLevel.Safe)
+        } else {
+            SimulationCheck("EVM simulation limited", account?.message ?: "Open EVM Account to sync gas and balance.", ConsumerRiskLevel.Notice)
+        }
+        if (dApps.any { dAppRiskItems(it).any { risk -> risk.level.ordinal >= ConsumerRiskLevel.Warning.ordinal } }) {
+            checks += SimulationCheck("dApp risk review", "Some connected dApps can request contract calls.", ConsumerRiskLevel.Warning)
+        }
+        simulationChecks = checks.sortedByDescending { it.level.ordinal }
+    }
+
+    private fun refreshUnifiedActivity() {
+        val activeWallet = wallet
+        val octraItems = recentTransactions.map { tx ->
+            val outgoing = activeWallet?.let { tx.isOutgoing(it.address) } ?: false
+            UnifiedActivityItem(
+                id = "octra:${tx.hash}",
+                title = if (outgoing) "Sent OCT" else "Received OCT",
+                subtitle = "${tx.opType.lowercase()} - ${tx.hash.take(10)}...",
+                amount = "${if (outgoing) "-" else "+"}${formatOctraAmount(tx.amount)} OCT",
+                status = tx.status.ifBlank { "confirmed" },
+                timestamp = normalizeActivityTimestamp(tx.timestamp.toLong()),
+                glyph = if (outgoing) "send" else "receive",
+                source = "Octra",
+                explorerUrl = explorerTxUrl(tx.hash),
+                assetSymbol = "OCT",
+            )
+        }
+        val evmItems = evmTransactions.map { tx ->
+            val outgoing = evmAccount?.let { tx.isOutgoing(it.address) } ?: false
+            UnifiedActivityItem(
+                id = "evm:${tx.hash}",
+                title = if (outgoing) "Sent ${tx.symbol}" else "Received ${tx.symbol}",
+                subtitle = "${tx.type.lowercase()} - ${tx.hash.take(10)}...",
+                amount = "${if (outgoing) "-" else "+"}${tx.value} ${tx.symbol}",
+                status = tx.status.ifBlank { "confirmed" },
+                timestamp = normalizeActivityTimestamp(tx.timestamp),
+                glyph = if (outgoing) "send" else "receive",
+                source = activeEvmNetwork?.name ?: "EVM",
+                explorerUrl = activeEvmNetwork?.let { evmRepository.explorerTxUrl(it, tx.hash) },
+                assetSymbol = tx.symbol,
+            )
+        }
+        val bridgeItems = bridgeHistory.map { item ->
+            UnifiedActivityItem(
+                id = "bridge:${item.id}",
+                title = if (item.direction == BridgeDirection.OctToWoct) "Bridge OCT to wOCT" else "Bridge wOCT to OCT",
+                subtitle = item.message.ifBlank { item.direction.name },
+                amount = "${item.amount} ${if (item.direction == BridgeDirection.OctToWoct) "OCT" else "wOCT"}",
+                status = item.status,
+                timestamp = normalizeActivityTimestamp(maxOf(item.updatedAt, item.createdAt)),
+                glyph = "bridge",
+                source = "Bridge",
+                explorerUrl = bridgeHistoryExplorerUrl(item),
+                assetSymbol = if (item.direction == BridgeDirection.OctToWoct) "OCT" else "wOCT",
+            )
+        }
+        val dAppItems = dApps.map { session ->
+            UnifiedActivityItem(
+                id = "dapp:${session.url}:${session.connectedAt}",
+                title = "Connected dApp",
+                subtitle = session.name,
+                amount = "${session.permissions.size} permissions",
+                status = "connected",
+                timestamp = normalizeActivityTimestamp(session.connectedAt),
+                glyph = "dapp",
+                source = session.network,
+            )
+        }
+        unifiedActivity = (octraItems + evmItems + bridgeItems + dAppItems)
+            .sortedByDescending { it.timestamp }
+            .take(80)
+    }
+
+    private fun bridgeHistoryExplorerUrl(item: BridgeHistoryItem): String? =
+        item.evmTxHash?.let { bridgeRepository.explorerTxUrl(it) }
+            ?: item.octraTxHash?.let { bridgeRepository.octraExplorerTxUrl(it) }
+
+    private fun buildSecurityRisks(): List<ConsumerRiskItem> {
+        val risks = mutableListOf<ConsumerRiskItem>()
+        val method = currentSecurityMethod
+        risks += if (method == SecurityMethod.Biometric) {
+            ConsumerRiskItem("Biometric lock enabled", "Sensitive actions require Android biometric authentication.", ConsumerRiskLevel.Safe)
+        } else if (method == SecurityMethod.Pin) {
+            ConsumerRiskItem("PIN fallback active", "Use a strong PIN and avoid sharing your unlocked device.", ConsumerRiskLevel.Notice)
+        } else {
+            ConsumerRiskItem("Wallet security not configured", "Set biometric or PIN protection before storing value.", ConsumerRiskLevel.Critical)
+        }
+
+        val activeWallet = wallet
+        val backupLabel = activeWallet?.type?.let {
+            when (it) {
+                WalletType.Generated -> "Generated wallet"
+                WalletType.ImportedMnemonic -> "Imported mnemonic"
+                WalletType.ImportedPrivateKey -> "Imported Octra key"
+                WalletType.ImportedEthereumPrivateKey -> "Imported Ethereum key"
+            }
+        } ?: "No wallet"
+        risks += ConsumerRiskItem(
+            title = "Backup keys available",
+            description = "$backupLabel recovery material is stored locally. Reveal it only in Settings > Backup Keys.",
+            level = ConsumerRiskLevel.Notice,
+        )
+
+        val status = rpcStatus
+        risks += when (status?.state) {
+            RpcStatus.State.Connected -> ConsumerRiskItem("Octra RPC connected", status.url, ConsumerRiskLevel.Safe)
+            RpcStatus.State.Failed -> ConsumerRiskItem("Octra RPC warning", status.message ?: "Active RPC is unavailable.", ConsumerRiskLevel.Warning)
+            RpcStatus.State.Checking -> ConsumerRiskItem("Network check in progress", "poctra is checking the active RPC.", ConsumerRiskLevel.Notice)
+            null -> ConsumerRiskItem("Network not checked", "Refresh the wallet to verify RPC status.", ConsumerRiskLevel.Notice)
+        }
+
+        val dangerousDApps = dApps.filter { session ->
+            session.permissions.any { it == "contract_calls" } || DAppUrlPolicy.isSuspiciousOrigin(session.url)
+        }
+        risks += when {
+            dApps.isEmpty() -> ConsumerRiskItem("No connected dApps", "No site currently has wallet permissions.", ConsumerRiskLevel.Safe)
+            dangerousDApps.isEmpty() -> ConsumerRiskItem("Connected dApps", "${dApps.size} site(s) can read this wallet address.", ConsumerRiskLevel.Notice)
+            else -> ConsumerRiskItem("Review dApp permissions", "${dangerousDApps.size} connected site(s) have contract or suspicious permissions.", ConsumerRiskLevel.Warning)
+        }
+
+        if (activeIdentityProvider == null) {
+            risks += ConsumerRiskItem("Octra Identity unavailable", "Add an identity provider to resolve foo.oct recipients.", ConsumerRiskLevel.Notice)
+        } else {
+            risks += ConsumerRiskItem("Octra Identity ready", activeIdentityProvider?.contractAddress.orEmpty(), ConsumerRiskLevel.Safe)
+        }
+
+        if (addressBookContacts.isEmpty()) {
+            risks += ConsumerRiskItem("No trusted contacts", "Save frequent recipients to reduce address mistakes.", ConsumerRiskLevel.Notice)
+        }
+
+        return risks.sortedByDescending { it.level.ordinal }
+    }
+
+    fun octraRecipientRiskItems(
+        recipientInput: String,
+        resolvedAddress: String?,
+        amount: String,
+    ): List<ConsumerRiskItem> {
+        val cleanRecipient = recipientInput.trim()
+        if (cleanRecipient.isBlank()) return emptyList()
+        val address = resolvedAddress?.ifBlank { null } ?: cleanRecipient
+        val amountValue = amount.replace(",", ".").toDoubleOrNull() ?: 0.0
+        val knownContact = addressBookContacts.any {
+            it.address.equals(address, ignoreCase = true) ||
+                it.identityName?.equals(cleanRecipient, ignoreCase = true) == true
+        }
+        val items = mutableListOf<ConsumerRiskItem>()
+        if (!knownContact && wallet?.address?.equals(address, ignoreCase = true) != true) {
+            items += ConsumerRiskItem("New recipient", "This address is not in your Address Book.", ConsumerRiskLevel.Notice)
+        }
+        if (isIdentityNameInput(cleanRecipient.lowercase())) {
+            items += ConsumerRiskItem("Identity resolved", "$cleanRecipient resolves before sending.", ConsumerRiskLevel.Safe)
+        }
+        if (amountValue > availableBalance && amountValue > 0.0) {
+            items += ConsumerRiskItem("Amount exceeds balance", "Max available balance is ${formatOctraAmount(availableBalance)} OCT before fee.", ConsumerRiskLevel.Warning)
+        }
+        if (activeRpcNetwork?.networkType == "devnet") {
+            items += ConsumerRiskItem("Devnet active", "This transfer uses the active Octra devnet RPC.", ConsumerRiskLevel.Notice)
+        }
+        return items
+    }
+
+    fun evmRecipientRiskItems(recipientInput: String, amount: String): List<ConsumerRiskItem> {
+        val cleanRecipient = recipientInput.trim()
+        if (cleanRecipient.isBlank()) return emptyList()
+        val amountValue = amount.replace(",", ".").toBigDecimalOrNull() ?: BigDecimal.ZERO
+        val network = activeEvmNetwork ?: evmRepository.activeNetwork()
+        val items = mutableListOf<ConsumerRiskItem>()
+        if (cleanRecipient.endsWith(".eth", ignoreCase = true)) {
+            items += ConsumerRiskItem("ENS lookup", "$cleanRecipient will resolve before sending.", ConsumerRiskLevel.Safe)
+        } else if (!cleanRecipient.startsWith("0x", ignoreCase = true) || cleanRecipient.length != 42) {
+            items += ConsumerRiskItem("Recipient format", "Use a valid 0x address or ENS name.", ConsumerRiskLevel.Warning)
+        }
+        val nativeBalance = evmAccount?.balance?.replace(",", ".")?.toBigDecimalOrNull() ?: BigDecimal.ZERO
+        if (evmSelectedSendToken == null && evmSelectedSendNft == null && amountValue > nativeBalance && amountValue > BigDecimal.ZERO) {
+            items += ConsumerRiskItem("Amount exceeds balance", "Available balance is ${evmAccount?.balance ?: "0"} ${network.symbol}.", ConsumerRiskLevel.Warning)
+        }
+        if (network.isTestnet) {
+            items += ConsumerRiskItem("Testnet active", "This transaction uses ${network.name}.", ConsumerRiskLevel.Notice)
+        }
+        return items
+    }
+
+    fun evmSendPreflightItems(
+        recipientInput: String,
+        resolvedAddress: String?,
+        amount: String,
+    ): List<ConsumerRiskItem> {
+        val cleanRecipient = recipientInput.trim()
+        if (cleanRecipient.isBlank()) return emptyList()
+        val amountValue = amount.replace(",", ".").toBigDecimalOrNull() ?: BigDecimal.ZERO
+        val network = activeEvmNetwork ?: evmRepository.activeNetwork()
+        val account = evmAccount
+        val items = mutableListOf<ConsumerRiskItem>()
+
+        items += evmRecipientRiskItems(cleanRecipient, amount)
+
+        if (resolvedAddress?.startsWith("0x", ignoreCase = true) == true) {
+            items += ConsumerRiskItem("Recipient resolved", "${shortAddress(resolvedAddress)} on ${network.name}.", ConsumerRiskLevel.Safe)
+        }
+
+        items += if (account?.connected == true) {
+            ConsumerRiskItem("RPC ready", "${network.name} gas price ${account.gasPriceGwei} Gwei.", ConsumerRiskLevel.Safe)
+        } else {
+            ConsumerRiskItem("RPC not ready", account?.message ?: "Refresh EVM Account before sending.", ConsumerRiskLevel.Warning)
+        }
+
+        val gasReady = evmSendGasEstimate
+        items += when {
+            evmSendGasLoading -> ConsumerRiskItem("Gas check running", "poctra is estimating gas for this transfer.", ConsumerRiskLevel.Notice)
+            gasReady != null -> ConsumerRiskItem("Gas estimate ready", "${gasReady.label}: ${gasReady.gasLimit} gas.", ConsumerRiskLevel.Safe)
+            else -> ConsumerRiskItem("Gas not reviewed", "Open the review sheet to estimate gas before signing.", ConsumerRiskLevel.Notice)
+        }
+
+        when {
+            evmSelectedSendNft != null -> {
+                val nft = evmSelectedSendNft
+                if (nft?.owned == true) {
+                    items += ConsumerRiskItem("NFT ownership checked", "${nft.symbol} #${nft.tokenId} is marked as owned.", ConsumerRiskLevel.Safe)
+                } else {
+                    items += ConsumerRiskItem("NFT not owned", "This NFT is not available in the active account.", ConsumerRiskLevel.Warning)
+                }
+            }
+            evmSelectedSendToken != null -> {
+                val token = evmSelectedSendToken
+                val tokenBalance = token?.balance?.replace(",", ".")?.toBigDecimalOrNull() ?: BigDecimal.ZERO
+                if (amountValue > BigDecimal.ZERO && amountValue <= tokenBalance) {
+                    items += ConsumerRiskItem("Token balance ready", "Available ${token?.balance ?: "0"} ${token?.symbol ?: "TOKEN"}.", ConsumerRiskLevel.Safe)
+                } else if (amountValue > tokenBalance) {
+                    items += ConsumerRiskItem("Token balance low", "Available ${token?.balance ?: "0"} ${token?.symbol ?: "TOKEN"}.", ConsumerRiskLevel.Warning)
+                }
+            }
+            else -> {
+                val nativeBalance = account?.balance?.replace(",", ".")?.toBigDecimalOrNull() ?: BigDecimal.ZERO
+                val gasReserve = evmGasCostAmount(null)
+                if (amountValue > BigDecimal.ZERO && amountValue.add(gasReserve) <= nativeBalance) {
+                    items += ConsumerRiskItem("Balance includes gas", "Amount plus estimated gas fits current ${network.symbol} balance.", ConsumerRiskLevel.Safe)
+                }
+            }
+        }
+
+        return items.distinctBy { "${it.level}:${it.title}:${it.description}" }
+            .sortedByDescending { it.level.ordinal }
+    }
+
+    fun dAppRiskItems(session: DAppSession): List<ConsumerRiskItem> {
+        val items = mutableListOf<ConsumerRiskItem>()
+        if (DAppUrlPolicy.isSuspiciousOrigin(session.url)) {
+            items += ConsumerRiskItem("Suspicious origin", "Non-HTTPS, IP, or punycode origins deserve extra caution.", ConsumerRiskLevel.Warning)
+        }
+        if ("contract_calls" in session.permissions) {
+            items += ConsumerRiskItem("Contract calls allowed", "This dApp can request contract transactions.", ConsumerRiskLevel.Warning)
+        }
+        if (items.isEmpty()) {
+            items += ConsumerRiskItem("Read-only connection", "This dApp can read wallet metadata until revoked.", ConsumerRiskLevel.Notice)
+        }
+        return items
+    }
+
+    private fun tokenFiatEstimate(token: EvmToken): String {
+        val balance = token.balance.replace(",", ".").toBigDecimalOrNull()
+        return when {
+            token.symbol.equals("USDT", ignoreCase = true) && balance != null -> "~ ${formatUsd(balance.toDouble())} USD"
+            token.symbol.equals("wOCT", ignoreCase = true) && balance != null && octUsdPrice != null -> "~ ${formatUsd(balance.toDouble() * (octUsdPrice ?: 0.0))} USD"
+            else -> "Token balance"
+        }
+    }
+
+    private fun parseUsdEstimate(value: String): Double {
+        val match = Regex("""([0-9][0-9,]*\.?[0-9]*)""").find(value) ?: return 0.0
+        return match.value.replace(",", "").toDoubleOrNull() ?: 0.0
+    }
+
+    private data class ApprovalSpender(val name: String, val address: String)
+
+    private fun approvalSpenders(): List<ApprovalSpender> = listOf(
+        ApprovalSpender("Uniswap Permit2", Permit2Address),
+        ApprovalSpender("Uniswap Router", UniversalRouterAddress),
+        ApprovalSpender("Octra wOCT Bridge", BridgeRepository.WoctBridgeContract),
+    ).distinctBy { it.address.lowercase() }
+
+    private fun formatTokenUnits(raw: BigInteger, decimals: Int): String {
+        if (raw == BigInteger.ZERO) return "0"
+        val divisor = BigInteger.TEN.pow(decimals.coerceIn(0, 36)).toBigDecimal()
+        return raw.toBigDecimal()
+            .divide(divisor, 8, RoundingMode.DOWN)
+            .stripTrailingZeros()
+            .toPlainString()
+    }
+
+    private fun normalizeActivityTimestamp(value: Long): Long =
+        if (value in 1 until 10_000_000_000L) value * 1000L else value
+
+    private fun formatOctraAmount(value: Double): String =
+        BigDecimal.valueOf(value).setScale(6, RoundingMode.HALF_UP).stripTrailingZeros().toPlainString()
 
     private fun refreshIdentityProviders() {
         val network = currentIdentityNetwork()
@@ -2943,15 +4236,18 @@ class PoctraController(private val activity: Activity) {
                     "octra_sendContractTransaction" -> {
                         val session = dAppSession(origin, activeWallet.address)
                             ?: throw SecurityException("Connect poctra before sending contract calls.")
-                        if (!session.permissions.contains("contract_calls")) {
-                            throw SecurityException("The dApp is missing contract call permission.")
-                        }
+                        val needsContractPermission = !session.permissions.contains("contract_calls")
                         val call = contractCallRequest(request.opt("params"))
                         val contract = call.getString("address")
                         val callMethod = call.getString("method")
                         val amountOu = call.optString("amount", "0").ifBlank { "0" }
                         val params = call.optJSONArray("params") ?: JSONArray()
                         val providedFee = call.optString("fee").takeIf { it.isNotBlank() }
+                        val permissionDetails = if (needsContractPermission) {
+                            listOf(DAppRequestDetail("Permission", "Grant contract_calls for this dApp."))
+                        } else {
+                            emptyList()
+                        }
                         queueDAppApproval(
                             origin = origin,
                             title = "Approve contract call",
@@ -2963,11 +4259,14 @@ class PoctraController(private val activity: Activity) {
                                 DAppRequestDetail("Amount", "$amountOu ou (${formatOuAmount(amountOu)} OCT)"),
                                 DAppRequestDetail("Fee", providedFee?.let { "$it ou" } ?: "Auto"),
                                 DAppRequestDetail("Params", if (params.length() == 0) "[]" else params.toString(2)),
-                            ),
+                            ) + permissionDetails,
                             approveLabel = "Approve",
                             onSuccess = onSuccess,
                             onError = onError,
                         ) {
+                            if (needsContractPermission) {
+                                authorizeDApp(origin, activeWallet.address, (session.permissions + "contract_calls").distinct())
+                            }
                             val amountOct = amountOu.toDoubleOrNull()?.div(MicroUnits.toDouble()) ?: 0.0
                             beginSubmittedTransaction(contract, amountOct, showDialog = false)
                             val feeOu = providedFee?.toLongOrNull()
@@ -3105,6 +4404,8 @@ class PoctraController(private val activity: Activity) {
 
     fun lookupAsset(contractAddress: String) {
         val activeWallet = wallet ?: return
+        val requestRpcUrl = currentRpcUrl
+        val walletAddress = activeWallet.address
         if (!contractAddress.startsWith("oct") || contractAddress.length != 47) {
             showError("Enter a valid Octra contract address (oct..., 47 chars).")
             return
@@ -3113,9 +4414,12 @@ class PoctraController(private val activity: Activity) {
             assetLookupLoading = true
             clearError()
             try {
-                assetPreview = rpcRepository.lookupOctraToken(contractAddress, activeWallet.address)
+                val preview = rpcRepository.lookupOctraToken(contractAddress, walletAddress, requestRpcUrl)
+                if (!isActiveRpcSnapshot(walletAddress, requestRpcUrl)) return@launch
+                assetPreview = preview
                 if (assetPreview == null) showError("Token not found or not a valid OCS01 contract.")
             } catch (exception: Exception) {
+                if (!isActiveRpcSnapshot(walletAddress, requestRpcUrl)) return@launch
                 showError(exception.message ?: "Token lookup failed.")
             } finally {
                 assetLookupLoading = false
@@ -3125,7 +4429,7 @@ class PoctraController(private val activity: Activity) {
 
     fun addPreviewAsset() {
         val token = assetPreview ?: return
-        assetRepository.saveTokenAddress(rpcRepository.currentNetwork(), token.address)
+        assetRepository.saveTokenAddress(activeRpcNetwork?.networkType ?: networkFor(currentRpcUrl), token.address)
         assetPreview = null
         dashboardTab = DashboardTab.Assets
         route = AppRoute.Dashboard
@@ -3134,7 +4438,7 @@ class PoctraController(private val activity: Activity) {
     }
 
     fun removeAsset(token: OctraToken) {
-        assetRepository.removeTokenAddress(rpcRepository.currentNetwork(), token.address)
+        assetRepository.removeTokenAddress(activeRpcNetwork?.networkType ?: networkFor(currentRpcUrl), token.address)
         refreshAssets()
     }
 
@@ -3283,16 +4587,23 @@ class PoctraController(private val activity: Activity) {
     }
 
     fun refreshRecommendedFee(opType: String = "standard") {
+        val requestSerial = ++feeRequestSerial
+        val requestRpcUrl = currentRpcUrl
+        val requestWalletAddress = wallet?.address.orEmpty()
         feeLoading = true
         scope.launch {
             try {
-                recommendedFeeOu = withContext(Dispatchers.IO) {
-                    rpcRepository.fetchRecommendedFee(opType)
+                val fee = withContext(Dispatchers.IO) {
+                    rpcRepository.fetchRecommendedFee(opType, requestRpcUrl)
                 }
+                if (requestSerial != feeRequestSerial) return@launch
+                if (requestWalletAddress.isNotBlank() && !isActiveRpcSnapshot(requestWalletAddress, requestRpcUrl)) return@launch
+                recommendedFeeOu = fee
             } catch (_: Exception) {
+                if (requestSerial != feeRequestSerial) return@launch
                 recommendedFeeOu = 1000L
             } finally {
-                feeLoading = false
+                if (requestSerial == feeRequestSerial) feeLoading = false
             }
         }
     }
@@ -3434,12 +4745,21 @@ class PoctraController(private val activity: Activity) {
     fun refreshEvmAccount() {
         val activeWallet = wallet ?: return
         val network = activeEvmNetwork ?: evmRepository.activeNetwork()
+        val requestSerial = ++evmAccountRequestSerial
+        val walletAddress = activeWallet.address
         evmLoading = true
         scope.launch {
             try {
-                evmAccount = withContext(Dispatchers.IO) { evmRepository.fetchAccount(activeWallet, network) }
+                val account = withContext(Dispatchers.IO) { evmRepository.fetchAccount(activeWallet, network) }
+                if (requestSerial != evmAccountRequestSerial || !isActiveEvmSnapshot(walletAddress, network.id)) return@launch
+                evmAccount = account
+                syncPortfolioHoldingsAfterDataChange()
+            } catch (_: Exception) {
+                if (requestSerial == evmAccountRequestSerial && isActiveEvmSnapshot(walletAddress, network.id)) {
+                    syncPortfolioHoldingsAfterDataChange()
+                }
             } finally {
-                evmLoading = false
+                if (requestSerial == evmAccountRequestSerial) evmLoading = false
             }
         }
     }
@@ -3447,16 +4767,34 @@ class PoctraController(private val activity: Activity) {
     fun refreshEvmAssets() {
         val activeWallet = wallet ?: return
         val network = activeEvmNetwork ?: evmRepository.activeNetwork()
+        val requestSerial = ++evmAssetsRequestSerial
+        val walletAddress = activeWallet.address
+        val expectedAddress = evmRepository.deriveAddress(activeWallet)
         evmAssetsLoading = true
         scope.launch {
             try {
-                val account = evmAccount ?: withContext(Dispatchers.IO) { evmRepository.fetchAccount(activeWallet, network) }.also {
-                    evmAccount = it
+                val account = evmAccount?.takeIf { it.address.equals(expectedAddress, ignoreCase = true) }
+                    ?: withContext(Dispatchers.IO) { evmRepository.fetchAccount(activeWallet, network) }
+                if (requestSerial != evmAssetsRequestSerial || !isActiveEvmSnapshot(walletAddress, network.id)) return@launch
+                if (evmAccount?.address?.equals(account.address, ignoreCase = true) != true) {
+                    evmAccount = account
                 }
-                evmTokens = withContext(Dispatchers.IO) { evmRepository.refreshTokens(account.address, network) }
-                evmNfts = withContext(Dispatchers.IO) { evmRepository.refreshNfts(account.address, network) }
+                val tokens = withContext(Dispatchers.IO) {
+                    evmRepository.refreshTokens(account.address, network, persistBalances = false)
+                }
+                val nfts = withContext(Dispatchers.IO) {
+                    evmRepository.refreshNfts(account.address, network, persistOwnership = false)
+                }
+                if (requestSerial != evmAssetsRequestSerial || !isActiveEvmSnapshot(walletAddress, network.id)) return@launch
+                evmTokens = tokens
+                evmNfts = nfts
+                syncPortfolioHoldingsAfterDataChange()
+            } catch (_: Exception) {
+                if (requestSerial == evmAssetsRequestSerial && isActiveEvmSnapshot(walletAddress, network.id)) {
+                    syncPortfolioHoldingsAfterDataChange()
+                }
             } finally {
-                evmAssetsLoading = false
+                if (requestSerial == evmAssetsRequestSerial) evmAssetsLoading = false
             }
         }
     }
@@ -3464,21 +4802,34 @@ class PoctraController(private val activity: Activity) {
     fun refreshEvmHistory() {
         val activeWallet = wallet ?: return
         val network = activeEvmNetwork ?: evmRepository.activeNetwork()
+        val requestSerial = ++evmHistoryRequestSerial
+        val walletAddress = activeWallet.address
+        val expectedAddress = evmRepository.deriveAddress(activeWallet)
         evmHistoryLoading = true
         scope.launch {
             try {
-                val account = evmAccount ?: withContext(Dispatchers.IO) { evmRepository.fetchAccount(activeWallet, network) }.also {
-                    evmAccount = it
+                val account = evmAccount?.takeIf { it.address.equals(expectedAddress, ignoreCase = true) }
+                    ?: withContext(Dispatchers.IO) { evmRepository.fetchAccount(activeWallet, network) }
+                if (requestSerial != evmHistoryRequestSerial || !isActiveEvmSnapshot(walletAddress, network.id)) return@launch
+                if (evmAccount?.address?.equals(account.address, ignoreCase = true) != true) {
+                    evmAccount = account
                 }
-                evmTransactions = withContext(Dispatchers.IO) {
+                val transactions = withContext(Dispatchers.IO) {
                     evmRepository.fetchTransactions(
                         address = account.address,
                         network = network,
                         tokenAddresses = evmRepository.savedTokens(network.chainId).map { it.address },
                     )
                 }
+                if (requestSerial != evmHistoryRequestSerial || !isActiveEvmSnapshot(walletAddress, network.id)) return@launch
+                evmTransactions = transactions
+                if (selectedPortfolioHolding != null) syncPortfolioHoldingsAfterDataChange()
+            } catch (_: Exception) {
+                if (requestSerial == evmHistoryRequestSerial && isActiveEvmSnapshot(walletAddress, network.id)) {
+                    if (selectedPortfolioHolding != null) syncPortfolioHoldingsAfterDataChange()
+                }
             } finally {
-                evmHistoryLoading = false
+                if (requestSerial == evmHistoryRequestSerial) evmHistoryLoading = false
             }
         }
     }
@@ -3506,6 +4857,7 @@ class PoctraController(private val activity: Activity) {
     fun addEvmTokenPreview() {
         val token = evmTokenPreview ?: return
         evmTokens = evmRepository.saveToken(token)
+        syncPortfolioHoldingsAfterDataChange()
         evmTokenPreview = null
         showMessage("${token.symbol} added.")
         route = AppRoute.Evm
@@ -3519,6 +4871,7 @@ class PoctraController(private val activity: Activity) {
 
     fun removeEvmToken(token: EvmToken) {
         evmTokens = evmRepository.removeToken(token)
+        syncPortfolioHoldingsAfterDataChange()
         showMessage("${token.symbol} removed.")
         refreshEvmHistory()
     }
@@ -3546,6 +4899,7 @@ class PoctraController(private val activity: Activity) {
     fun addEvmNftPreview() {
         val nft = evmNftPreview ?: return
         evmNfts = evmRepository.saveNft(nft)
+        syncPortfolioHoldingsAfterDataChange()
         evmNftPreview = null
         showMessage("${nft.symbol} #${nft.tokenId} added.")
         route = AppRoute.Evm
@@ -3554,6 +4908,7 @@ class PoctraController(private val activity: Activity) {
 
     fun removeEvmNft(nft: EvmNft) {
         evmNfts = evmRepository.removeNft(nft)
+        syncPortfolioHoldingsAfterDataChange()
         showMessage("${nft.symbol} #${nft.tokenId} removed.")
     }
 
@@ -3630,6 +4985,16 @@ class PoctraController(private val activity: Activity) {
         else openDAppBrowser("EVM Transaction", url)
     }
 
+    fun retryPreparedEvmSendGasEstimate() {
+        if (evmSendGasLoading) return
+        if (evmSendDialogRecipient.isBlank() || (evmSelectedSendNft == null && evmSendDialogAmount.isBlank())) {
+            showError("Enter recipient and amount before estimating gas.")
+            return
+        }
+        clearError()
+        estimatePreparedEvmSendGas()
+    }
+
     private fun estimatePreparedEvmSendGas() {
         val activeWallet = wallet ?: return
         val network = activeEvmNetwork ?: evmRepository.activeNetwork()
@@ -3656,6 +5021,7 @@ class PoctraController(private val activity: Activity) {
     }
 
     private fun resetEvmSendDialogProgress() {
+        evmSendPollSerial++
         evmSendPendingTransaction = null
         evmSendSpeedUpBusy = false
         evmSendGasEstimate = null
@@ -3899,10 +5265,27 @@ class PoctraController(private val activity: Activity) {
             }
             AppRoute.SecuritySettings,
             AppRoute.BackupSettings,
+            AppRoute.SecurityCenter,
+            AppRoute.PortfolioAnalytics,
+            AppRoute.ApprovalDashboard,
+            AppRoute.DomainGuard,
+            AppRoute.RecoveryPlan,
+            AppRoute.NotificationSettings,
+            AppRoute.FundingProviders,
+            AppRoute.OctraProfile,
+            AppRoute.SimulationCenter,
             AppRoute.AppearanceSettings,
             AppRoute.ConnectedDApps,
             AppRoute.IdentityProviderSettings -> {
                 closeSettingsDetail()
+                true
+            }
+            AppRoute.PortfolioAssetHistory -> {
+                closePortfolioAssetHistory()
+                true
+            }
+            AppRoute.ActivityCenter -> {
+                closeActivityCenter()
                 true
             }
             AppRoute.RpcAddNetwork -> {
@@ -3935,6 +5318,10 @@ class PoctraController(private val activity: Activity) {
             }
             AppRoute.Receive -> {
                 closeReceive()
+                true
+            }
+            AppRoute.PaymentRequest -> {
+                closePaymentRequest()
                 true
             }
             AppRoute.Bridge -> {
@@ -4082,39 +5469,51 @@ class PoctraController(private val activity: Activity) {
     }
 
     private fun refreshBalance(activeWallet: Wallet) = scope.launch {
+        val requestSerial = ++balanceRequestSerial
+        val requestRpcUrl = currentRpcUrl
+        val walletAddress = activeWallet.address
         tokenBalance = tokenBalance.copy(isLoading = true, error = null)
         try {
             val snapshot = withContext(Dispatchers.IO) {
-                rpcRepository.fetchBalance(activeWallet.address)
+                rpcRepository.fetchBalance(walletAddress, requestRpcUrl)
             }
+            if (requestSerial != balanceRequestSerial || !isActiveRpcSnapshot(walletAddress, requestRpcUrl)) return@launch
             availableBalance = snapshot.balance
             tokenBalance = snapshot.toTokenBalance()
             updateFiatEstimate()
+            syncPortfolioHoldingsAfterDataChange()
         } catch (exception: Exception) {
-            availableBalance = 0.0
+            if (requestSerial != balanceRequestSerial || !isActiveRpcSnapshot(walletAddress, requestRpcUrl)) return@launch
             tokenBalance = tokenBalance.copy(
-                amount = "--",
-                fiatEstimate = "Balance unavailable",
+                fiatEstimate = tokenBalance.fiatEstimate.takeIf { it.isNotBlank() && it != "~ $-- USD" } ?: "Balance unavailable",
                 isLoading = false,
                 error = exception.message ?: "Balance unavailable",
             )
+            syncPortfolioHoldingsAfterDataChange()
         }
     }
 
     private fun refreshAssets() {
         val activeWallet = wallet ?: return
+        val requestSerial = ++assetsRequestSerial
+        val requestRpcUrl = currentRpcUrl
+        val requestNetwork = activeRpcNetwork?.networkType ?: networkFor(requestRpcUrl)
+        val walletAddress = activeWallet.address
         assetsLoading = true
         scope.launch {
             try {
-                val network = rpcRepository.currentNetwork()
-                val saved = assetRepository.savedTokenAddresses(network)
-                octraTokens = withContext(Dispatchers.IO) {
-                    rpcRepository.fetchOctraTokens(activeWallet.address, saved)
+                val saved = assetRepository.savedTokenAddresses(requestNetwork)
+                val tokens = withContext(Dispatchers.IO) {
+                    rpcRepository.fetchOctraTokens(walletAddress, saved, requestRpcUrl)
                 }
+                if (requestSerial != assetsRequestSerial || !isActiveRpcSnapshot(walletAddress, requestRpcUrl)) return@launch
+                octraTokens = tokens
+                syncPortfolioHoldingsAfterDataChange()
             } catch (_: Exception) {
-                octraTokens = emptyList()
+                if (requestSerial != assetsRequestSerial || !isActiveRpcSnapshot(walletAddress, requestRpcUrl)) return@launch
+                syncPortfolioHoldingsAfterDataChange()
             } finally {
-                assetsLoading = false
+                if (requestSerial == assetsRequestSerial) assetsLoading = false
             }
         }
     }
@@ -4129,6 +5528,7 @@ class PoctraController(private val activity: Activity) {
                 octPriceRepository.fetchUsdPrice()?.let { price ->
                     octUsdPrice = price
                     updateFiatEstimate()
+                    syncPortfolioHoldingsAfterDataChange()
                 }
             } finally {
                 priceLoading = false
@@ -4148,21 +5548,26 @@ class PoctraController(private val activity: Activity) {
         }
         val requestLimit = historyLimit
         val requestSerial = ++historyRequestSerial
+        val requestRpcUrl = currentRpcUrl
+        val walletAddress = activeWallet.address
         historyLoading = true
         kotlinx.coroutines.coroutineScope {
             try {
                 val transactions = withContext(Dispatchers.IO) {
-                    rpcRepository.fetchTransactionHistory(activeWallet.address, requestLimit)
+                    rpcRepository.fetchTransactionHistory(walletAddress, requestLimit, requestRpcUrl)
                 }
-                if (requestSerial == historyRequestSerial && historyLimit == requestLimit) {
+                if (requestSerial == historyRequestSerial && historyLimit == requestLimit && isActiveRpcSnapshot(walletAddress, requestRpcUrl)) {
                     recentTransactions = transactions
                     historyCanLoadMore = requestLimit < MaxHistoryLimit && transactions.size >= requestLimit
                     refreshRecentActivityIdentityNames(transactions)
+                    if (selectedPortfolioHolding != null) syncPortfolioHoldingsAfterDataChange()
                 }
             } catch (_: Exception) {
-                if (requestSerial == historyRequestSerial && historyLimit == requestLimit) {
-                    recentTransactions = emptyList()
-                    historyCanLoadMore = false
+                if (requestSerial == historyRequestSerial && historyLimit == requestLimit && isActiveRpcSnapshot(walletAddress, requestRpcUrl)) {
+                    if (recentTransactions.isEmpty()) {
+                        historyCanLoadMore = false
+                    }
+                    if (selectedPortfolioHolding != null) syncPortfolioHoldingsAfterDataChange()
                 }
             } finally {
                 if (requestSerial == historyRequestSerial) historyLoading = false
@@ -4195,7 +5600,7 @@ class PoctraController(private val activity: Activity) {
     }
 
     private fun pollSubmittedTransaction(hash: String) {
-        transactionStatusPolling = true
+        beginTransactionPolling()
         scope.launch {
             try {
                 repeat(TransactionConfirmationAttempts) { attempt ->
@@ -4230,25 +5635,31 @@ class PoctraController(private val activity: Activity) {
                 }
                 refreshDashboard()
             } finally {
-                transactionStatusPolling = false
+                endTransactionPolling()
             }
         }
     }
 
     private fun pollEvmTransaction(hash: String, network: EvmNetwork) {
-        transactionStatusPolling = true
+        val pollSerial = ++evmSendPollSerial
+        beginTransactionPolling()
         scope.launch {
             try {
-                repeat(TransactionConfirmationAttempts) { attempt ->
+                repeat(EvmSendReceiptAttempts) { attempt ->
+                    if (pollSerial != evmSendPollSerial) return@launch
                     val state = withContext(Dispatchers.IO) { evmRepository.transactionReceiptStatus(hash, network) }
                     when (state.status) {
                         TransactionNetworkStatus.Confirmed -> {
+                            if (pollSerial != evmSendPollSerial) return@launch
                             updateSubmittedTransaction(hash, TransactionFinality.Confirmed)
+                            evmSendPendingTransaction = null
                             refreshEvmDashboard()
+                            if (route == AppRoute.ApprovalDashboard) refreshApprovalReviews()
                             return@launch
                         }
                         TransactionNetworkStatus.Rejected,
                         TransactionNetworkStatus.Dropped -> {
+                            if (pollSerial != evmSendPollSerial) return@launch
                             updateSubmittedTransaction(hash, TransactionFinality.Rejected, state.reason)
                             refreshEvmDashboard()
                             return@launch
@@ -4256,17 +5667,17 @@ class PoctraController(private val activity: Activity) {
                         TransactionNetworkStatus.Pending,
                         TransactionNetworkStatus.NotFound -> Unit
                     }
-                    if (attempt < TransactionConfirmationAttempts - 1) delay(TransactionPollingIntervalMs)
+                    if (attempt < EvmSendReceiptAttempts - 1) delay(EvmSendReceiptIntervalMs)
                 }
-                refreshEvmDashboard()
+                if (pollSerial == evmSendPollSerial) refreshEvmDashboard()
             } finally {
-                transactionStatusPolling = false
+                endTransactionPolling()
             }
         }
     }
 
     private fun pollTradeTransaction(hash: String) {
-        transactionStatusPolling = true
+        beginTransactionPolling()
         scope.launch {
             try {
                 repeat(TransactionConfirmationAttempts) { attempt ->
@@ -4291,7 +5702,7 @@ class PoctraController(private val activity: Activity) {
                 }
                 refreshTrade()
             } finally {
-                transactionStatusPolling = false
+                endTransactionPolling()
             }
         }
     }
@@ -4380,6 +5791,10 @@ class PoctraController(private val activity: Activity) {
         onError: (Int, String) -> Unit,
         action: suspend () -> String,
     ) {
+        if (pendingDAppRequest != null) {
+            onError(-32002, "Another poctra request is waiting for approval.")
+            return
+        }
         pendingDAppRequest = PendingDAppRequest(
             origin = origin,
             title = title,
@@ -4439,9 +5854,14 @@ class PoctraController(private val activity: Activity) {
                 }
             }
         }
-        return requested.ifEmpty {
-            listOf("read_address", "read_balance", "read_public_key", "contract_calls")
-        }.distinct()
+        val allowed = setOf("read_address", "read_balance", "read_public_key", "contract_calls")
+        val sanitized = requested
+            .map { it.trim() }
+            .filter { it in allowed }
+            .distinct()
+        return sanitized.ifEmpty {
+            listOf("read_address", "read_balance", "read_public_key")
+        }
     }
 
     private fun contractCallRequest(raw: Any?): JSONObject {
@@ -4497,6 +5917,7 @@ class PoctraController(private val activity: Activity) {
         val host: String,
         val path: String,
         val identityName: String?,
+        val explicitScheme: Boolean,
     )
 
     private fun parseCircleInputSpec(value: String): CircleInputSpec? {
@@ -4504,7 +5925,8 @@ class PoctraController(private val activity: Activity) {
         if (raw.isBlank()) return null
         if (raw.startsWith("http://", ignoreCase = true) || raw.startsWith("https://", ignoreCase = true)) return null
 
-        val withoutScheme = if (raw.startsWith("oct://", ignoreCase = true)) raw.drop(6) else raw
+        val explicitScheme = raw.startsWith("oct://", ignoreCase = true)
+        val withoutScheme = if (explicitScheme) raw.drop(6) else raw
         val clean = withoutScheme.trim().substringBefore('?').substringBefore('#')
         if (clean.isBlank()) return null
 
@@ -4512,11 +5934,11 @@ class PoctraController(private val activity: Activity) {
         val host = if (slashIndex >= 0) clean.take(slashIndex).trim() else clean.trim()
         val path = if (slashIndex >= 0) normalizeCirclePath(clean.substring(slashIndex)) else "/index.html"
         if (host.isBlank()) return null
-        if (isOctraAddress(host)) return CircleInputSpec(host = host, path = path, identityName = null)
+        if (isOctraAddress(host)) return CircleInputSpec(host = host, path = path, identityName = null, explicitScheme = explicitScheme)
 
         val identity = host.lowercase()
         if (identity.endsWith(".oct") && isIdentityNameInput(identity)) {
-            return CircleInputSpec(host = identity, path = path, identityName = identity)
+            return CircleInputSpec(host = identity, path = path, identityName = identity, explicitScheme = explicitScheme)
         }
         return null
     }
@@ -4610,7 +6032,7 @@ class PoctraController(private val activity: Activity) {
 
     private fun runBusy(block: suspend () -> Unit) {
         scope.launch {
-            busy = true
+            beginBusyOperation()
             clearError()
             try {
                 block()
@@ -4618,9 +6040,29 @@ class PoctraController(private val activity: Activity) {
                 rejectSubmittingTransaction(exception.message ?: "Transaction failed.")
                 showError(exception.message ?: "Something went wrong.")
             } finally {
-                busy = false
+                endBusyOperation()
             }
         }
+    }
+
+    private fun beginBusyOperation() {
+        busyOperationCount += 1
+        busy = true
+    }
+
+    private fun endBusyOperation() {
+        busyOperationCount = (busyOperationCount - 1).coerceAtLeast(0)
+        busy = busyOperationCount > 0
+    }
+
+    private fun beginTransactionPolling() {
+        transactionPollingCount += 1
+        transactionStatusPolling = true
+    }
+
+    private fun endTransactionPolling() {
+        transactionPollingCount = (transactionPollingCount - 1).coerceAtLeast(0)
+        transactionStatusPolling = transactionPollingCount > 0
     }
 
     private fun String?.toGasPriceWeiOrNull(): BigInteger? {
@@ -4656,24 +6098,38 @@ class PoctraController(private val activity: Activity) {
     companion object {
         private const val KeyDarkMode = "dark_mode"
         private const val KeyDarkDefaultMigrated = "dark_default_migrated"
-        private const val InitialHistoryLimit = 10
-        private const val HistoryPageSize = 10
+        private const val KeyTradeChartCachePrefix = "trade_chart_cache_"
+        private const val InitialHistoryLimit = 7
+        private const val HistoryPageSize = 7
+        private const val InitialActivityLimit = 7
+        private const val ActivityPageSize = 7
         private const val MaxHistoryLimit = 50
+        private const val MaxUnifiedActivityItems = 80
+        private const val MaxEvmActivityItems = 20
+        private const val ActivityCenterSyncTimeoutMs = 8_000L
         private const val KeyBridgeHistory = "bridge_history"
         private const val MaxBridgeHistoryItems = 25
+        private const val KeyPortfolioHoldings = "portfolio_holdings"
         private const val MicroUnits = 1_000_000L
         private const val BridgeFeeReserveOu = 10_000L
         private const val PriceRefreshMs = 60_000L
         private const val TransactionConfirmationAttempts = 15
         private const val TransactionPollingIntervalMs = 2_000L
+        private const val EvmSendReceiptAttempts = 80
+        private const val EvmSendReceiptIntervalMs = 3_000L
         private const val BridgeEvmReceiptAttempts = 100
         private const val BridgeEvmReceiptIntervalMs = 3_000L
         private const val BridgeClaimRetryAttempts = 8
         private const val BridgeClaimRetryDelayMs = 8_000L
+        private const val TradeChartManualCooldownMs = 20_000L
+        private const val TradeChartRateLimitCooldownMs = 120_000L
         private const val EvmNativeGasLimit = 21_000L
         private const val EvmTokenGasLimit = 80_000L
         private const val EvmNftGasLimit = 120_000L
         private const val HiddenEvmRpcKey = "<hidden>"
+        private const val Permit2Address = "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+        private const val UniversalRouterAddress = "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af"
+        private val ApprovalLargeAllowanceRaw = BigInteger("1000000000000000000000000")
         const val CircleBrowserHost = "octra-circle.local"
     }
 }

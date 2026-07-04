@@ -54,21 +54,37 @@ class OctraIdentityProviderRepository(context: Context) {
     }
 
     private fun allProviders(): List<OctraIdentityProvider> {
-        val raw = prefs.getString(KeyProviders, null) ?: return listOf(defaultDevnetProvider()).also(::persist)
-        return runCatching {
-            val array = JSONArray(raw)
-            buildList {
-                for (index in 0 until array.length()) {
-                    val provider = migrateProvider(OctraIdentityProvider.fromJson(array.getJSONObject(index)))
-                    if (provider.contractAddress.isNotBlank()) add(provider)
+        val raw = prefs.getString(KeyProviders, null)
+        val loaded = if (raw.isNullOrBlank()) {
+            emptyList()
+        } else {
+            runCatching {
+                val array = JSONArray(raw)
+                buildList {
+                    for (index in 0 until array.length()) {
+                        val provider = migrateProvider(OctraIdentityProvider.fromJson(array.getJSONObject(index)))
+                        if (provider.contractAddress.isNotBlank()) add(provider)
+                    }
                 }
-            }.also(::persist)
-        }.getOrDefault(emptyList())
+            }.getOrDefault(emptyList())
+        }
+        return withDefaultProviders(loaded).also(::persist)
     }
 
     private fun persist(providers: List<OctraIdentityProvider>) {
         val distinct = providers.distinctBy { "${it.network}:${it.contractAddress}" }
         prefs.edit().putString(KeyProviders, JSONArray().apply { distinct.forEach { put(it.toJson()) } }.toString()).apply()
+    }
+
+    private fun withDefaultProviders(providers: List<OctraIdentityProvider>): List<OctraIdentityProvider> {
+        val next = providers.toMutableList()
+        if (next.none { it.network == "mainnet" && it.contractAddress == DefaultMainnetProviderContract }) {
+            next.add(0, defaultMainnetProvider())
+        }
+        if (next.none { it.network == "devnet" && it.contractAddress == DefaultDevnetProviderContract }) {
+            next.add(defaultDevnetProvider())
+        }
+        return next
     }
 
     private fun activeKey(network: String): String = "active_provider_$network"
@@ -93,10 +109,19 @@ class OctraIdentityProviderRepository(context: Context) {
         network = "devnet",
     )
 
+    private fun defaultMainnetProvider(): OctraIdentityProvider = OctraIdentityProvider(
+        id = DefaultMainnetProviderId,
+        name = "Octra Identity",
+        contractAddress = DefaultMainnetProviderContract,
+        network = "mainnet",
+    )
+
     companion object {
         private const val KeyProviders = "providers"
+        private const val DefaultMainnetProviderId = "identity-mainnet-octra-id"
         private const val DefaultDevnetProviderId = "identity-devnet-octra-id"
         private val LegacyDevnetProviderContracts = setOf("octD5RqXkTbHMCpaMaw2QnMSTpHNu7LRdgidbVDNmkDCuzb", "octAuuNU6wRkTXY7H9JXquwtgpNeCJTRhE7DmQSWSfKQ5nb", "octCL7symfEG2YMtH9KTvY8u823xJ2a7azyVzw6jVTKD5JT", "oct94s4b1cN2Tn3YVdqeayitwQBYkNBL8SMDUEdoaVqNV95", "oct7HNMuQDUNhZWgAPBs1PnFeZUfqcYoWvFCAtd7UbNMT1Z")
+        private const val DefaultMainnetProviderContract = "octH1GEiwunjEZyiBMjp1ETy1VUJJKEEnsMRZ8P2AvTC3et"
         private const val DefaultDevnetProviderContract = "oct8oCgpxvdEytE7tkfjyF8am3xvK28J6rJApkv3omRQnKH"
     }
 }

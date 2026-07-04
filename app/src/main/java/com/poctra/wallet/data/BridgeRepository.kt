@@ -967,21 +967,26 @@ class BridgeRepository {
             setRequestProperty("Content-Type", "application/json")
             setRequestProperty("User-Agent", PoctraUserAgent)
         }
-        OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { writer ->
-            writer.write(payload.toString())
+        return try {
+            OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { writer ->
+                writer.write(payload.toString())
+            }
+            val responseCode = connection.responseCode
+            val stream = if (responseCode in 200..299) {
+                connection.inputStream
+            } else {
+                connection.errorStream ?: connection.inputStream
+            }
+            val body = stream.bufferedReader().use { it.readText() }
+            if (responseCode !in 200..299) throw IllegalStateException("HTTP $responseCode")
+            val json = JSONObject(body)
+            json.optJSONObject("error")?.let { error ->
+                throw IllegalStateException(error.optString("message", "Bridge RPC error."))
+            }
+            if (json.has("result")) json.get("result") else null
+        } finally {
+            connection.disconnect()
         }
-        val stream = if (connection.responseCode in 200..299) {
-            connection.inputStream
-        } else {
-            connection.errorStream ?: connection.inputStream
-        }
-        val body = stream.bufferedReader().use { it.readText() }
-        if (connection.responseCode !in 200..299) throw IllegalStateException("HTTP ${connection.responseCode}")
-        val json = JSONObject(body)
-        json.optJSONObject("error")?.let { error ->
-            throw IllegalStateException(error.optString("message", "Bridge RPC error."))
-        }
-        return if (json.has("result")) json.get("result") else null
     }
 
     private fun encodeStringUint(text: String, amount: BigInteger): String {

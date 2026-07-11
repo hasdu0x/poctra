@@ -81,14 +81,14 @@ fun PoctraButton(
     val shape = RoundedCornerShape(Radius.md)
     val visualCompact = !fullHeight && (compact || variant != ButtonVariant.Primary)
     val buttonHeight = if (visualCompact) 44.dp else 56.dp
-    val keyEdgeHeight = if (visualCompact) 2.dp else 3.dp
+    val keyEdgeHeight = if (visualCompact) 1.dp else 2.dp
     val contentIconSize = if (visualCompact) 16.dp else 18.dp
     val contentGap = if (visualCompact) Space.x3 else Space.x4
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
     val pressScale by animateFloatAsState(
-        targetValue = if (pressed && enabled && !loading) 0.992f else 1f,
-        animationSpec = tween(90, easing = FastOutSlowInEasing),
+        targetValue = if (pressed && enabled && !loading) 0.982f else 1f,
+        animationSpec = tween(130, easing = FastOutSlowInEasing),
         label = "poctraButtonPressScale",
     )
     val buttonContentColor = when (variant) {
@@ -116,7 +116,13 @@ fun PoctraButton(
                     )
                     Spacer(Modifier.width(contentGap))
                 }
-                Text(text = text, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    text = text,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }
@@ -212,16 +218,19 @@ fun PoctraTextField(
         value = value,
         onValueChange = onValueChange,
         modifier = modifier.fillMaxWidth(),
-        label = { Text(label) },
-        placeholder = placeholder?.let { { Text(it) } },
+        label = { Text(label, style = MaterialTheme.typography.labelMedium) },
+        placeholder = placeholder?.let {
+            { Text(it, color = TextSecondary.copy(alpha = 0.78f), style = MaterialTheme.typography.bodyMedium) }
+        },
         singleLine = singleLine,
         minLines = minLines,
         isError = isError,
-        supportingText = supportingText?.let { { Text(it) } },
+        supportingText = supportingText?.let { { Text(it, style = MaterialTheme.typography.labelSmall) } },
         leadingIcon = leadingContent,
         trailingIcon = trailingContent,
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
         visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
+        shape = RoundedCornerShape(Radius.md),
         colors = OutlinedTextFieldDefaults.colors(
             focusedTextColor = TextTertiary,
             unfocusedTextColor = TextTertiary,
@@ -235,6 +244,10 @@ fun PoctraTextField(
             errorBorderColor = ErrorRed,
             errorLabelColor = ErrorRed,
             errorSupportingTextColor = ErrorRed,
+            focusedLeadingIconColor = SurfaceRaised,
+            unfocusedLeadingIconColor = TextSecondary,
+            focusedTrailingIconColor = SurfaceRaised,
+            unfocusedTrailingIconColor = TextSecondary,
         ),
     )
 }
@@ -250,7 +263,7 @@ fun UrlGoButton(
             .padding(end = Space.x1)
             .size(22.dp)
             .clip(RoundedCornerShape(Radius.sm))
-            .background(if (enabled) SurfaceRaised else SurfaceMuted)
+            .background(if (enabled) SurfaceRaised.copy(alpha = 0.14f) else SurfaceMuted)
             .clickable(enabled = enabled, onClick = onClick)
             .semantics { contentDescription = "Open dApp URL" },
         contentAlignment = Alignment.Center,
@@ -258,7 +271,7 @@ fun UrlGoButton(
         GlyphIcon(
             glyph = Glyph.Go,
             modifier = Modifier.size(11.dp),
-            color = if (enabled) PrimaryContent else TextSecondary.copy(alpha = 0.45f),
+            color = if (enabled) SurfaceRaised else TextSecondary.copy(alpha = 0.45f),
         )
     }
 }
@@ -274,7 +287,7 @@ fun AddressBookFieldButton(
             .padding(end = Space.x1)
             .size(22.dp)
             .clip(RoundedCornerShape(Radius.sm))
-            .background(if (enabled) SurfaceRaised else SurfaceMuted)
+            .background(if (enabled) SurfaceRaised.copy(alpha = 0.14f) else SurfaceMuted)
             .clickable(enabled = enabled, onClick = onClick)
             .semantics { contentDescription = "Choose from Address Book" },
         contentAlignment = Alignment.Center,
@@ -282,7 +295,7 @@ fun AddressBookFieldButton(
         GlyphIcon(
             glyph = Glyph.AddressBook,
             modifier = Modifier.size(12.dp),
-            color = if (enabled) PrimaryContent else TextSecondary.copy(alpha = 0.45f),
+            color = if (enabled) SurfaceRaised else TextSecondary.copy(alpha = 0.45f),
         )
     }
 }
@@ -313,46 +326,35 @@ fun StateBanner(
     modifier: Modifier = Modifier,
     isError: Boolean = true,
     compact: Boolean = false,
+    solid: Boolean = false,
 ) {
-    val color = if (isError) ErrorRed else SurfaceRaised
-    val textColor = when {
-        compact -> PrimaryContent
-        isError -> ErrorRed
-        else -> TextTertiary
-    }
+    val color = if (isError) ErrorRed else InfoBlue
     Row(
         modifier = modifier
             .clip(RoundedCornerShape(Radius.sm))
-            .background(if (compact) color else color.copy(alpha = 0.14f))
-            .border(1.dp, if (compact) color else color.copy(alpha = 0.45f), RoundedCornerShape(Radius.sm))
-            .padding(horizontal = if (compact) Space.x5 else Space.x6, vertical = if (compact) Space.x4 else Space.x6),
+            .background(if (solid) SurfaceStrong else color.copy(alpha = if (compact) 0.10f else 0.12f))
+            .border(1.dp, color.copy(alpha = if (compact) 0.28f else 0.36f), RoundedCornerShape(Radius.sm))
+            .padding(horizontal = if (compact) Space.x5 else Space.x6, vertical = if (compact) Space.x3 else Space.x5),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
             modifier = Modifier
                 .size(if (compact) 22.dp else 28.dp)
                 .clip(RoundedCornerShape(Radius.md))
-                .background(
-                    when {
-                        compact && isError -> Color.White.copy(alpha = 0.18f)
-                        compact -> PrimaryContent.copy(alpha = 0.12f)
-                        isError -> color.copy(alpha = 0.18f)
-                        else -> color.copy(alpha = 0.28f)
-                    },
-                ),
+                .background(color.copy(alpha = 0.14f)),
             contentAlignment = Alignment.Center,
         ) {
             GlyphIcon(
-                glyph = if (isError) Glyph.Info else Glyph.Check,
+                glyph = Glyph.Info,
                 modifier = Modifier.size(if (compact) 14.dp else 16.dp),
-                color = if (isError && !compact) ErrorRed else PrimaryContent,
+                color = color,
             )
         }
         Spacer(Modifier.width(if (compact) Space.x4 else Space.x5))
         Text(
             text = text,
-            color = textColor,
-            style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.bodyMedium,
+            color = if (isError) ErrorRed else TextTertiary,
+            style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.bodySmall,
             fontWeight = FontWeight.SemiBold,
             maxLines = if (compact) 2 else 3,
             overflow = TextOverflow.Ellipsis,
@@ -413,15 +415,27 @@ fun IconCircleButton(
     buttonSize: Dp = 44.dp,
     iconSize: Dp = 22.dp,
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed && enabled) 0.94f else 1f,
+        animationSpec = tween(120, easing = FastOutSlowInEasing),
+        label = "iconButtonScale",
+    )
     IconButton(
         onClick = onClick,
         enabled = enabled,
+        interactionSource = interactionSource,
         modifier = modifier
             .size(buttonSize)
             .semantics { this.contentDescription = contentDescription }
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
             .clip(RoundedCornerShape(Radius.md))
             .background(if (enabled) SurfaceStrong else SurfaceMuted)
-            .border(1.dp, BorderLine, RoundedCornerShape(Radius.md)),
+            .border(1.dp, BorderLine.copy(alpha = 0.82f), RoundedCornerShape(Radius.md)),
     ) {
         GlyphIcon(
             glyph = glyph,
@@ -493,19 +507,26 @@ fun InlineListAction(
 
 @Composable
 fun NetworkBadge(text: String, state: String? = null, modifier: Modifier = Modifier) {
-    val borderColor = when (state) {
+    val resolvedState = state ?: when (text.trim().lowercase()) {
+        "confirmed", "completed", "connected", "success", "active", "open" -> "connected"
+        "failed", "rejected", "dropped", "error", "closed" -> "failed"
+        else -> null
+    }
+    val borderColor = when (resolvedState) {
         "connected" -> SurfaceRaised
         "failed" -> ErrorRed
-        else -> TextSecondary
+        else -> InfoBlue
     }
     Text(
         text = text.trim().replaceFirstChar { it.uppercase() },
         modifier = modifier
             .clip(RoundedCornerShape(Radius.md))
-            .border(1.dp, borderColor.copy(alpha = 0.65f), RoundedCornerShape(Radius.md))
+            .background(borderColor.copy(alpha = 0.10f))
+            .border(1.dp, borderColor.copy(alpha = 0.30f), RoundedCornerShape(Radius.md))
             .padding(horizontal = Space.x6, vertical = Space.x3),
-        color = TextTertiary,
+        color = borderColor,
         style = MaterialTheme.typography.labelSmall,
+        fontWeight = FontWeight.SemiBold,
     )
 }
 

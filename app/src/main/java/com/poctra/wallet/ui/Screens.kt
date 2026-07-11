@@ -190,7 +190,17 @@ private val OverviewHeaderHeight = 48.dp
 fun PoctraApp(activity: Activity, controller: PoctraController) {
     Surface(color = SurfaceBase, modifier = Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize()) {
-            when (controller.route) {
+            AnimatedContent(
+                targetState = controller.route,
+                transitionSpec = {
+                    fadeIn(animationSpec = tween(180, delayMillis = 30, easing = FastOutSlowInEasing)) togetherWith
+                        fadeOut(animationSpec = tween(120))
+                },
+                contentAlignment = Alignment.Center,
+                modifier = Modifier.fillMaxSize(),
+                label = "appRouteTransition",
+            ) { route ->
+                when (route) {
                 AppRoute.Loading -> LoadingScreen()
                 AppRoute.Welcome -> WelcomeScreen(controller)
                 AppRoute.ImportWallet -> ImportWalletScreen(controller)
@@ -235,6 +245,7 @@ fun PoctraApp(activity: Activity, controller: PoctraController) {
                 AppRoute.TransactionDetails -> TransactionDetailsScreen(controller)
                 AppRoute.DAppBrowser -> DAppBrowserScreen(controller)
                 AppRoute.About -> AboutScreen(controller)
+                }
             }
 
             controller.error?.let { message ->
@@ -254,6 +265,7 @@ fun PoctraApp(activity: Activity, controller: PoctraController) {
                         modifier = Modifier.clickable { controller.clearError() },
                         isError = controller.noticeIsError,
                         compact = true,
+                        solid = true,
                     )
                 }
             }
@@ -1915,15 +1927,24 @@ private fun DashboardScreen(controller: PoctraController) {
                 .padding(horizontal = Space.x8, vertical = Space.x7)
                 .padding(bottom = 106.dp),
         ) {
-            when (controller.dashboardTab) {
-                DashboardTab.Overview -> OverviewContent(
-                    controller = controller,
-                    address = wallet.address,
-                    onOpenWallets = { walletDrawerOpen = true },
-                )
-                DashboardTab.Assets -> AssetsContent(controller)
-                DashboardTab.Explore -> ExploreDAppsContent(controller)
-                DashboardTab.Trade -> TradeContent(controller)
+            AnimatedContent(
+                targetState = controller.dashboardTab,
+                transitionSpec = {
+                    fadeIn(animationSpec = tween(180, easing = FastOutSlowInEasing)) togetherWith
+                        fadeOut(animationSpec = tween(120))
+                },
+                label = "dashboardTabTransition",
+            ) { tab ->
+                when (tab) {
+                    DashboardTab.Overview -> OverviewContent(
+                        controller = controller,
+                        address = wallet.address,
+                        onOpenWallets = { walletDrawerOpen = true },
+                    )
+                    DashboardTab.Assets -> AssetsContent(controller)
+                    DashboardTab.Explore -> ExploreDAppsContent(controller)
+                    DashboardTab.Trade -> TradeContent(controller)
+                }
             }
         }
 
@@ -6186,10 +6207,10 @@ private fun DashboardBottomNav(
         modifier = modifier
             .fillMaxWidth()
             .navigationBarsPadding()
-            .padding(horizontal = Space.x8, vertical = Space.x6)
+            .padding(horizontal = Space.x8, vertical = Space.x5)
             .clip(RoundedCornerShape(Radius.md))
             .background(SurfaceStrong)
-            .border(1.dp, BorderLine, RoundedCornerShape(Radius.md))
+            .border(1.dp, BorderLine.copy(alpha = 0.86f), RoundedCornerShape(Radius.md))
             .padding(Space.x3),
         horizontalArrangement = Arrangement.spacedBy(Space.x3),
     ) {
@@ -6233,7 +6254,7 @@ private fun BottomNavItem(
     modifier: Modifier = Modifier,
 ) {
     val itemScale by animateFloatAsState(
-        targetValue = if (selected) 1.02f else 1f,
+        targetValue = if (selected) 1f else 0.98f,
         animationSpec = tween(ScrimMotionMillis, easing = FastOutSlowInEasing),
         label = "bottomNavItemScale",
     )
@@ -6245,17 +6266,25 @@ private fun BottomNavItem(
                 scaleY = itemScale
             }
             .clip(RoundedCornerShape(Radius.md))
-            .background(if (selected) SurfaceRaised else Color.Transparent)
+            .background(if (selected) SurfaceRaised.copy(alpha = 0.12f) else Color.Transparent)
             .clickable(onClick = onClick)
-            .padding(horizontal = Space.x2, vertical = Space.x4),
+            .padding(horizontal = Space.x2, vertical = Space.x3),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        GlyphIcon(glyph, modifier = Modifier.size(18.dp), color = if (selected) PrimaryContent else TextSecondary)
+        Box(
+            modifier = Modifier
+                .width(16.dp)
+                .height(2.dp)
+                .clip(RoundedCornerShape(Radius.pill))
+                .background(if (selected) SurfaceRaised else Color.Transparent),
+        )
+        Spacer(Modifier.height(Space.x2))
+        GlyphIcon(glyph, modifier = Modifier.size(17.dp), color = if (selected) SurfaceRaised else TextSecondary)
         Spacer(Modifier.height(Space.x2))
         Text(
             label,
-            color = if (selected) PrimaryContent else TextSecondary,
+            color = if (selected) SurfaceRaised else TextSecondary,
             fontWeight = FontWeight.SemiBold,
             style = MaterialTheme.typography.labelSmall,
             maxLines = 1,
@@ -11619,7 +11648,7 @@ private fun SettingsSectionTitle(title: String) {
         text = title,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = Space.x4),
+            .padding(top = Space.x5, bottom = Space.x1),
         color = TextSecondary,
         style = MaterialTheme.typography.labelSmall,
         fontWeight = FontWeight.SemiBold,
@@ -11633,34 +11662,55 @@ private fun SettingsDestinationButton(
     glyph: Glyph,
     onClick: () -> Unit,
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.988f else 1f,
+        animationSpec = tween(130, easing = FastOutSlowInEasing),
+        label = "settingsDestinationScale",
+    )
     Card(
+        onClick = onClick,
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick),
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            },
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
         border = BorderStroke(1.dp, BorderLine),
+        interactionSource = interactionSource,
     ) {
         Row(
-            modifier = Modifier.padding(Space.x7),
+            modifier = Modifier.padding(horizontal = Space.x6, vertical = Space.x5),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(
                 modifier = Modifier
-                    .size(42.dp)
+                    .size(38.dp)
                     .clip(RoundedCornerShape(Radius.md))
-                    .background(SurfaceRaised.copy(alpha = 0.14f)),
+                    .background(SurfaceRaised.copy(alpha = 0.12f)),
                 contentAlignment = Alignment.Center,
             ) {
-                GlyphIcon(glyph, modifier = Modifier.size(22.dp), color = SurfaceRaised)
+                GlyphIcon(glyph, modifier = Modifier.size(19.dp), color = SurfaceRaised)
             }
-            Spacer(Modifier.width(Space.x6))
+            Spacer(Modifier.width(Space.x5))
             Column(Modifier.weight(1f)) {
                 Text(title, color = TextTertiary, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(Space.x2))
-                Text(subtitle, color = TextSecondary, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(Space.x1))
+                Text(subtitle, color = TextSecondary, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            GlyphIcon(Glyph.Go, modifier = Modifier.size(20.dp), color = TextSecondary)
+            Spacer(Modifier.width(Space.x4))
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(RoundedCornerShape(Radius.sm))
+                    .background(SurfaceMuted.copy(alpha = 0.76f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                GlyphIcon(Glyph.Go, modifier = Modifier.size(14.dp), color = TextSecondary)
+            }
         }
     }
 }
@@ -11673,18 +11723,20 @@ private fun CompactScreenIntro(glyph: Glyph, description: String) {
     ) {
         Box(
             modifier = Modifier
-                .size(42.dp)
+                .size(38.dp)
                 .clip(RoundedCornerShape(Radius.md))
-                .background(SurfaceRaised.copy(alpha = 0.14f)),
+                .background(SurfaceRaised.copy(alpha = 0.12f)),
             contentAlignment = Alignment.Center,
         ) {
-            GlyphIcon(glyph, modifier = Modifier.size(22.dp), color = SurfaceRaised)
+            GlyphIcon(glyph, modifier = Modifier.size(19.dp), color = SurfaceRaised)
         }
-        Spacer(Modifier.width(Space.x6))
+        Spacer(Modifier.width(Space.x5))
         Text(
             text = description,
             color = TextSecondary,
-            style = MaterialTheme.typography.labelSmall,
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }
@@ -11720,27 +11772,8 @@ fun SettingsDetailScreen(
             )
             headerAction?.invoke()
         }
-        Spacer(Modifier.height(34.dp))
-        Box(
-            modifier = Modifier
-                .size(70.dp)
-                .clip(RoundedCornerShape(Radius.md))
-                .background(SurfaceRaised.copy(alpha = 0.14f)),
-            contentAlignment = Alignment.Center,
-        ) {
-            GlyphIcon(glyph, modifier = Modifier.size(34.dp), color = SurfaceRaised)
-        }
-        Spacer(Modifier.height(Space.x8))
-        Text(title, color = TextTertiary, style = MaterialTheme.typography.titleLarge, textAlign = TextAlign.Center)
-        Spacer(Modifier.height(Space.x4))
-        Text(
-            description,
-            color = TextSecondary,
-            textAlign = TextAlign.Center,
-            style = MaterialTheme.typography.labelSmall,
-            maxLines = 3,
-            overflow = TextOverflow.Ellipsis,
-        )
+        Spacer(Modifier.height(Space.x7))
+        CompactScreenIntro(glyph = glyph, description = description)
         Spacer(Modifier.height(Space.x8))
         content()
     }

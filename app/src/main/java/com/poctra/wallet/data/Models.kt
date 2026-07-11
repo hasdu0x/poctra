@@ -36,6 +36,7 @@ data class Wallet(
     val mnemonic: String?,
     val type: WalletType,
     val name: String = "",
+    val identiconSvg: String = "",
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("address", address)
@@ -43,6 +44,7 @@ data class Wallet(
         .put("publicKey", publicKeyHex)
         .put("type", type.storageValue)
         .put("name", name)
+        .put("identiconSvg", identiconSvg)
         .apply {
             if (!mnemonic.isNullOrBlank()) put("mnemonic", mnemonic)
         }
@@ -59,6 +61,7 @@ data class Wallet(
             },
             type = WalletType.fromStorage(json.optString("type")),
             name = json.optString("name"),
+            identiconSvg = json.optString("identiconSvg"),
         )
     }
 }

@@ -52,6 +52,7 @@ import com.poctra.wallet.data.TradeSwapStage
 import com.poctra.wallet.data.SubmittedTransaction
 import com.poctra.wallet.data.TransactionFinality
 import com.poctra.wallet.data.Wallet
+import com.poctra.wallet.data.WalletIdenticon
 import com.poctra.wallet.data.WalletType
 import com.poctra.wallet.data.WalletVault
 import com.poctra.wallet.data.TransactionNetworkState
@@ -64,7 +65,10 @@ import com.poctra.wallet.security.SecureWalletStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -97,10 +101,8 @@ enum class AppRoute {
     ApprovalDashboard,
     DomainGuard,
     RecoveryPlan,
-    NotificationSettings,
     FundingProviders,
     OctraProfile,
-    SimulationCenter,
     AppearanceSettings,
     ConnectedDApps,
     IdentityProviderSettings,
@@ -132,6 +134,37 @@ data class OctraCircleTarget(
     val circleId: String,
     val path: String,
     val uri: String,
+)
+
+data class CirclePassphraseRequest(
+    val circleId: String,
+    val label: String,
+)
+
+data class DAppBrowserTab(
+    val id: String,
+    val title: String,
+    val url: String,
+    val displayUrl: String?,
+    val circleTarget: OctraCircleTarget?,
+    val circleError: String?,
+)
+
+enum class DAppInputPreviewStatus {
+    Loading,
+    Circle,
+    Explorer,
+    Web,
+    Error,
+}
+
+data class DAppInputPreview(
+    val input: String,
+    val title: String,
+    val subtitle: String,
+    val detail: String,
+    val status: DAppInputPreviewStatus,
+    val showOctProtocol: Boolean = false,
 )
 
 private sealed class OctraCircleOpenResult {
@@ -302,19 +335,13 @@ class PoctraController(private val activity: Activity) {
         private set
     var activityCenterRefreshLoading by mutableStateOf(false)
         private set
-    var simulationRefreshLoading by mutableStateOf(false)
-        private set
     var approvalReviews by mutableStateOf<List<ApprovalReviewItem>>(emptyList())
         private set
     var approvalReviewLoading by mutableStateOf(false)
         private set
     var domainGuardRules by mutableStateOf<List<DomainGuardRule>>(emptyList())
         private set
-    var notificationPreferences by mutableStateOf(consumerSettingsRepository.notificationPreferences())
-        private set
     var fundingProviders by mutableStateOf(consumerSettingsRepository.fundingProviders())
-        private set
-    var simulationChecks by mutableStateOf<List<SimulationCheck>>(emptyList())
         private set
     var availableBalance by mutableStateOf(0.0)
         private set
@@ -368,6 +395,14 @@ class PoctraController(private val activity: Activity) {
     var selectedCircleTarget by mutableStateOf<OctraCircleTarget?>(null)
         private set
     var selectedCircleError by mutableStateOf<String?>(null)
+        private set
+    var circlePassphraseRequest by mutableStateOf<CirclePassphraseRequest?>(null)
+        private set
+    var dAppBrowserTabs by mutableStateOf<List<DAppBrowserTab>>(emptyList())
+        private set
+    var activeDAppTabId by mutableStateOf<String?>(null)
+        private set
+    var dAppInputPreview by mutableStateOf<DAppInputPreview?>(null)
         private set
     var evmNetworks by mutableStateOf<List<EvmNetwork>>(emptyList())
         private set
@@ -549,10 +584,12 @@ class PoctraController(private val activity: Activity) {
     private var tradeChartCooldownSerial = 0L
     private var tradeQuoteRequestSerial = 0L
     private var circleResolveSerial = 0L
+    private var dAppInputPreviewSerial = 0L
     private var approvalReviewRequestSerial = 0L
     private var portfolioRefreshSerial = 0L
     private var tradePendingEvmTransaction by mutableStateOf<EvmSendResult?>(null)
     private val circleResourceModeCache = ConcurrentHashMap<String, String>()
+    private val circlePassphrases = ConcurrentHashMap<String, String>()
     private val tradeChartCache = mutableMapOf<String, TradeChartCacheEntry>()
 
     val biometricAvailable: Boolean
@@ -563,6 +600,13 @@ class PoctraController(private val activity: Activity) {
 
     val currentRpcUrl: String
         get() = activeRpcNetwork?.url ?: rpcRepository.currentUrl()
+
+    fun octraIdentityDAppUrl(): String =
+        if ((activeRpcNetwork?.networkType ?: networkFor(currentRpcUrl)) == "devnet") {
+            "https://devnet.octra.id"
+        } else {
+            "https://octra.id"
+        }
 
     val visibleUnifiedActivity: List<UnifiedActivityItem>
         get() = unifiedActivity.take(activityCenterLimit)
@@ -778,8 +822,7 @@ class PoctraController(private val activity: Activity) {
     fun unlockWithBiometric(cipher: Cipher) {
         runBusy {
             val loaded = withContext(Dispatchers.IO) { secureStore.loadVaultWithBiometric(cipher) }
-            vault = loaded
-            wallet = loaded.activeWallet
+            activateVault(loaded)
             sessionPin = null
             restoreAfterUnlock()
         }
@@ -788,8 +831,7 @@ class PoctraController(private val activity: Activity) {
     fun unlockWithPin(pin: String) {
         runBusy {
             val loaded = withContext(Dispatchers.IO) { secureStore.loadVaultWithPin(pin) }
-            vault = loaded
-            wallet = loaded.activeWallet
+            activateVault(loaded)
             sessionPin = pin
             restoreAfterUnlock()
         }
@@ -861,8 +903,7 @@ class PoctraController(private val activity: Activity) {
     fun confirmSecurityWithBiometric(cipher: Cipher, onVerified: () -> Unit) {
         runBusy {
             val loaded = withContext(Dispatchers.IO) { secureStore.loadVaultWithBiometric(cipher) }
-            vault = loaded
-            wallet = loaded.activeWallet
+            activateVault(loaded)
             sessionPin = null
             onVerified()
         }
@@ -871,8 +912,7 @@ class PoctraController(private val activity: Activity) {
     fun confirmSecurityWithPin(pin: String, onVerified: () -> Unit) {
         runBusy {
             val loaded = withContext(Dispatchers.IO) { secureStore.loadVaultWithPin(pin) }
-            vault = loaded
-            wallet = loaded.activeWallet
+            activateVault(loaded)
             sessionPin = pin
             onVerified()
         }
@@ -890,9 +930,7 @@ class PoctraController(private val activity: Activity) {
         refreshPortfolioHoldings()
         refreshAssets()
         refreshEvmDashboard()
-        refreshSimulationChecks()
         domainGuardRules = consumerSettingsRepository.domainGuardRules()
-        notificationPreferences = consumerSettingsRepository.notificationPreferences()
         fundingProviders = consumerSettingsRepository.fundingProviders()
         route = AppRoute.Settings
     }
@@ -974,7 +1012,9 @@ class PoctraController(private val activity: Activity) {
         activityCenterRefreshLoading = true
         refreshDashboard()
         refreshEvmHistory()
-        refreshBridgeHistory()
+        if (currentBridgeNetworkWarning() == null) {
+            refreshBridgeHistory(showUnsupportedWarning = false)
+        }
         dApps = connectedDAppSessions()
         scope.launch {
             try {
@@ -990,7 +1030,9 @@ class PoctraController(private val activity: Activity) {
     }
 
     private fun activityCenterDataLoading(): Boolean =
-        historyLoading || evmHistoryLoading || bridgeHistoryLoading
+        historyLoading ||
+            evmHistoryLoading ||
+            (currentBridgeNetworkWarning() == null && bridgeHistoryLoading)
 
     fun closeActivityCenter() {
         route = when (activityCenterReturnRoute) {
@@ -1080,11 +1122,6 @@ class PoctraController(private val activity: Activity) {
         openSettingsDetail(AppRoute.RecoveryPlan)
     }
 
-    fun openNotificationSettings() {
-        notificationPreferences = consumerSettingsRepository.notificationPreferences()
-        openSettingsDetail(AppRoute.NotificationSettings)
-    }
-
     fun openFundingProviders() {
         fundingProviders = consumerSettingsRepository.fundingProviders()
         openSettingsDetail(AppRoute.FundingProviders)
@@ -1094,27 +1131,6 @@ class PoctraController(private val activity: Activity) {
         refreshWalletIdentityNames()
         refreshPortfolioHoldings()
         openSettingsDetail(AppRoute.OctraProfile)
-    }
-
-    fun openSimulationCenter() {
-        refreshSimulationChecks()
-        openSettingsDetail(AppRoute.SimulationCenter)
-    }
-
-    fun refreshSimulationCenterChecks() {
-        if (simulationRefreshLoading) return
-        simulationRefreshLoading = true
-        refreshRpcStatus()
-        refreshEvmDashboard()
-        dApps = connectedDAppSessions()
-        scope.launch {
-            try {
-                delay(700)
-                refreshSimulationChecks()
-            } finally {
-                simulationRefreshLoading = false
-            }
-        }
     }
 
     fun openAppearanceSettings() {
@@ -1337,6 +1353,7 @@ class PoctraController(private val activity: Activity) {
 
     fun openReceive() {
         dashboardTab = DashboardTab.Overview
+        refreshWalletIdentityNames()
         route = AppRoute.Receive
     }
 
@@ -1531,11 +1548,16 @@ class PoctraController(private val activity: Activity) {
     }
 
     fun refreshBridgeHistory() {
+        refreshBridgeHistory(showUnsupportedWarning = true)
+    }
+
+    private fun refreshBridgeHistory(showUnsupportedWarning: Boolean) {
         val activeWallet = wallet ?: return
         if (bridgeHistoryLoading) return
         val requestSerial = ++bridgeHistoryRequestSerial
         configureBridgeRepositoryOrWarn()?.let { warning ->
-            showError(warning)
+            if (showUnsupportedWarning) showError(warning)
+            bridgeError = warning
             return
         }
         val octraNetwork = activeRpcNetwork ?: rpcRepository.activeNetwork()
@@ -1584,11 +1606,14 @@ class PoctraController(private val activity: Activity) {
         bridgeLoading = true
         scope.launch {
             try {
-                val nextBalances = withContext(Dispatchers.IO) {
-                    bridgeRepository.fetchBalances(activeWallet)
-                }
-                val nextStatus = withContext(Dispatchers.IO) {
-                    bridgeRepository.fetchStatus(activeWallet)
+                val (nextBalances, nextStatus) = coroutineScope {
+                    val balances = async(Dispatchers.IO) {
+                        bridgeRepository.fetchBalances(activeWallet)
+                    }
+                    val status = async(Dispatchers.IO) {
+                        bridgeRepository.fetchStatus(activeWallet)
+                    }
+                    balances.await() to status.await()
                 }
                 if (requestSerial != bridgeBalanceRequestSerial || !isActiveBridgeSnapshot(walletAddress, octraNetwork.id, evmNetwork.id)) return@launch
                 bridgeBalances = nextBalances
@@ -1726,10 +1751,14 @@ class PoctraController(private val activity: Activity) {
         chainItems: List<BridgeChainHistoryRecord>,
     ): List<BridgeHistoryItem> {
         val consumedLocalIds = mutableSetOf<String>()
-        val mergedChain = chainItems.map { chain ->
+        val mergedChain = chainItems.mapNotNull { chain ->
             val local = localItems.firstOrNull { local ->
                 (chain.octraTxHash != null && local.octraTxHash?.equals(chain.octraTxHash, ignoreCase = true) == true) ||
                     (chain.evmTxHash != null && local.evmTxHash?.equals(chain.evmTxHash, ignoreCase = true) == true)
+            }
+            if (chain.status == "unknown") {
+                if (local != null) consumedLocalIds.add(local.id)
+                return@mapNotNull local?.takeIf { it.status != "unknown" }
             }
             if (local != null) consumedLocalIds.add(local.id)
             mergeBridgeHistoryItem(local, chain)
@@ -3066,33 +3095,107 @@ class PoctraController(private val activity: Activity) {
         }
     }
 
-    fun openDAppBrowser(title: String, url: String) {
-        if (route != AppRoute.DAppBrowser) {
-            dAppReturnRoute = route
-            dAppReturnTab = dashboardTab
+    fun previewDAppInput(rawInput: String) {
+        val cleanInput = rawInput.trim()
+        val serial = ++dAppInputPreviewSerial
+        if (cleanInput.isBlank()) {
+            dAppInputPreview = null
+            return
         }
-        selectedCircleTarget = null
-        selectedCircleError = null
-        selectedDAppDisplayUrl = null
+
+        val octraSpec = parseCircleInputSpec(cleanInput)
+        if (cleanInput.startsWith("oct://", ignoreCase = true) && octraSpec == null) {
+            dAppInputPreview = DAppInputPreview(
+                input = cleanInput,
+                title = "Invalid oct:// input",
+                subtitle = "Use oct://foo.oct or oct://octx...",
+                detail = "Circle input could not be parsed.",
+                status = DAppInputPreviewStatus.Error,
+                showOctProtocol = true,
+            )
+            return
+        }
+
+        if (octraSpec != null) {
+            dAppInputPreview = DAppInputPreview(
+                input = cleanInput,
+                title = if (octraSpec.identityName != null) "Resolving ${octraSpec.identityName}" else "Checking Octra address",
+                subtitle = activeRpcNetwork?.name ?: currentIdentityNetwork(),
+                detail = "Fetching from active Octra RPC...",
+                status = DAppInputPreviewStatus.Loading,
+                showOctProtocol = octraSpec.explicitScheme,
+            )
+            scope.launch {
+                val next = runCatching { resolveDAppInputPreview(octraSpec, cleanInput) }.getOrElse { error ->
+                    DAppInputPreview(
+                        input = cleanInput,
+                        title = "Unable to resolve",
+                        subtitle = octraSpec.identityName ?: octraSpec.host,
+                        detail = error.message ?: "Preview lookup failed.",
+                        status = DAppInputPreviewStatus.Error,
+                        showOctProtocol = octraSpec.explicitScheme,
+                    )
+                }
+                if (serial == dAppInputPreviewSerial) dAppInputPreview = next
+            }
+            return
+        }
+
+        val browserUrl = runCatching { DAppUrlPolicy.normalizeBrowserUrl(cleanInput) }.getOrElse { error ->
+            dAppInputPreview = DAppInputPreview(
+                input = cleanInput,
+                title = "Invalid dApp URL",
+                subtitle = "Enter dApp URL, Octra Identity, or circle address.",
+                detail = error.message ?: "URL could not be parsed.",
+                status = DAppInputPreviewStatus.Error,
+            )
+            return
+        }
+        val rule = consumerSettingsRepository.domainGuardRuleForUrl(browserUrl)
+        dAppInputPreview = if (rule != null && !rule.trusted) {
+            DAppInputPreview(
+                input = cleanInput,
+                title = "Blocked by Phishing Guard",
+                subtitle = rule.host,
+                detail = "Remove the block in Settings if this is expected.",
+                status = DAppInputPreviewStatus.Error,
+            )
+        } else {
+            val origin = canonicalizeOrigin(browserUrl)
+            DAppInputPreview(
+                input = cleanInput,
+                title = hostLabel(origin),
+                subtitle = browserUrl,
+                detail = if (rule?.trusted == true) "Trusted dApp URL" else "Ready to open in wallet browser",
+                status = DAppInputPreviewStatus.Web,
+            )
+        }
+    }
+
+    fun clearDAppInputPreview() {
+        dAppInputPreviewSerial++
+        dAppInputPreview = null
+    }
+
+    fun openDAppBrowser(title: String, url: String) {
+        openDAppBrowser(title, url, openInNewTab = false)
+    }
+
+    fun openDAppBrowserTab(title: String, url: String) {
+        openDAppBrowser(title, url, openInNewTab = true)
+    }
+
+    private fun openDAppBrowser(title: String, url: String, openInNewTab: Boolean) {
         val cleanUrl = url.trim()
         val octraSpec = parseCircleInputSpec(cleanUrl)
         if (cleanUrl.startsWith("oct://", ignoreCase = true) && octraSpec == null) {
             showError("Enter a valid oct:// identity or Octra address.")
             return
         }
-        when {
-            isOctraCircleInput(cleanUrl) -> {
-                openOctraCircleBrowser(title, cleanUrl)
-                return
-            }
-            octraSpec?.identityName != null -> {
-                openOctraCircleBrowser(title, cleanUrl)
-                return
-            }
-            octraSpec?.host?.let(::isOctraAddress) == true -> {
-                openOctraAddressExplorer(title, octraSpec.host, octraSpec.host)
-                return
-            }
+        if (octraSpec != null) {
+            prepareDAppBrowserTab(openInNewTab)
+            openOctraCircleBrowser(title, cleanUrl)
+            return
         }
         val browserUrl = runCatching { DAppUrlPolicy.normalizeBrowserUrl(cleanUrl) }.getOrElse { error ->
             showError(error.message ?: "Enter a valid dApp URL.")
@@ -3103,9 +3206,15 @@ class PoctraController(private val activity: Activity) {
             showError("Blocked by Phishing Guard: ${rule.host}")
             return
         }
+        prepareDAppBrowserTab(openInNewTab)
+        if (!openInNewTab) circleResolveSerial++
         selectedDAppTitle = title
         selectedDAppUrl = browserUrl
+        selectedDAppDisplayUrl = null
+        selectedCircleTarget = null
+        selectedCircleError = null
         route = AppRoute.DAppBrowser
+        syncActiveDAppBrowserTab()
     }
 
     private fun openOctraAddressExplorer(title: String, address: String, displayLabel: String) {
@@ -3113,17 +3222,48 @@ class PoctraController(private val activity: Activity) {
             showError("Explorer URL is not configured for the active Octra network.")
             return
         }
+        prepareDAppBrowserTab(openInNewTab = false)
+        circleResolveSerial++
         selectedDAppTitle = title
         selectedDAppUrl = url
         selectedDAppDisplayUrl = displayLabel
+        selectedCircleTarget = null
+        selectedCircleError = null
         route = AppRoute.DAppBrowser
+        syncActiveDAppBrowserTab()
+    }
+
+    fun selectDAppBrowserTab(tabId: String) {
+        if (tabId == activeDAppTabId) return
+        syncActiveDAppBrowserTab()
+        val tab = dAppBrowserTabs.firstOrNull { it.id == tabId } ?: return
+        activateDAppBrowserTab(tab)
+    }
+
+    fun closeDAppBrowserTab(tabId: String) {
+        val tabs = dAppBrowserTabs
+        val index = tabs.indexOfFirst { it.id == tabId }
+        if (index < 0) return
+        if (tabs.size <= 1) {
+            closeDAppBrowser()
+            return
+        }
+        val nextTabs = tabs.filterNot { it.id == tabId }
+        dAppBrowserTabs = nextTabs
+        if (activeDAppTabId == tabId) {
+            activateDAppBrowserTab(nextTabs[index.coerceAtMost(nextTabs.lastIndex)])
+        }
     }
 
     fun closeDAppBrowser() {
         circleResolveSerial++
         selectedCircleTarget = null
         selectedCircleError = null
+        circlePassphraseRequest = null
+        circlePassphrases.clear()
         selectedDAppDisplayUrl = null
+        dAppBrowserTabs = emptyList()
+        activeDAppTabId = null
         val returningToDashboard = dAppReturnRoute == AppRoute.Dashboard
         dashboardTab = dAppReturnTab
         route = dAppReturnRoute
@@ -3135,6 +3275,56 @@ class PoctraController(private val activity: Activity) {
             } else {
                 refreshDashboard()
             }
+        }
+    }
+
+    private fun prepareDAppBrowserTab(openInNewTab: Boolean) {
+        if (route != AppRoute.DAppBrowser) {
+            dAppReturnRoute = route
+            dAppReturnTab = dashboardTab
+        } else {
+            syncActiveDAppBrowserTab()
+        }
+        if (openInNewTab || activeDAppTabId == null || dAppBrowserTabs.none { it.id == activeDAppTabId }) {
+            activeDAppTabId = "tab-${System.nanoTime()}"
+        }
+    }
+
+    private fun activateDAppBrowserTab(tab: DAppBrowserTab) {
+        activeDAppTabId = tab.id
+        selectedDAppTitle = tab.title
+        selectedDAppUrl = tab.url
+        selectedDAppDisplayUrl = tab.displayUrl
+        selectedCircleTarget = tab.circleTarget
+        selectedCircleError = tab.circleError
+        circlePassphraseRequest = null
+        route = AppRoute.DAppBrowser
+    }
+
+    private fun syncActiveDAppBrowserTab() {
+        val tabId = activeDAppTabId ?: return
+        if (selectedDAppUrl.isBlank() && selectedDAppTitle.isBlank()) return
+        val tab = DAppBrowserTab(
+            id = tabId,
+            title = selectedDAppTitle,
+            url = selectedDAppUrl,
+            displayUrl = selectedDAppDisplayUrl,
+            circleTarget = selectedCircleTarget,
+            circleError = selectedCircleError,
+        )
+        dAppBrowserTabs = if (dAppBrowserTabs.any { it.id == tabId }) {
+            dAppBrowserTabs.map { existing -> if (existing.id == tabId) tab else existing }
+        } else {
+            dAppBrowserTabs + tab
+        }
+    }
+
+    private fun updateDAppBrowserTab(tabId: String?, tab: DAppBrowserTab) {
+        if (tabId == null) return
+        dAppBrowserTabs = if (dAppBrowserTabs.any { it.id == tabId }) {
+            dAppBrowserTabs.map { existing -> if (existing.id == tabId) tab else existing }
+        } else {
+            dAppBrowserTabs + tab
         }
     }
 
@@ -3153,26 +3343,73 @@ class PoctraController(private val activity: Activity) {
             rpcRepository.fetchCircleInfo(circleId).optString("resource_mode")
         }
         if (resourceMode == "sealed_read") {
-            throw IllegalStateException("Sealed circle resources need a read key. Public circle resources can be opened now.")
+            val passphrase = circlePassphrases[cacheKey]
+            if (passphrase.isNullOrBlank()) {
+                requestCirclePassphrase(circleId)
+                throw IllegalStateException("Enter the sealed read passphrase to open this circle.")
+            }
+            return runCatching { rpcRepository.fetchSealedCircleAsset(circleId, path, passphrase) }
+                .onSuccess { maybeUpdateCircleBrowserTitle(circleId, path, it) }
+                .getOrElse { error ->
+                    circlePassphrases.remove(cacheKey)
+                    requestCirclePassphrase(circleId)
+                    throw error
+                }
         }
         return rpcRepository.fetchCircleAsset(circleId, path)
+            .also { maybeUpdateCircleBrowserTitle(circleId, path, it) }
     }
 
-    private suspend fun isCircleAddress(circleId: String): Boolean = withContext(Dispatchers.IO) {
+    fun submitCirclePassphrase(passphrase: String) {
+        val request = circlePassphraseRequest ?: return
+        if (passphrase.isBlank()) {
+            showError("Enter the sealed read passphrase.")
+            return
+        }
+        circlePassphrases[circleCacheKey(request.circleId)] = passphrase
+        circlePassphraseRequest = null
+    }
+
+    fun dismissCirclePassphraseRequest() {
+        circlePassphraseRequest = null
+    }
+
+    private fun requestCirclePassphrase(circleId: String) {
+        val label = selectedCircleTarget?.uri ?: "oct://$circleId"
+        scope.launch {
+            if (circlePassphrases[circleCacheKey(circleId)].isNullOrBlank()) {
+                circlePassphraseRequest = CirclePassphraseRequest(circleId, label)
+            }
+        }
+    }
+
+    private suspend fun isCircleAddress(circleId: String): Boolean =
+        !circleResourceMode(circleId).isNullOrBlank()
+
+    private suspend fun circleResourceMode(circleId: String): String? = withContext(Dispatchers.IO) {
         runCatching {
             val cacheKey = circleCacheKey(circleId)
-            val resourceMode = circleResourceModeCache.getOrPut(cacheKey) {
+            circleResourceModeCache.getOrPut(cacheKey) {
                 rpcRepository.fetchCircleInfo(circleId).optString("resource_mode")
             }
-            resourceMode.isNotBlank()
-        }.getOrDefault(false)
+        }.getOrNull()?.takeIf { it.isNotBlank() }
     }
 
     private fun circleCacheKey(circleId: String): String =
         "${activeRpcNetwork?.id.orEmpty()}:$circleId"
 
+    private fun resetCircleNetworkState() {
+        circleResolveSerial++
+        circleResourceModeCache.clear()
+        circlePassphrases.clear()
+        circlePassphraseRequest = null
+        selectedCircleTarget = null
+        selectedCircleError = null
+    }
+
     private fun openOctraCircleBrowser(title: String, rawInput: String) {
         val spec = parseCircleInputSpec(rawInput)
+        val tabId = activeDAppTabId
         selectedDAppTitle = when {
             title.isNotBlank() && title != "dApp" -> title
             spec?.explicitScheme == true -> "oct://"
@@ -3181,9 +3418,11 @@ class PoctraController(private val activity: Activity) {
         }
         selectedDAppUrl = circleLoadingUrl(rawInput)
         selectedDAppDisplayUrl = if (spec?.explicitScheme == true) circleDisplayUri(spec, rawInput) else rawInput.trim()
+        val initialDisplayUrl = selectedDAppDisplayUrl
         selectedCircleTarget = null
         selectedCircleError = null
         route = AppRoute.DAppBrowser
+        syncActiveDAppBrowserTab()
 
         val serial = ++circleResolveSerial
         scope.launch {
@@ -3192,12 +3431,38 @@ class PoctraController(private val activity: Activity) {
                     if (serial != circleResolveSerial) return@onSuccess
                     when (result) {
                         is OctraCircleOpenResult.Circle -> {
+                            val nextTitle = result.target.label
+                            val nextUrl = circleBrowserUrl(result.target.circleId, result.target.path)
+                            updateDAppBrowserTab(
+                                tabId,
+                                DAppBrowserTab(
+                                    id = tabId.orEmpty(),
+                                    title = nextTitle,
+                                    url = nextUrl,
+                                    displayUrl = initialDisplayUrl,
+                                    circleTarget = result.target,
+                                    circleError = null,
+                                ),
+                            )
+                            if (activeDAppTabId != tabId) return@onSuccess
                             selectedCircleTarget = result.target
                             selectedCircleError = null
-                            selectedDAppTitle = result.target.label
-                            selectedDAppUrl = circleBrowserUrl(result.target.circleId, result.target.path)
+                            selectedDAppTitle = nextTitle
+                            selectedDAppUrl = nextUrl
                         }
                         is OctraCircleOpenResult.ExplorerAddress -> {
+                            updateDAppBrowserTab(
+                                tabId,
+                                DAppBrowserTab(
+                                    id = tabId.orEmpty(),
+                                    title = result.title,
+                                    url = result.url,
+                                    displayUrl = result.displayUrl,
+                                    circleTarget = null,
+                                    circleError = null,
+                                ),
+                            )
+                            if (activeDAppTabId != tabId) return@onSuccess
                             selectedCircleTarget = null
                             selectedCircleError = null
                             selectedDAppTitle = result.title
@@ -3209,36 +3474,42 @@ class PoctraController(private val activity: Activity) {
                 .onFailure { exception ->
                     if (serial != circleResolveSerial) return@onFailure
                     val failureSpec = parseCircleInputSpec(rawInput)
-                    selectedCircleTarget = null
-                    selectedCircleError = exception.message ?: "Unable to open oct:// resource."
-                    selectedDAppDisplayUrl = if (failureSpec?.explicitScheme == true) {
+                    val nextError = exception.message ?: "Unable to open oct:// resource."
+                    val nextDisplayUrl = if (failureSpec?.explicitScheme == true) {
                         circleDisplayUri(failureSpec, rawInput)
                     } else {
                         rawInput.trim()
                     }
-                    selectedDAppTitle = when {
+                    val nextTitle = when {
                         failureSpec?.explicitScheme == true -> "oct://"
                         failureSpec?.identityName != null -> failureSpec.identityName
                         else -> "Octra"
                     }
-                    selectedDAppUrl = circleErrorUrl(rawInput)
+                    val nextUrl = circleErrorUrl(rawInput)
+                    updateDAppBrowserTab(
+                        tabId,
+                        DAppBrowserTab(
+                            id = tabId.orEmpty(),
+                            title = nextTitle,
+                            url = nextUrl,
+                            displayUrl = nextDisplayUrl,
+                            circleTarget = null,
+                            circleError = nextError,
+                        ),
+                    )
+                    if (activeDAppTabId != tabId) return@onFailure
+                    selectedCircleTarget = null
+                    selectedCircleError = nextError
+                    selectedDAppDisplayUrl = nextDisplayUrl
+                    selectedDAppTitle = nextTitle
+                    selectedDAppUrl = nextUrl
                 }
         }
     }
 
     private suspend fun resolveCircleOpenResult(rawInput: String): OctraCircleOpenResult {
         val spec = parseCircleInputSpec(rawInput) ?: throw IllegalStateException("Enter foo.oct or an Octra circle address.")
-        val circleId = if (isOctraAddress(spec.host)) {
-            spec.host
-        } else {
-            val activeWallet = wallet ?: throw IllegalStateException("Unlock wallet before resolving Octra Identity.")
-            val provider = activeIdentityProvider
-                ?: identityProviderRepository.activeProvider(currentIdentityNetwork())
-                ?: throw IllegalStateException("Add an Octra Identity Provider in Settings first.")
-            withContext(Dispatchers.IO) {
-                rpcRepository.resolveIdentityName(provider, spec.host, activeWallet.address)
-            } ?: throw IllegalStateException("${spec.host} could not be resolved.")
-        }
+        val circleId = resolveOctraInputAddress(spec)
         val displayUri = circleDisplayUri(spec, rawInput)
         if (!isCircleAddress(circleId)) {
             val url = explorerAddressUrl(circleId)
@@ -3261,6 +3532,75 @@ class PoctraController(private val activity: Activity) {
         )
     }
 
+    private suspend fun resolveDAppInputPreview(spec: CircleInputSpec, rawInput: String): DAppInputPreview {
+        val address = resolveOctraInputAddress(spec)
+        val resourceMode = circleResourceMode(address)
+        val displayName = spec.identityName ?: shortAddress(address)
+        val resolvedLabel = if (spec.identityName != null) {
+            "${spec.identityName} -> ${shortAddress(address)}"
+        } else {
+            shortAddress(address)
+        }
+        if (resourceMode.isNullOrBlank()) {
+            val explorerUrl = explorerAddressUrl(address)
+                ?: throw IllegalStateException("Explorer URL is not configured for the active Octra network.")
+            return DAppInputPreview(
+                input = rawInput,
+                title = "Open in Explorer",
+                subtitle = resolvedLabel,
+                detail = hostLabel(canonicalizeOrigin(explorerUrl)),
+                status = DAppInputPreviewStatus.Explorer,
+                showOctProtocol = false,
+            )
+        }
+
+        val indexTitle = previewCircleIndexTitle(address, resourceMode)
+        return DAppInputPreview(
+            input = rawInput,
+            title = indexTitle ?: displayName,
+            subtitle = resolvedLabel,
+            detail = if (resourceMode == "sealed_read") {
+                "Sealed circle. Passphrase required when opened."
+            } else {
+                "Public circle app on ${activeRpcNetwork?.name ?: currentIdentityNetwork()}"
+            },
+            status = DAppInputPreviewStatus.Circle,
+            showOctProtocol = true,
+        )
+    }
+
+    private suspend fun resolveOctraInputAddress(spec: CircleInputSpec): String {
+        if (isOctraAddress(spec.host)) return spec.host
+        val activeWallet = wallet ?: throw IllegalStateException("Unlock wallet before resolving Octra Identity.")
+        val provider = activeIdentityProvider
+            ?: identityProviderRepository.activeProvider(currentIdentityNetwork())
+            ?: throw IllegalStateException("Add an Octra Identity Provider in Settings first.")
+        return withContext(Dispatchers.IO) {
+            rpcRepository.resolveIdentityName(provider, spec.host, activeWallet.address)
+        } ?: throw IllegalStateException("${spec.host} could not be resolved.")
+    }
+
+    private suspend fun previewCircleIndexTitle(circleId: String, resourceMode: String): String? {
+        if (resourceMode == "sealed_read") return null
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                extractCircleHtmlTitle(rpcRepository.fetchCircleAsset(circleId, "/index.html"))
+            }.getOrNull()
+        }
+    }
+
+    private fun maybeUpdateCircleBrowserTitle(circleId: String, path: String, asset: CircleAsset) {
+        if (!isCircleIndexPath(path)) return
+        val title = extractCircleHtmlTitle(asset) ?: return
+        scope.launch {
+            val target = selectedCircleTarget ?: return@launch
+            if (target.circleId.equals(circleId, ignoreCase = true)) {
+                selectedDAppTitle = title
+                syncActiveDAppBrowserTab()
+            }
+        }
+    }
+
     fun walletDisplayName(address: String): String {
         val list = vault?.wallets.orEmpty()
         val index = list.indexOfFirst { it.address == address }
@@ -3270,6 +3610,16 @@ class PoctraController(private val activity: Activity) {
 
     fun walletOverviewDisplayName(address: String): String =
         walletIdentityDomain(address) ?: walletDisplayName(address)
+
+    fun walletIdenticonSvg(address: String): String {
+        val label = walletOverviewDisplayName(address)
+        return vault?.wallets
+            .orEmpty()
+            .firstOrNull { it.address.equals(address, ignoreCase = true) }
+            ?.identiconSvg
+            ?.takeIf { it.isNotBlank() && WalletIdenticon.matchesLabel(it, address, label) }
+            ?: WalletIdenticon.previewSvg(address, label)
+    }
 
     fun walletIdentityDomain(address: String): String? {
         val clean = address.trim()
@@ -3315,11 +3665,17 @@ class PoctraController(private val activity: Activity) {
         val serial = ++addressIdentityLookupSerial
         scope.launch {
             val resolved = withContext(Dispatchers.IO) {
-                pending.mapNotNull { address ->
-                    val name = runCatching { rpcRepository.walletIdentityName(provider, address) }
-                        .getOrNull()
-                        ?.takeIf { it.isNotBlank() }
-                    name?.let { address.lowercase() to it }
+                pending.chunked(IdentityLookupBatchSize).flatMap { batch ->
+                    coroutineScope {
+                        batch.map { address ->
+                            async {
+                                val name = runCatching { rpcRepository.walletIdentityName(provider, address) }
+                                    .getOrNull()
+                                    ?.takeIf { it.isNotBlank() }
+                                name?.let { address.lowercase() to it }
+                            }
+                        }.awaitAll().filterNotNull()
+                    }
                 }.toMap()
             }
             if (serial == addressIdentityLookupSerial && addressIdentityCacheKey == cacheKey) {
@@ -3346,7 +3702,10 @@ class PoctraController(private val activity: Activity) {
             activeRpcNetwork = rpcRepository.activeNetwork()
             rpcNetworks = rpcRepository.rpcNetworks()
             rpcStatus = RpcStatus(RpcStatus.State.Checking, url.trim().trimEnd('/'), networkFor(url))
+            resetCircleNetworkState()
             rpcStatus = rpcRepository.checkStatus()
+            refreshIdentityProviders()
+            refreshWalletIdentityNames()
             refreshBalance()
             refreshAssets()
         }
@@ -3374,6 +3733,7 @@ class PoctraController(private val activity: Activity) {
             activeRpcNetwork = network
             rpcNetworks = rpcRepository.rpcNetworks()
             rpcStatus = RpcStatus(RpcStatus.State.Checking, network.url, network.networkType)
+            resetCircleNetworkState()
             val status = rpcRepository.checkStatus(network.url)
             if (activeRpcNetwork?.id == network.id) rpcStatus = status
             refreshIdentityProviders()
@@ -3392,6 +3752,7 @@ class PoctraController(private val activity: Activity) {
             val active = rpcRepository.activeNetwork()
             activeRpcNetwork = active
             rpcStatus = RpcStatus(RpcStatus.State.Checking, active.url, active.networkType)
+            resetCircleNetworkState()
             val status = rpcRepository.checkStatus(active.url)
             if (activeRpcNetwork?.id == active.id) rpcStatus = status
             refreshIdentityProviders()
@@ -3805,17 +4166,6 @@ class PoctraController(private val activity: Activity) {
         showMessage("Domain rule removed.")
     }
 
-    fun setNotificationPreference(key: String, enabled: Boolean) {
-        val next = when (key) {
-            "security" -> notificationPreferences.copy(securityAlerts = enabled)
-            "transactions" -> notificationPreferences.copy(transactionAlerts = enabled)
-            "bridge" -> notificationPreferences.copy(bridgeAlerts = enabled)
-            "price" -> notificationPreferences.copy(priceAlerts = enabled)
-            else -> notificationPreferences
-        }
-        notificationPreferences = consumerSettingsRepository.saveNotificationPreferences(next)
-    }
-
     fun saveFundingProvider(id: String, url: String, enabled: Boolean) {
         fundingProviders = runCatching {
             consumerSettingsRepository.saveFundingProvider(id, url, enabled)
@@ -3832,31 +4182,6 @@ class PoctraController(private val activity: Activity) {
             return
         }
         openDAppBrowser(provider.name, provider.url)
-    }
-
-    fun refreshSimulationChecks() {
-        val checks = mutableListOf<SimulationCheck>()
-        val activeWallet = wallet
-        checks += if (activeWallet != null) {
-            SimulationCheck("Wallet unlocked", "Local preflight can compare balance, fee, recipient format, and active network.", ConsumerRiskLevel.Safe)
-        } else {
-            SimulationCheck("Wallet locked", "Unlock wallet to simulate sends before signing.", ConsumerRiskLevel.Warning)
-        }
-        checks += when (rpcStatus?.state) {
-            RpcStatus.State.Connected -> SimulationCheck("Octra RPC ready", currentRpcUrl, ConsumerRiskLevel.Safe)
-            RpcStatus.State.Failed -> SimulationCheck("Octra RPC unavailable", rpcStatus?.message ?: "Active RPC failed.", ConsumerRiskLevel.Warning)
-            else -> SimulationCheck("Octra RPC not checked", "Refresh Overview before high-value actions.", ConsumerRiskLevel.Notice)
-        }
-        val account = evmAccount
-        checks += if (account?.connected == true) {
-            SimulationCheck("EVM gas ready", "${activeEvmNetwork?.name ?: "EVM"} gas price ${account.gasPriceGwei} Gwei.", ConsumerRiskLevel.Safe)
-        } else {
-            SimulationCheck("EVM simulation limited", account?.message ?: "Open EVM Account to sync gas and balance.", ConsumerRiskLevel.Notice)
-        }
-        if (dApps.any { dAppRiskItems(it).any { risk -> risk.level.ordinal >= ConsumerRiskLevel.Warning.ordinal } }) {
-            checks += SimulationCheck("dApp risk review", "Some connected dApps can request contract calls.", ConsumerRiskLevel.Warning)
-        }
-        simulationChecks = checks.sortedByDescending { it.level.ordinal }
     }
 
     private fun refreshUnifiedActivity() {
@@ -3891,19 +4216,23 @@ class PoctraController(private val activity: Activity) {
                 assetSymbol = tx.symbol,
             )
         }
-        val bridgeItems = bridgeHistory.map { item ->
-            UnifiedActivityItem(
-                id = "bridge:${item.id}",
-                title = if (item.direction == BridgeDirection.OctToWoct) "Bridge OCT to wOCT" else "Bridge wOCT to OCT",
-                subtitle = item.message.ifBlank { item.direction.name },
-                amount = "${item.amount} ${if (item.direction == BridgeDirection.OctToWoct) "OCT" else "wOCT"}",
-                status = item.status,
-                timestamp = normalizeActivityTimestamp(maxOf(item.updatedAt, item.createdAt)),
-                glyph = "bridge",
-                source = "Bridge",
-                explorerUrl = bridgeHistoryExplorerUrl(item),
-                assetSymbol = if (item.direction == BridgeDirection.OctToWoct) "OCT" else "wOCT",
-            )
+        val bridgeItems = if (currentBridgeNetworkWarning() == null) {
+            bridgeHistory.map { item ->
+                UnifiedActivityItem(
+                    id = "bridge:${item.id}",
+                    title = if (item.direction == BridgeDirection.OctToWoct) "Bridge OCT to wOCT" else "Bridge wOCT to OCT",
+                    subtitle = item.message.ifBlank { item.direction.name },
+                    amount = "${item.amount} ${if (item.direction == BridgeDirection.OctToWoct) "OCT" else "wOCT"}",
+                    status = item.status,
+                    timestamp = normalizeActivityTimestamp(maxOf(item.updatedAt, item.createdAt)),
+                    glyph = "bridge",
+                    source = "Bridge",
+                    explorerUrl = bridgeHistoryExplorerUrl(item),
+                    assetSymbol = if (item.direction == BridgeDirection.OctToWoct) "OCT" else "wOCT",
+                )
+            }
+        } else {
+            emptyList()
         }
         val dAppItems = dApps.map { session ->
             UnifiedActivityItem(
@@ -4213,13 +4542,14 @@ class PoctraController(private val activity: Activity) {
                 val request = JSONObject(payload)
                 val method = request.optString("method")
                 val origin = canonicalizeOrigin(originRaw.ifBlank { selectedDAppUrl })
+                val appLabel = dAppSessionLabelForOrigin(origin)
                 when (method) {
                     "octra_requestAccounts" -> {
                         val permissions = requestedDAppPermissions(request.opt("params"))
                         queueDAppApproval(
                             origin = origin,
                             title = "Connect dApp",
-                            message = "${hostLabel(origin)} wants to connect to ${shortAddress(activeWallet.address)}.",
+                            message = "$appLabel wants to connect to ${shortAddress(activeWallet.address)}.",
                             details = listOf(
                                 DAppRequestDetail("Wallet", activeWallet.address),
                                 DAppRequestDetail("Network", activeRpcNetwork?.name ?: currentRpcUrl),
@@ -4251,7 +4581,7 @@ class PoctraController(private val activity: Activity) {
                         queueDAppApproval(
                             origin = origin,
                             title = "Approve contract call",
-                            message = "${hostLabel(origin)} wants to call $callMethod on ${shortAddress(contract)} with $amountOu ou.",
+                            message = "$appLabel wants to call $callMethod on ${shortAddress(contract)} with $amountOu ou.",
                             details = listOf(
                                 DAppRequestDetail("From", activeWallet.address),
                                 DAppRequestDetail("Contract", contract),
@@ -4325,6 +4655,114 @@ class PoctraController(private val activity: Activity) {
                 onError(code, message)
             }
         }
+    }
+
+    fun handleCircleBridgeRequest(
+        payload: String,
+        onSuccess: (String) -> Unit,
+        onError: (Int, String) -> Unit,
+    ) {
+        scope.launch {
+            try {
+                require(payload.length <= MaxCircleBridgePayloadBytes) { "Circle request payload is too large." }
+                val request = JSONObject(payload)
+                val method = request.optString("method")
+                val requestPayload = request.opt("payload") ?: JSONObject()
+                val requestedCircleId = request.optString("circleId").ifBlank {
+                    (requestPayload as? JSONObject)?.optString("circle_id").orEmpty()
+                }
+                selectedCircleTarget?.circleId?.let { activeCircleId ->
+                    if (requestedCircleId.isNotBlank() && !requestedCircleId.equals(activeCircleId, ignoreCase = true)) {
+                        throw SecurityException("Circle target override denied.")
+                    }
+                }
+                val result = withContext(Dispatchers.IO) {
+                    resolveCircleBridgeRequest(method, requestPayload)
+                }
+                onSuccess(result)
+            } catch (exception: Exception) {
+                val (code, message) = dAppError(exception)
+                onError(code, message)
+            }
+        }
+    }
+
+    private fun resolveCircleBridgeRequest(method: String, payload: Any): String {
+        val activeCircle = selectedCircleTarget
+        val payloadObject = payload as? JSONObject ?: JSONObject()
+        return when (method) {
+            "circle.context" -> JSONObject()
+                .put("circle_id", activeCircle?.circleId ?: payloadObject.optString("circle_id"))
+                .put("path", activeCircle?.path ?: payloadObject.optString("path", "/index.html"))
+                .put("uri", activeCircle?.uri ?: payloadObject.optString("uri"))
+                .put("network", activeRpcNetwork?.networkType ?: networkFor(currentRpcUrl))
+                .put("rpc", currentRpcUrl)
+                .toString()
+            "program.info" -> {
+                val circleId = circleBridgeTarget(payloadObject)
+                rpcRepository.fetchCircleInfo(circleId).toString()
+            }
+            "program.view" -> {
+                val viewMethod = payloadObject.optString("method")
+                val params = payloadObject.optJSONArray("params") ?: JSONArray()
+                val address = payloadObject.optString("address").ifBlank { payloadObject.optString("circle_id") }.ifBlank {
+                    activeCircle?.circleId.orEmpty()
+                }
+                jsonLiteral(rpcRepository.circleProgramView(address, viewMethod, params))
+            }
+            "rpc" -> circleRpcResponse(payload)
+            "program.call" -> throw SecurityException("Circle program writes are not supported yet.")
+            else -> throw NoSuchMethodException("Unsupported circle method: $method")
+        }
+    }
+
+    private fun circleBridgeTarget(payload: JSONObject): String {
+        val target = payload.optString("circle_id")
+            .ifBlank { payload.optString("address") }
+            .ifBlank { selectedCircleTarget?.circleId.orEmpty() }
+        require(target.startsWith("oct") && target.length == 47) { "Enter a valid Octra circle address." }
+        return target
+    }
+
+    private fun circleRpcResponse(payload: Any): String {
+        if (payload is JSONArray) {
+            return rpcRepository.circleReadRpcBatch(payload).toString()
+        }
+        val payloadObject = payload as? JSONObject ?: JSONObject()
+        return circleRpcObjectResponse(payloadObject).toString()
+    }
+
+    private fun circleRpcObjectResponse(payload: JSONObject): JSONObject {
+        val id = payload.opt("id") ?: JSONObject.NULL
+        return try {
+            val method = payload.optString("method")
+            val params = payload.optJSONArray("params") ?: JSONArray()
+            val result = rpcRepository.circleReadRpc(method, params)
+            JSONObject()
+                .put("jsonrpc", payload.optString("jsonrpc", "2.0").ifBlank { "2.0" })
+                .put("id", id)
+                .put("result", result ?: JSONObject.NULL)
+        } catch (exception: Exception) {
+            JSONObject()
+                .put("jsonrpc", payload.optString("jsonrpc", "2.0").ifBlank { "2.0" })
+                .put("id", id)
+                .put(
+                    "error",
+                    JSONObject()
+                        .put("code", dAppError(exception).first)
+                        .put("message", exception.message ?: "Circle RPC failed."),
+                )
+        }
+    }
+
+    private fun jsonLiteral(value: Any?): String = when (value) {
+        null,
+        JSONObject.NULL -> "null"
+        is JSONObject,
+        is JSONArray -> value.toString()
+        is Number,
+        is Boolean -> value.toString()
+        else -> JSONObject.quote(value.toString())
     }
 
     fun approvePendingDAppRequest() {
@@ -4737,9 +5175,74 @@ class PoctraController(private val activity: Activity) {
         url.contains(HiddenEvmRpcKey, ignoreCase = true)
 
     fun refreshEvmDashboard() {
-        refreshEvmAccount()
-        refreshEvmAssets()
-        refreshEvmHistory()
+        refreshEvmDashboardSnapshot()
+    }
+
+    private fun refreshEvmDashboardSnapshot() {
+        val activeWallet = wallet ?: return
+        val network = activeEvmNetwork ?: evmRepository.activeNetwork()
+        val accountSerial = ++evmAccountRequestSerial
+        val assetsSerial = ++evmAssetsRequestSerial
+        val historySerial = ++evmHistoryRequestSerial
+        val walletAddress = activeWallet.address
+        evmLoading = true
+        evmAssetsLoading = true
+        evmHistoryLoading = true
+        scope.launch {
+            try {
+                val account = withContext(Dispatchers.IO) {
+                    evmRepository.fetchAccount(activeWallet, network)
+                }
+                if (!isActiveEvmSnapshot(walletAddress, network.id)) return@launch
+                if (accountSerial == evmAccountRequestSerial) {
+                    evmAccount = account
+                    evmLoading = false
+                    syncPortfolioHoldingsAfterDataChange()
+                }
+
+                val savedTokenAddresses = withContext(Dispatchers.IO) {
+                    evmRepository.savedTokens(network.chainId).map { it.address }
+                }
+                val (tokensResult, nftsResult, transactionsResult) = coroutineScope {
+                    val tokens = async(Dispatchers.IO) {
+                        runCatching { evmRepository.refreshTokens(account.address, network, persistBalances = false) }
+                    }
+                    val nfts = async(Dispatchers.IO) {
+                        runCatching { evmRepository.refreshNfts(account.address, network, persistOwnership = false) }
+                    }
+                    val transactions = async(Dispatchers.IO) {
+                        runCatching {
+                            evmRepository.fetchTransactions(
+                                address = account.address,
+                                network = network,
+                                tokenAddresses = savedTokenAddresses,
+                            )
+                        }
+                    }
+                    Triple(tokens.await(), nfts.await(), transactions.await())
+                }
+
+                if (!isActiveEvmSnapshot(walletAddress, network.id)) return@launch
+                if (assetsSerial == evmAssetsRequestSerial) {
+                    tokensResult.onSuccess { evmTokens = it }
+                    nftsResult.onSuccess { evmNfts = it }
+                    evmAssetsLoading = false
+                }
+                if (historySerial == evmHistoryRequestSerial) {
+                    transactionsResult.onSuccess { evmTransactions = it }
+                    evmHistoryLoading = false
+                }
+                syncPortfolioHoldingsAfterDataChange()
+            } catch (_: Exception) {
+                if (isActiveEvmSnapshot(walletAddress, network.id)) {
+                    syncPortfolioHoldingsAfterDataChange()
+                }
+            } finally {
+                if (accountSerial == evmAccountRequestSerial) evmLoading = false
+                if (assetsSerial == evmAssetsRequestSerial) evmAssetsLoading = false
+                if (historySerial == evmHistoryRequestSerial) evmHistoryLoading = false
+            }
+        }
     }
 
     fun refreshEvmAccount() {
@@ -4983,6 +5486,19 @@ class PoctraController(private val activity: Activity) {
         val url = evmRepository.explorerTxUrl(network, hash)
         if (url == null) showError("Explorer URL is not configured.")
         else openDAppBrowser("EVM Transaction", url)
+    }
+
+    fun openSubmittedTransactionExplorer() {
+        val transaction = submittedTransaction ?: return showError("Transaction hash is not ready.")
+        val hash = transaction.hash
+        if (hash.isNullOrBlank()) return showError("Transaction hash is not ready.")
+        val evmNetwork = activeEvmNetwork ?: evmRepository.activeNetwork()
+        val evmUrl = evmSendPendingTransaction
+            ?.takeIf { it.hash == hash }
+            ?.let { evmRepository.explorerTxUrl(evmNetwork, hash) }
+        val url = evmUrl ?: explorerTxUrl(hash)
+        if (url == null) showError("Explorer URL is not configured.")
+        else openDAppBrowser("Transaction", url)
     }
 
     fun retryPreparedEvmSendGasEstimate() {
@@ -5270,10 +5786,8 @@ class PoctraController(private val activity: Activity) {
             AppRoute.ApprovalDashboard,
             AppRoute.DomainGuard,
             AppRoute.RecoveryPlan,
-            AppRoute.NotificationSettings,
             AppRoute.FundingProviders,
             AppRoute.OctraProfile,
-            AppRoute.SimulationCenter,
             AppRoute.AppearanceSettings,
             AppRoute.ConnectedDApps,
             AppRoute.IdentityProviderSettings -> {
@@ -5399,7 +5913,7 @@ class PoctraController(private val activity: Activity) {
             newWallet.copy(name = "Wallet $nextIndex")
         } else {
             newWallet
-        }
+        }.withIdenticon()
         val next = current?.addWallet(namedWallet) ?: WalletVault.single(namedWallet)
         if (current == null) {
             pendingVault = next
@@ -5449,18 +5963,40 @@ class PoctraController(private val activity: Activity) {
     }
 
     private fun persistWalletMetadata(next: WalletVault, message: String) {
-        vault = next
-        wallet = next.activeWallet
-        secureStore.saveWalletMetadata(next)
+        val ensured = ensureWalletIdenticons(next)
+        vault = ensured
+        wallet = ensured.activeWallet
+        secureStore.saveWalletMetadata(ensured)
         showMessage(message)
     }
 
     private fun completeVaultSetup(savedVault: WalletVault) {
-        vault = savedVault
-        wallet = savedVault.activeWallet
+        activateVault(savedVault)
         pendingVault = null
         route = AppRoute.Dashboard
         refreshDashboard()
+    }
+
+    private fun activateVault(next: WalletVault): WalletVault {
+        val ensured = ensureWalletIdenticons(next)
+        vault = ensured
+        wallet = ensured.activeWallet
+        if (ensured != next) secureStore.saveWalletMetadata(ensured)
+        return ensured
+    }
+
+    private fun ensureWalletIdenticons(next: WalletVault): WalletVault {
+        val wallets = next.wallets.map { it.withIdenticon() }
+        return if (wallets == next.wallets) next else next.copy(wallets = wallets)
+    }
+
+    private fun Wallet.withIdenticon(): Wallet {
+        val label = name.ifBlank { "Wallet" }
+        return if (identiconSvg.isNotBlank() && WalletIdenticon.matchesLabel(identiconSvg, address, label)) {
+            this
+        } else {
+            copy(identiconSvg = WalletIdenticon.createSvg(address, label))
+        }
     }
 
     private fun refreshBalance() {
@@ -5757,7 +6293,7 @@ class PoctraController(private val activity: Activity) {
                 JSONArray(dAppSession(origin, activeWallet.address)?.permissions ?: emptyList<String>()).toString()
             }
             "octra_disconnect" -> {
-                dAppSessionRepository.revoke(origin, activeWallet.address)
+                revokeDAppByOrigin(origin, activeWallet.address)
                 dApps = connectedDAppSessions()
                 "null"
             }
@@ -5815,24 +6351,67 @@ class PoctraController(private val activity: Activity) {
     }
 
     private fun authorizeDApp(origin: String, walletAddress: String, permissions: List<String>) {
+        val sessionUrl = dAppSessionUrlForOrigin(origin)
+        val sessionOrigin = canonicalizeOrigin(sessionUrl)
+        val originKeys = dAppSessionOriginKeys(origin) + sessionOrigin
         val session = DAppSession(
-            name = hostLabel(origin),
-            url = origin,
+            name = hostLabel(sessionUrl),
+            url = sessionUrl,
             walletAddress = walletAddress,
             permissions = permissions,
             network = activeRpcNetwork?.networkType ?: networkFor(currentRpcUrl),
             connectedAt = System.currentTimeMillis(),
         )
         val next = dAppSessionRepository.listSessions()
-            .filterNot { canonicalizeOrigin(it.url) == origin && it.walletAddress == walletAddress } + session
+            .filterNot { it.walletAddress == walletAddress && canonicalizeOrigin(it.url) in originKeys } + session
         dAppSessionRepository.persist(next)
         dApps = connectedDAppSessions()
     }
 
     private fun dAppSession(origin: String, walletAddress: String): DAppSession? =
-        dAppSessionRepository.listSessions().firstOrNull {
-            canonicalizeOrigin(it.url) == origin && it.walletAddress == walletAddress
+        dAppSessionRepository.listSessions().firstOrNull { session ->
+            session.walletAddress == walletAddress && canonicalizeOrigin(session.url) in dAppSessionOriginKeys(origin)
         }
+
+    private fun revokeDAppByOrigin(origin: String, walletAddress: String) {
+        val originKeys = dAppSessionOriginKeys(origin)
+        val next = dAppSessionRepository.listSessions().filterNot { session ->
+            session.walletAddress == walletAddress && canonicalizeOrigin(session.url) in originKeys
+        }
+        dAppSessionRepository.persist(next)
+    }
+
+    private fun dAppSessionOriginKeys(origin: String): Set<String> = buildSet {
+        val cleanOrigin = canonicalizeOrigin(origin)
+        if (cleanOrigin.isNotBlank()) add(cleanOrigin)
+        dAppSessionUrlForOrigin(cleanOrigin)
+            .let(::canonicalizeOrigin)
+            .takeIf { it.isNotBlank() }
+            ?.let(::add)
+    }
+
+    private fun dAppSessionUrlForOrigin(origin: String): String =
+        circleSessionUrlForOrigin(origin) ?: canonicalizeOrigin(origin)
+
+    private fun dAppSessionLabelForOrigin(origin: String): String =
+        hostLabel(dAppSessionUrlForOrigin(origin))
+
+    private fun circleSessionUrlForOrigin(origin: String): String? {
+        val cleanOrigin = canonicalizeOrigin(origin)
+        val activeTarget = selectedCircleTarget
+        if (activeTarget != null && cleanOrigin == canonicalizeOrigin(selectedDAppUrl)) {
+            return circleSessionUrl(activeTarget)
+        }
+        val activeTab = dAppBrowserTabs.firstOrNull { it.id == activeDAppTabId }
+        val tabTarget = activeTab?.circleTarget
+        if (tabTarget != null && cleanOrigin == canonicalizeOrigin(activeTab.url)) {
+            return circleSessionUrl(tabTarget)
+        }
+        return null
+    }
+
+    private fun circleSessionUrl(target: OctraCircleTarget): String =
+        target.uri.trim().ifBlank { "oct://${target.circleId}" }
 
     private fun connectedDAppSessions(): List<DAppSession> {
         val activeAddress = wallet?.address ?: return emptyList()
@@ -5960,6 +6539,33 @@ class PoctraController(private val activity: Activity) {
         if (clean.isBlank()) return "/index.html"
         return if (clean.startsWith("/")) clean else "/$clean"
     }
+
+    private fun isCircleIndexPath(path: String): Boolean {
+        val normalized = normalizeCirclePath(path)
+        return normalized == "/" || normalized.equals("/index.html", ignoreCase = true)
+    }
+
+    private fun extractCircleHtmlTitle(asset: CircleAsset): String? {
+        if (!asset.contentType.contains("html", ignoreCase = true)) return null
+        val html = runCatching { asset.body.toString(Charsets.UTF_8) }.getOrNull() ?: return null
+        val rawTitle = Regex("<title[^>]*>(.*?)</title>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+            .find(html)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.replace(Regex("\\s+"), " ")
+            ?.trim()
+            .orEmpty()
+        return decodeBasicHtmlEntities(rawTitle).take(48).takeIf { it.isNotBlank() }
+    }
+
+    private fun decodeBasicHtmlEntities(value: String): String =
+        value
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&apos;", "'")
 
     private fun circleBrowserUrl(circleId: String, path: String): String {
         val segments = normalizeCirclePath(path)
@@ -6107,6 +6713,8 @@ class PoctraController(private val activity: Activity) {
         private const val MaxUnifiedActivityItems = 80
         private const val MaxEvmActivityItems = 20
         private const val ActivityCenterSyncTimeoutMs = 8_000L
+        private const val IdentityLookupBatchSize = 4
+        private const val MaxCircleBridgePayloadBytes = 64_000
         private const val KeyBridgeHistory = "bridge_history"
         private const val MaxBridgeHistoryItems = 25
         private const val KeyPortfolioHoldings = "portfolio_holdings"

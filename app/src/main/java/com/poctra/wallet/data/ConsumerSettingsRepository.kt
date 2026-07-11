@@ -3,7 +3,6 @@ package com.poctra.wallet.data
 import android.content.Context
 import com.poctra.wallet.DomainGuardRule
 import com.poctra.wallet.FundingProvider
-import com.poctra.wallet.NotificationPreferences
 import com.poctra.wallet.security.DAppUrlPolicy
 import org.json.JSONArray
 import org.json.JSONObject
@@ -43,16 +42,6 @@ class ConsumerSettingsRepository(context: Context) {
         return domainGuardRules().firstOrNull { rule ->
             host == rule.host || host.endsWith(".${rule.host}")
         }
-    }
-
-    fun notificationPreferences(): NotificationPreferences =
-        NotificationPreferences.fromJson(
-            runCatching { JSONObject(prefs.getString(KeyNotificationPrefs, null) ?: "") }.getOrNull(),
-        )
-
-    fun saveNotificationPreferences(next: NotificationPreferences): NotificationPreferences {
-        prefs.edit().putString(KeyNotificationPrefs, next.toJson().toString()).apply()
-        return next
     }
 
     fun fundingProviders(): List<FundingProvider> = listOf(
@@ -99,7 +88,6 @@ class ConsumerSettingsRepository(context: Context) {
 
     companion object {
         private const val KeyDomainGuardRules = "domain_guard_rules"
-        private const val KeyNotificationPrefs = "notification_preferences"
         private const val KeyFundingProviderPrefix = "funding_provider"
         private const val FundingProviderBuyId = "buy"
         private const val FundingProviderSellId = "sell"

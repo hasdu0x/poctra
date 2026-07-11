@@ -75,43 +75,12 @@ data class DomainGuardRule(
     }
 }
 
-data class NotificationPreferences(
-    val securityAlerts: Boolean = true,
-    val transactionAlerts: Boolean = true,
-    val bridgeAlerts: Boolean = true,
-    val priceAlerts: Boolean = false,
-) {
-    fun toJson(): JSONObject = JSONObject()
-        .put("securityAlerts", securityAlerts)
-        .put("transactionAlerts", transactionAlerts)
-        .put("bridgeAlerts", bridgeAlerts)
-        .put("priceAlerts", priceAlerts)
-
-    companion object {
-        fun fromJson(json: JSONObject?): NotificationPreferences {
-            if (json == null) return NotificationPreferences()
-            return NotificationPreferences(
-                securityAlerts = json.optBoolean("securityAlerts", true),
-                transactionAlerts = json.optBoolean("transactionAlerts", true),
-                bridgeAlerts = json.optBoolean("bridgeAlerts", true),
-                priceAlerts = json.optBoolean("priceAlerts", false),
-            )
-        }
-    }
-}
-
 data class FundingProvider(
     val id: String,
     val name: String,
     val description: String,
     val url: String,
     val enabled: Boolean,
-)
-
-data class SimulationCheck(
-    val title: String,
-    val detail: String,
-    val level: ConsumerRiskLevel,
 )
 
 data class PaymentRequestDraft(

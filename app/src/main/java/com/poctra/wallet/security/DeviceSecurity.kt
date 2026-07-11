@@ -2,6 +2,7 @@
 
 package com.poctra.wallet.security
 
+import android.annotation.TargetApi
 import android.app.Activity
 import android.app.KeyguardManager
 import android.hardware.biometrics.BiometricManager
@@ -44,6 +45,19 @@ object DeviceSecurity {
             return
         }
 
+        authenticateWithCipherApi28(activity, title, subtitle, negativeText, cipher, onSuccess, onError)
+    }
+
+    @TargetApi(Build.VERSION_CODES.P)
+    private fun authenticateWithCipherApi28(
+        activity: Activity,
+        title: String,
+        subtitle: String,
+        negativeText: String,
+        cipher: Cipher,
+        onSuccess: (Cipher) -> Unit,
+        onError: (String) -> Unit,
+    ) {
         val prompt = BiometricPrompt.Builder(activity)
             .setTitle(title)
             .setSubtitle(subtitle)

@@ -12,10 +12,12 @@ import com.poctra.wallet.R
 enum class Glyph(@DrawableRes val resId: Int) {
     Send(R.drawable.ic_send),
     Receive(R.drawable.ic_receive),
-    Bridge(R.drawable.ic_bridge),
+    Bridge(R.drawable.ic_arrow_left_right),
     Assets(R.drawable.ic_assets),
     Explore(R.drawable.ic_explore),
     Trade(R.drawable.ic_trade),
+    Swap(R.drawable.ic_swap),
+    SwapVertical(R.drawable.ic_swap_vertical),
     Settings(R.drawable.ic_settings),
     Plus(R.drawable.ic_plus),
     Back(R.drawable.ic_back),
@@ -24,6 +26,7 @@ enum class Glyph(@DrawableRes val resId: Int) {
     Refresh(R.drawable.ic_refresh),
     Revoke(R.drawable.ic_revoke),
     Check(R.drawable.ic_check),
+    Close(R.drawable.ic_close),
     Wallet(R.drawable.ic_wallet),
     Copy(R.drawable.ic_copy),
     Download(R.drawable.ic_download),
@@ -49,6 +52,7 @@ enum class Glyph(@DrawableRes val resId: Int) {
     Evm(R.drawable.ic_evm),
     Eye(R.drawable.ic_eye),
     EyeOff(R.drawable.ic_eye_off),
+    OctraIdentity(R.drawable.ic_octra_identity),
 }
 
 @Composable

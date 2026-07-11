@@ -26,6 +26,7 @@ var SurfaceMuted by mutableStateOf(Color(0xFFEAE8DF))
 var BorderLine by mutableStateOf(Color(0xFFE0DED3))
 var ErrorRed by mutableStateOf(Color(0xFFD84D4D))
 var Warning by mutableStateOf(Color(0xFFB7791F))
+var InfoBlue by mutableStateOf(Color(0xFF4F8DF7))
 var PrimaryContent by mutableStateOf(Color(0xFF07110D))
 
 object Space {
@@ -102,6 +103,7 @@ fun PoctraTheme(
             border = Color(0xFF30352B),
             error = Color(0xFFFF7676),
             warning = Color(0xFFFFC857),
+            info = Color(0xFF74A7FF),
         )
     } else {
         Palette(
@@ -114,8 +116,10 @@ fun PoctraTheme(
             border = Color(0xFFE0DED3),
             error = Color(0xFFD84D4D),
             warning = Color(0xFFB7791F),
+            info = Color(0xFF4F8DF7),
         )
     }
+    val primaryContent = if (darkTheme) Color(0xFF07110D) else Color.White
     SideEffect {
         SurfaceBase = palette.base
         TextSecondary = palette.secondary
@@ -126,13 +130,14 @@ fun PoctraTheme(
         BorderLine = palette.border
         ErrorRed = palette.error
         Warning = palette.warning
-        PrimaryContent = Color(0xFF07110D)
+        InfoBlue = palette.info
+        PrimaryContent = primaryContent
     }
 
     MaterialTheme(
         colorScheme = lightColorScheme(
             primary = palette.raised,
-            onPrimary = PrimaryContent,
+            onPrimary = primaryContent,
             background = palette.base,
             onBackground = palette.text,
             surface = palette.base,
@@ -159,4 +164,5 @@ private data class Palette(
     val border: Color,
     val error: Color,
     val warning: Color,
+    val info: Color,
 )

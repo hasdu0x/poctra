@@ -49,6 +49,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.res.painterResource
@@ -75,13 +76,18 @@ fun PoctraButton(
     variant: ButtonVariant = ButtonVariant.Primary,
     leadingGlyph: Glyph? = null,
     compact: Boolean = false,
+    fullHeight: Boolean = false,
 ) {
     val shape = RoundedCornerShape(Radius.md)
-    val buttonHeight = if (compact) 44.dp else 56.dp
+    val visualCompact = !fullHeight && (compact || variant != ButtonVariant.Primary)
+    val buttonHeight = if (visualCompact) 44.dp else 56.dp
+    val keyEdgeHeight = if (visualCompact) 2.dp else 3.dp
+    val contentIconSize = if (visualCompact) 16.dp else 18.dp
+    val contentGap = if (visualCompact) Space.x3 else Space.x4
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
     val pressScale by animateFloatAsState(
-        targetValue = if (pressed && enabled && !loading) 0.985f else 1f,
+        targetValue = if (pressed && enabled && !loading) 0.992f else 1f,
         animationSpec = tween(90, easing = FastOutSlowInEasing),
         label = "poctraButtonPressScale",
     )
@@ -97,7 +103,7 @@ fun PoctraButton(
         ) {
             if (loading) {
                 CircularProgressIndicator(
-                    modifier = Modifier.size(18.dp),
+                    modifier = Modifier.size(contentIconSize),
                     color = buttonContentColor,
                     strokeWidth = 2.dp,
                 )
@@ -105,75 +111,84 @@ fun PoctraButton(
                 leadingGlyph?.let {
                     GlyphIcon(
                         glyph = it,
-                        modifier = Modifier.size(18.dp),
+                        modifier = Modifier.size(contentIconSize),
                         color = buttonContentColor,
                     )
-                    Spacer(Modifier.width(Space.x4))
+                    Spacer(Modifier.width(contentGap))
                 }
                 Text(text = text, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
     }
 
-    when (variant) {
-        ButtonVariant.Primary -> Button(
-            onClick = onClick,
-            enabled = enabled && !loading,
-            modifier = modifier
-                .graphicsLayer {
-                    scaleX = pressScale
-                    scaleY = pressScale
-                }
-                .height(buttonHeight),
-            shape = shape,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = SurfaceRaised,
-                contentColor = PrimaryContent,
-                disabledContainerColor = SurfaceRaised.copy(alpha = 0.34f),
-                disabledContentColor = PrimaryContent.copy(alpha = 0.5f),
-            ),
-            interactionSource = interactionSource,
-            content = { content() },
-        )
+    val edgeColor = when (variant) {
+        ButtonVariant.Primary -> Color(0xFF047857)
+        ButtonVariant.Ghost -> BorderLine.copy(alpha = 0.85f)
+        ButtonVariant.Danger -> ErrorRed.copy(alpha = 0.55f)
+    }
+    Box(
+        modifier = modifier
+            .graphicsLayer {
+                scaleX = pressScale
+                scaleY = pressScale
+            }
+            .height(buttonHeight)
+            .clip(shape)
+            .background(edgeColor.copy(alpha = if (enabled) 1f else 0.35f)),
+        contentAlignment = Alignment.TopCenter,
+    ) {
+        when (variant) {
+            ButtonVariant.Primary -> Button(
+                onClick = onClick,
+                enabled = enabled && !loading,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(buttonHeight - keyEdgeHeight),
+                shape = shape,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = SurfaceRaised,
+                    contentColor = PrimaryContent,
+                    disabledContainerColor = SurfaceRaised.copy(alpha = 0.34f),
+                    disabledContentColor = PrimaryContent.copy(alpha = 0.5f),
+                ),
+                interactionSource = interactionSource,
+                content = { content() },
+            )
 
-        ButtonVariant.Ghost -> OutlinedButton(
-            onClick = onClick,
-            enabled = enabled && !loading,
-            modifier = modifier
-                .graphicsLayer {
-                    scaleX = pressScale
-                    scaleY = pressScale
-                }
-                .height(buttonHeight),
-            shape = shape,
-            border = BorderStroke(1.dp, BorderLine.copy(alpha = if (enabled) 1f else 0.45f)),
-            colors = ButtonDefaults.outlinedButtonColors(
-                containerColor = SurfaceStrong,
-                contentColor = TextTertiary,
-                disabledContentColor = TextTertiary.copy(alpha = 0.35f),
-            ),
-            interactionSource = interactionSource,
-            content = { content() },
-        )
+            ButtonVariant.Ghost -> OutlinedButton(
+                onClick = onClick,
+                enabled = enabled && !loading,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(buttonHeight - keyEdgeHeight),
+                shape = shape,
+                border = BorderStroke(1.dp, BorderLine.copy(alpha = if (enabled) 1f else 0.45f)),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    containerColor = SurfaceStrong,
+                    contentColor = TextTertiary,
+                    disabledContentColor = TextTertiary.copy(alpha = 0.35f),
+                ),
+                interactionSource = interactionSource,
+                content = { content() },
+            )
 
-        ButtonVariant.Danger -> OutlinedButton(
-            onClick = onClick,
-            enabled = enabled && !loading,
-            modifier = modifier
-                .graphicsLayer {
-                    scaleX = pressScale
-                    scaleY = pressScale
-                }
-                .height(if (compact) 40.dp else 44.dp),
-            shape = shape,
-            border = BorderStroke(1.dp, ErrorRed.copy(alpha = if (enabled) 0.7f else 0.25f)),
-            colors = ButtonDefaults.outlinedButtonColors(
-                contentColor = ErrorRed,
-                disabledContentColor = ErrorRed.copy(alpha = 0.35f),
-            ),
-            interactionSource = interactionSource,
-            content = { content() },
-        )
+            ButtonVariant.Danger -> OutlinedButton(
+                onClick = onClick,
+                enabled = enabled && !loading,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(buttonHeight - keyEdgeHeight),
+                shape = shape,
+                border = BorderStroke(1.dp, ErrorRed.copy(alpha = if (enabled) 0.7f else 0.25f)),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    containerColor = SurfaceStrong,
+                    contentColor = ErrorRed,
+                    disabledContentColor = ErrorRed.copy(alpha = 0.35f),
+                ),
+                interactionSource = interactionSource,
+                content = { content() },
+            )
+        }
     }
 }
 
@@ -377,7 +392,7 @@ fun SecurityOptionCard(
                 .background(if (enabled) SurfaceRaised.copy(alpha = 0.18f) else SurfaceMuted),
             contentAlignment = Alignment.Center,
         ) {
-            GlyphIcon(glyph = glyph, modifier = Modifier.size(24.dp), color = if (enabled) TextTertiary else TextSecondary)
+            GlyphIcon(glyph = glyph, modifier = Modifier.size(24.dp), color = if (enabled) SurfaceRaised else TextSecondary)
         }
         Spacer(Modifier.width(Space.x6))
         Column(Modifier.weight(1f)) {
@@ -395,12 +410,14 @@ fun IconCircleButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    buttonSize: Dp = 44.dp,
+    iconSize: Dp = 22.dp,
 ) {
     IconButton(
         onClick = onClick,
         enabled = enabled,
         modifier = modifier
-            .size(44.dp)
+            .size(buttonSize)
             .semantics { this.contentDescription = contentDescription }
             .clip(RoundedCornerShape(Radius.md))
             .background(if (enabled) SurfaceStrong else SurfaceMuted)
@@ -408,8 +425,68 @@ fun IconCircleButton(
     ) {
         GlyphIcon(
             glyph = glyph,
-            modifier = Modifier.size(22.dp),
+            modifier = Modifier.size(iconSize),
             color = if (enabled) TextTertiary else TextSecondary.copy(alpha = 0.45f),
+        )
+    }
+}
+
+@Composable
+fun InlineListAction(
+    text: String,
+    onClick: () -> Unit,
+    glyph: Glyph = Glyph.ChevronDown,
+    loading: Boolean = false,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .height(1.dp)
+                .background(BorderLine.copy(alpha = 0.62f)),
+        )
+        Row(
+            modifier = Modifier
+                .padding(horizontal = Space.x3)
+                .clip(RoundedCornerShape(Radius.pill))
+                .clickable(enabled = enabled && !loading, onClick = onClick)
+                .padding(horizontal = Space.x4, vertical = Space.x2),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+        ) {
+            if (loading) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(12.dp),
+                    color = SurfaceRaised,
+                    strokeWidth = 1.5.dp,
+                )
+            } else {
+                GlyphIcon(
+                    glyph,
+                    modifier = Modifier.size(12.dp),
+                    color = if (enabled) TextSecondary else TextSecondary.copy(alpha = 0.45f),
+                )
+            }
+            Spacer(Modifier.width(Space.x2))
+            Text(
+                text,
+                color = if (enabled) TextSecondary else TextSecondary.copy(alpha = 0.45f),
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+            )
+        }
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .height(1.dp)
+                .background(BorderLine.copy(alpha = 0.62f)),
         )
     }
 }
@@ -422,7 +499,7 @@ fun NetworkBadge(text: String, state: String? = null, modifier: Modifier = Modif
         else -> TextSecondary
     }
     Text(
-        text = text.uppercase(),
+        text = text.trim().replaceFirstChar { it.uppercase() },
         modifier = modifier
             .clip(RoundedCornerShape(Radius.md))
             .border(1.dp, borderColor.copy(alpha = 0.65f), RoundedCornerShape(Radius.md))
@@ -619,15 +696,32 @@ fun DAppRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End,
             ) {
-                PoctraButton(
-                    text = "Revoke",
-                    onClick = onRevoke,
-                    variant = ButtonVariant.Danger,
-                    leadingGlyph = Glyph.Revoke,
-                    compact = true,
-                )
+                DAppRevokeAction(onRevoke)
             }
         }
+    }
+}
+
+@Composable
+private fun DAppRevokeAction(onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(Radius.sm))
+            .background(ErrorRed.copy(alpha = 0.12f))
+            .border(1.dp, ErrorRed.copy(alpha = 0.42f), RoundedCornerShape(Radius.sm))
+            .clickable(onClick = onClick)
+            .padding(horizontal = Space.x3, vertical = Space.x2),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        GlyphIcon(Glyph.Revoke, modifier = Modifier.size(13.dp), color = ErrorRed)
+        Spacer(Modifier.width(Space.x2))
+        Text(
+            "Revoke",
+            color = ErrorRed,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+        )
     }
 }
 

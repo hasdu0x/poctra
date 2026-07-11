@@ -9,7 +9,7 @@ android {
 
     defaultConfig {
         applicationId = "com.poctra.wallet"
-        minSdk = 26
+        minSdk = 23
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"

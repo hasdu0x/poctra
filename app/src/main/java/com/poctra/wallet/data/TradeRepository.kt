@@ -8,6 +8,7 @@ import org.json.JSONObject
 import java.io.OutputStreamWriter
 import java.math.BigDecimal
 import java.math.BigInteger
+import java.math.RoundingMode
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.math.absoluteValue
@@ -60,7 +61,20 @@ data class TradeQuote(
     val fastGasPriceWei: BigInteger,
     val fastGasFeeEth: String,
     val routeLabel: String,
+    val priceImpactBps: Int? = null,
+    val priceImpactLabel: String = "Unavailable",
+    val poolLiquidityLabel: String = "Unavailable",
+    val mevRouteLabel: String = "Unknown",
+    val riskLevel: TradeQuoteRisk = TradeQuoteRisk.None,
+    val riskWarning: String? = null,
 )
+
+enum class TradeQuoteRisk {
+    None,
+    Notice,
+    Warning,
+    Critical,
+}
 
 enum class TradeChartTimeframe(
     val label: String,
@@ -106,6 +120,8 @@ class TradeRepository {
     private val crypto = EvmCrypto()
     private var activeEthereumRpcUrl = EthereumRpcUrl
     private var cachedWoctPool: ChartPool? = null
+    private var cachedWoctPools: List<ChartPool>? = null
+    private var cachedDexScreenerPools: List<DexScreenerPool>? = null
 
     fun configure(evmRpcUrl: String = EthereumRpcUrl) {
         activeEthereumRpcUrl = evmRpcUrl.trim().ifBlank { EthereumRpcUrl }
@@ -137,16 +153,9 @@ class TradeRepository {
         require(amountIn > BigInteger.ZERO) { "Enter a valid amount." }
         require(isSupportedPair(fromAsset, toAsset)) { "Trade supports wOCT pairs with ETH or USDT." }
         val pool = poolFor(fromAsset, toAsset)
-        val calldata = quoteExactInputSingleCalldata(pool, amountIn)
-        val result = evmString(
-            "eth_call",
-            JSONArray()
-                .put(JSONObject().put("to", V4QuoterAddress).put("data", calldata))
-                .put("latest"),
-        ).cleanHex()
-        require(result.length >= 128) { "Quote returned empty result." }
-        val amountOut = BigInteger(result.substring(0, 64), 16)
-        val gasEstimate = BigInteger(result.substring(64, 128), 16)
+        val quoted = quoteRaw(pool, amountIn)
+        val amountOut = quoted.amountOut
+        val gasEstimate = quoted.gasEstimate
         val gasPrice = evmQuantity("eth_gasPrice", JSONArray()).coerceAtLeast(BigInteger.ONE)
         val lowGasPrice = gasPrice
             .multiply(BigInteger.valueOf(90L))
@@ -159,6 +168,10 @@ class TradeRepository {
         val minimumOut = amountOut
             .multiply(BigInteger.valueOf((10_000 - slippageBps.coerceIn(1, 5_000)).toLong()))
             .divide(BigInteger.valueOf(10_000L))
+        val priceImpactBps = estimatePriceImpactBps(pool, amountIn, amountOut, fromAsset)
+        val liquidity = runCatching { findTradePoolLiquidity(fromAsset, toAsset) }.getOrNull()
+        val mevRouteLabel = mevRouteLabel()
+        val riskLevel = tradeQuoteRisk(priceImpactBps, liquidity?.reserveUsd)
         TradeQuote(
             amountOutRaw = amountOut,
             amountOut = formatAmount(amountOut, toAsset),
@@ -172,6 +185,12 @@ class TradeRepository {
             fastGasPriceWei = fastGasPrice,
             fastGasFeeEth = EvmCrypto.formatEther(gasEstimate.multiply(fastGasPrice), 8),
             routeLabel = "${fromAsset.symbol}/${toAsset.symbol} v4 0.30%",
+            priceImpactBps = priceImpactBps,
+            priceImpactLabel = formatPriceImpact(priceImpactBps),
+            poolLiquidityLabel = poolLiquidityLabel(liquidity, priceImpactBps),
+            mevRouteLabel = mevRouteLabel,
+            riskLevel = riskLevel,
+            riskWarning = tradeQuoteRiskWarning(priceImpactBps, liquidity?.reserveUsd),
         )
     }
 
@@ -348,6 +367,45 @@ class TradeRepository {
 
     private fun findWoctPool(): ChartPool {
         cachedWoctPool?.let { return it }
+        return loadWoctPools()
+            .maxByOrNull { it.reserveUsd }
+            ?.also { cachedWoctPool = it }
+            ?: throw IllegalStateException("wOCT chart pool unavailable.")
+    }
+
+    private fun findTradePoolLiquidity(fromAsset: TradeAsset, toAsset: TradeAsset): PoolLiquidity? =
+        findDexScreenerPoolLiquidity(fromAsset, toAsset) ?: findGeckoTerminalPoolLiquidity(fromAsset, toAsset)
+
+    private fun findDexScreenerPoolLiquidity(fromAsset: TradeAsset, toAsset: TradeAsset): PoolLiquidity? {
+        val otherAsset = if (fromAsset == TradeAsset.WOCT) toAsset else fromAsset
+        val otherToken = dexScreenerTokenAddress(otherAsset).cleanHex().lowercase()
+        return loadDexScreenerPools()
+            .filter { pool ->
+                pool.baseTokenAddress.contains(otherToken, ignoreCase = true) ||
+                    pool.quoteTokenAddress.contains(otherToken, ignoreCase = true)
+            }
+            .maxByOrNull { it.reserveUsd }
+            ?.takeIf { it.reserveUsd > BigDecimal.ZERO }
+            ?.let { PoolLiquidity(reserveUsd = it.reserveUsd, source = "Dexscreener") }
+    }
+
+    private fun findGeckoTerminalPoolLiquidity(fromAsset: TradeAsset, toAsset: TradeAsset): PoolLiquidity? {
+        val otherAsset = if (fromAsset == TradeAsset.WOCT) toAsset else fromAsset
+        val otherToken = geckoTerminalTokenAddress(otherAsset).cleanHex().lowercase()
+        val matched = loadWoctPools()
+            .filter { pool ->
+                pool.baseTokenId.contains(otherToken, ignoreCase = true) ||
+                    pool.quoteTokenId.contains(otherToken, ignoreCase = true)
+            }
+            .maxByOrNull { it.reserveUsd }
+        val reserve = matched?.reserveUsd ?: findWoctPool().reserveUsd
+        return reserve
+            .takeIf { it > BigDecimal.ZERO }
+            ?.let { PoolLiquidity(reserveUsd = it, source = "GeckoTerminal") }
+    }
+
+    private fun loadWoctPools(): List<ChartPool> {
+        cachedWoctPools?.let { return it }
         val json = getJson("$GeckoTerminalApi/networks/eth/tokens/${TradeAsset.WOCT.address}/pools?page=1")
         val data = json.optJSONArray("data") ?: JSONArray()
         val candidates = buildList {
@@ -363,14 +421,179 @@ class TradeRepository {
                     ?.optString("id")
                     .orEmpty()
                     .lowercase()
+                val quoteId = relationships.optJSONObject("quote_token")
+                    ?.optJSONObject("data")
+                    ?.optString("id")
+                    .orEmpty()
+                    .lowercase()
                 val woctClean = TradeAsset.WOCT.address.cleanHex().lowercase()
                 val tokenSide = if (baseId.contains(woctClean)) "base" else "quote"
-                add(ChartPool(address = id, tokenSide = tokenSide, reserveUsd = reserveUsd))
+                add(
+                    ChartPool(
+                        address = id,
+                        tokenSide = tokenSide,
+                        reserveUsd = reserveUsd,
+                        baseTokenId = baseId,
+                        quoteTokenId = quoteId,
+                    ),
+                )
             }
         }
-        return candidates.maxByOrNull { it.reserveUsd }
-            ?.also { cachedWoctPool = it }
-            ?: throw IllegalStateException("wOCT chart pool unavailable.")
+        require(candidates.isNotEmpty()) { "wOCT pool data unavailable." }
+        cachedWoctPools = candidates
+        return candidates
+    }
+
+    private fun loadDexScreenerPools(): List<DexScreenerPool> {
+        cachedDexScreenerPools?.let { return it }
+        val json = getJson("$DexScreenerApi/latest/dex/tokens/${TradeAsset.WOCT.address}")
+        val pairs = json.optJSONArray("pairs") ?: JSONArray()
+        val candidates = buildList {
+            for (index in 0 until pairs.length()) {
+                val pair = pairs.optJSONObject(index) ?: continue
+                if (!pair.optString("chainId").equals("ethereum", ignoreCase = true)) continue
+                val liquidity = pair.optJSONObject("liquidity")
+                    ?.optString("usd")
+                    ?.toBigDecimalOrNull()
+                    ?: continue
+                val baseToken = pair.optJSONObject("baseToken") ?: JSONObject()
+                val quoteToken = pair.optJSONObject("quoteToken") ?: JSONObject()
+                add(
+                    DexScreenerPool(
+                        reserveUsd = liquidity,
+                        baseTokenAddress = baseToken.optString("address").lowercase(),
+                        quoteTokenAddress = quoteToken.optString("address").lowercase(),
+                    ),
+                )
+            }
+        }
+        require(candidates.isNotEmpty()) { "wOCT Dexscreener pool data unavailable." }
+        cachedDexScreenerPools = candidates
+        return candidates
+    }
+
+    private fun quoteRaw(pool: TradePool, amountIn: BigInteger): RawTradeQuote {
+        val calldata = quoteExactInputSingleCalldata(pool, amountIn)
+        val result = evmString(
+            "eth_call",
+            JSONArray()
+                .put(JSONObject().put("to", V4QuoterAddress).put("data", calldata))
+                .put("latest"),
+        ).cleanHex()
+        require(result.length >= 128) { "Quote returned empty result." }
+        return RawTradeQuote(
+            amountOut = BigInteger(result.substring(0, 64), 16),
+            gasEstimate = BigInteger(result.substring(64, 128), 16),
+        )
+    }
+
+    private fun estimatePriceImpactBps(
+        pool: TradePool,
+        amountIn: BigInteger,
+        amountOut: BigInteger,
+        fromAsset: TradeAsset,
+    ): Int? {
+        if (amountIn <= BigInteger.ONE || amountOut <= BigInteger.ZERO) return 0
+        val sampleAmount = referenceQuoteAmount(amountIn, fromAsset)
+        if (sampleAmount <= BigInteger.ZERO || sampleAmount >= amountIn) return 0
+        val sampleOut = runCatching { quoteRaw(pool, sampleAmount).amountOut }.getOrNull()
+            ?.takeIf { it > BigInteger.ZERO }
+            ?: return null
+        val expectedOut = sampleOut.multiply(amountIn).divide(sampleAmount)
+        if (expectedOut <= BigInteger.ZERO || amountOut >= expectedOut) return 0
+        return expectedOut
+            .subtract(amountOut)
+            .multiply(BigInteger.valueOf(10_000L))
+            .divide(expectedOut)
+            .toInt()
+            .coerceIn(0, 10_000)
+    }
+
+    private fun referenceQuoteAmount(amountIn: BigInteger, asset: TradeAsset): BigInteger {
+        val oneWhole = BigInteger.TEN.pow(asset.decimals)
+        val oneHundredth = oneWhole.divide(BigInteger.valueOf(100L)).coerceAtLeast(BigInteger.ONE)
+        val onePercentOfTrade = amountIn.divide(BigInteger.valueOf(100L)).coerceAtLeast(BigInteger.ONE)
+        val sample = if (oneHundredth < onePercentOfTrade) oneHundredth else onePercentOfTrade
+        return if (sample < amountIn) sample else amountIn
+    }
+
+    private fun dexScreenerTokenAddress(asset: TradeAsset): String = asset.address
+
+    private fun geckoTerminalTokenAddress(asset: TradeAsset): String = when (asset) {
+        TradeAsset.ETH -> WrappedEthAddress
+        else -> asset.address
+    }
+
+    private fun formatPriceImpact(priceImpactBps: Int?): String = when {
+        priceImpactBps == null -> "Unavailable"
+        priceImpactBps == 0 -> "<0.01%"
+        else -> {
+            val percent = BigDecimal.valueOf(priceImpactBps.toLong())
+                .divide(BigDecimal.valueOf(100L), 2, RoundingMode.HALF_UP)
+                .stripTrailingZeros()
+                .toPlainString()
+            "$percent%"
+        }
+    }
+
+    private fun poolLiquidityLabel(liquidity: PoolLiquidity?, priceImpactBps: Int?): String {
+        val depthLabel = when {
+            priceImpactBps == null -> "Depth unknown"
+            priceImpactBps >= 500 -> "Very thin depth"
+            priceImpactBps >= 300 -> "Thin depth"
+            priceImpactBps >= 100 -> "Moderate depth"
+            else -> "Healthy depth"
+        }
+        val reserveLabel = liquidity?.reserveUsd
+            ?.takeIf { it > BigDecimal.ZERO }
+            ?.let { formatUsdCompact(it) }
+        return if (reserveLabel == null) depthLabel else "$reserveLabel ${liquidity.source} / $depthLabel"
+    }
+
+    private fun tradeQuoteRisk(priceImpactBps: Int?, reserveUsd: BigDecimal?): TradeQuoteRisk = when {
+        priceImpactBps != null && priceImpactBps >= 500 -> TradeQuoteRisk.Critical
+        priceImpactBps != null && priceImpactBps >= 300 -> TradeQuoteRisk.Warning
+        reserveUsd != null && reserveUsd > BigDecimal.ZERO && reserveUsd < BigDecimal("50000") -> TradeQuoteRisk.Warning
+        priceImpactBps != null && priceImpactBps >= 100 -> TradeQuoteRisk.Notice
+        reserveUsd != null && reserveUsd > BigDecimal.ZERO && reserveUsd < BigDecimal("250000") -> TradeQuoteRisk.Notice
+        else -> TradeQuoteRisk.None
+    }
+
+    private fun tradeQuoteRiskWarning(priceImpactBps: Int?, reserveUsd: BigDecimal?): String? = when {
+        priceImpactBps != null && priceImpactBps >= 500 ->
+            "Very high price impact. Consider lowering the amount or waiting for deeper liquidity."
+        priceImpactBps != null && priceImpactBps >= 300 ->
+            "High price impact. Review the minimum received before confirming."
+        reserveUsd != null && reserveUsd > BigDecimal.ZERO && reserveUsd < BigDecimal("50000") ->
+            "Pool liquidity looks thin. The final received amount may move quickly."
+        priceImpactBps != null && priceImpactBps >= 100 ->
+            "Price impact is above 1%. Confirm only if the received amount is acceptable."
+        else -> null
+    }
+
+    private fun mevRouteLabel(): String {
+        val rpc = activeEthereumRpcUrl.lowercase()
+        return when {
+            rpc.contains("rpc.xme.my.id") || rpc.contains("infura.io/v3") -> "Protected (Infura MEV)"
+            rpc.contains("publicnode") || rpc.contains("llamarpc") || rpc.contains("ankr") -> "Public mempool"
+            else -> "Unknown"
+        }
+    }
+
+    private fun formatUsdCompact(value: BigDecimal): String {
+        val absValue = value.abs()
+        val million = BigDecimal("1000000")
+        val thousand = BigDecimal("1000")
+        val (divisor, suffix) = when {
+            absValue >= million -> million to "M"
+            absValue >= thousand -> thousand to "K"
+            else -> BigDecimal.ONE to ""
+        }
+        val formatted = value
+            .divide(divisor, if (divisor == BigDecimal.ONE) 0 else 2, RoundingMode.HALF_UP)
+            .stripTrailingZeros()
+            .toPlainString()
+        return "\$$formatted$suffix"
     }
 
     private fun quoteExactInputSingleCalldata(pool: TradePool, amountIn: BigInteger): String {
@@ -703,13 +926,15 @@ class TradeRepository {
     private fun ByteArray.toHex(): String = joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
     companion object {
-        private const val EthereumRpcUrl = "https://mainnet.infura.io/v3/f7ea6a596e8c4a038f8700e42e7c3494"
+        private const val EthereumRpcUrl = "https://rpc.xme.my.id/eth-mainnet"
         private const val GeckoTerminalApi = "https://api.geckoterminal.com/api/v2"
+        private const val DexScreenerApi = "https://api.dexscreener.com"
         private const val PoctraUserAgent = "poctra-android"
         private const val UniversalRouterAddress = "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af"
         private const val Permit2Address = "0x000000000022D473030F116dDEE9F6B43aC78BA3"
         private const val V4QuoterAddress = "0x52f0e24d1c21c8a0cb1e5a5dd6198556bd9e1203"
         private const val ZeroAddress = "0x0000000000000000000000000000000000000000"
+        private const val WrappedEthAddress = "0xC02aaa39b223FE8D0A0e5C4F27ead9083C756Cc2"
         private const val WoctEthV4HookAddress = "0x890681CfF5AD2069F020027f41f5f68F6a292000"
         private const val PoolFee = 3000
         private const val PoolTickSpacing = 60
@@ -734,8 +959,26 @@ private data class TradePool(
     val outputCurrency: String,
 )
 
+private data class RawTradeQuote(
+    val amountOut: BigInteger,
+    val gasEstimate: BigInteger,
+)
+
+private data class PoolLiquidity(
+    val reserveUsd: BigDecimal,
+    val source: String,
+)
+
+private data class DexScreenerPool(
+    val reserveUsd: BigDecimal,
+    val baseTokenAddress: String,
+    val quoteTokenAddress: String,
+)
+
 private data class ChartPool(
     val address: String,
     val tokenSide: String,
     val reserveUsd: BigDecimal,
+    val baseTokenId: String,
+    val quoteTokenId: String,
 )

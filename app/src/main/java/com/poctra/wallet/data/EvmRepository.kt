@@ -4,6 +4,9 @@ import android.content.Context
 import com.poctra.wallet.core.EvmCalldata
 import com.poctra.wallet.core.EvmCrypto
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -18,9 +21,6 @@ import java.net.URL
 class EvmRepository(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("poctra_evm", Context.MODE_PRIVATE)
     private val crypto = EvmCrypto()
-    private var etherscanKeyCursor = 0
-    private var lastEtherscanRequestAt = 0L
-    private var infuraRpcCursor = 0
 
     fun networks(): List<EvmNetwork> {
         val stored = prefs.getString(KeyNetworks, null)
@@ -174,11 +174,17 @@ class EvmRepository(context: Context) {
         persistBalances: Boolean = true,
     ): List<EvmToken> =
         withContext(Dispatchers.IO) {
-            savedTokens(network.chainId).map { token ->
-                runCatching {
-                    val raw = erc20BalanceRaw(token.address, ownerAddress, network)
-                    token.copy(balance = EvmCrypto.formatUnits(raw, token.decimals))
-                }.getOrElse { token.copy(balance = "0") }
+            savedTokens(network.chainId).chunked(TokenRefreshBatchSize).flatMap { batch ->
+                coroutineScope {
+                    batch.map { token ->
+                        async {
+                            runCatching {
+                                val raw = erc20BalanceRaw(token.address, ownerAddress, network)
+                                token.copy(balance = EvmCrypto.formatUnits(raw, token.decimals))
+                            }.getOrElse { token.copy(balance = "0") }
+                        }
+                    }.awaitAll()
+                }
             }.also { refreshed ->
                 if (persistBalances) {
                     val others = allTokens().filterNot { it.chainId == network.chainId }
@@ -193,9 +199,17 @@ class EvmRepository(context: Context) {
         persistOwnership: Boolean = true,
     ): List<EvmNft> =
         withContext(Dispatchers.IO) {
-            savedNfts(network.chainId).map { nft ->
-                val owned = checkNftOwnership(nft.contractAddress, nft.tokenId, ownerAddress, network)
-                nft.copy(owned = owned)
+            savedNfts(network.chainId).chunked(NftRefreshBatchSize).flatMap { batch ->
+                coroutineScope {
+                    batch.map { nft ->
+                        async {
+                            val owned = runCatching {
+                                checkNftOwnership(nft.contractAddress, nft.tokenId, ownerAddress, network)
+                            }.getOrDefault(false)
+                            nft.copy(owned = owned)
+                        }
+                    }.awaitAll()
+                }
             }.also { refreshed ->
                 if (persistOwnership) {
                     val others = allNfts().filterNot { it.chainId == network.chainId }
@@ -655,7 +669,7 @@ class EvmRepository(context: Context) {
 
     private fun rpcRaw(rpcUrl: String, method: String, params: JSONArray): Any? {
         var lastError: Throwable? = null
-        rpcUrlCandidates(rpcUrl, method).forEach { candidate ->
+        rpcUrlCandidates(rpcUrl).forEach { candidate ->
             runCatching { return rpcRawOnce(candidate, method, params) }
                 .onFailure { error ->
                     lastError = error
@@ -701,20 +715,8 @@ class EvmRepository(context: Context) {
         }
     }
 
-    private fun rpcUrlCandidates(rpcUrl: String, method: String): List<String> {
-        val clean = rpcUrl.trim().trimEnd('/')
-        if (!clean.contains("mainnet.infura.io/v3/", ignoreCase = true)) return listOf(clean)
-        if (!method.isReadOnlyEvmMethod()) return listOf(clean)
-        return listOf(clean) + rotatedInfuraMainnetUrls(clean)
-    }
-
-    @Synchronized
-    private fun rotatedInfuraMainnetUrls(primary: String): List<String> {
-        val pool = MainnetInfuraRpcPool.filterNot { it.equals(primary, ignoreCase = true) }.distinct()
-        if (pool.isEmpty()) return emptyList()
-        val start = Math.floorMod(infuraRpcCursor++, pool.size)
-        return pool.drop(start) + pool.take(start)
-    }
+    private fun rpcUrlCandidates(rpcUrl: String): List<String> =
+        listOf(rpcUrl.trim().trimEnd('/'))
 
     private fun isRetryableRpcError(error: Throwable): Boolean {
         val message = error.message.orEmpty().lowercase()
@@ -725,9 +727,6 @@ class EvmRepository(context: Context) {
             message.contains("timeout") ||
             message.contains("http 5")
     }
-
-    private fun String.isReadOnlyEvmMethod(): Boolean =
-        this != "eth_sendRawTransaction"
 
     private fun getJson(url: String): JSONObject {
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {
@@ -962,40 +961,33 @@ class EvmRepository(context: Context) {
 
     private fun fetchExplorerResultArray(network: EvmNetwork, action: String, address: String): JSONArray? {
         var primaryError: Throwable? = null
-        runCatching {
-            fetchEtherscanResultArray(network, action, address)
-        }.onSuccess { result ->
-            return result
-        }.onFailure { error ->
-            primaryError = error
+        if (isPoctraBackendHistorySupported(network.chainId)) {
+            runCatching {
+                fetchPoctraEtherscanResultArray(network, action, address)
+            }.onSuccess { result ->
+                return result
+            }.onFailure { error ->
+                primaryError = error
+            }
         }
 
         val fallbackUrl = explorerApiUrl(network, action, address)
-            ?: throw (primaryError ?: IllegalStateException("EVM history lookup failed."))
+        if (fallbackUrl == null) {
+            primaryError?.let { throw it }
+            return JSONArray()
+        }
         return runCatching {
-            throttleEtherscanRequest()
             etherscanResultArray(getJson(fallbackUrl))
         }.getOrElse { error ->
             throw primaryError ?: error
         }
     }
 
-    private fun fetchEtherscanResultArray(network: EvmNetwork, action: String, address: String): JSONArray? {
-        var lastError: Throwable? = null
-        repeat(effectiveEtherscanApiKeys().size) {
-            val apiKey = nextEtherscanApiKey()
-            throttleEtherscanRequest()
-            runCatching {
-                etherscanResultArray(getJson(etherscanApiUrl(network, action, address, apiKey)))
-            }.onSuccess { result ->
-                return result
-            }.onFailure { error ->
-                lastError = error
-                if (!isEtherscanRateLimit(error)) throw error
-            }
-        }
-        throw lastError ?: IllegalStateException("Etherscan history lookup failed.")
-    }
+    private fun fetchPoctraEtherscanResultArray(network: EvmNetwork, action: String, address: String): JSONArray? =
+        etherscanResultArray(getJson(poctraEtherscanApiUrl(network, action, address)))
+
+    private fun isPoctraBackendHistorySupported(chainId: Long): Boolean =
+        chainId == EthereumMainnetChainId || chainId == EthereumSepoliaChainId
 
     private fun etherscanResultArray(json: JSONObject): JSONArray? {
         val result = json.opt("result")
@@ -1014,20 +1006,27 @@ class EvmRepository(context: Context) {
         return null
     }
 
-    private fun etherscanApiUrl(network: EvmNetwork, action: String, address: String, apiKey: String): String {
-        return buildString {
-            append("https://api.etherscan.io/v2/api?chainid=")
-            append(network.chainId)
-            append(etherscanAccountQuery(action, address, apiKey))
-        }
-    }
+    private fun poctraEtherscanApiUrl(network: EvmNetwork, action: String, address: String): String =
+        "$PoctraBackendUrl/api/etherscan/account?${etherscanAccountQuery(network.chainId, action, address)}"
 
     private fun explorerApiUrl(network: EvmNetwork, action: String, address: String): String? {
         val apiHost = explorerApiHost(network.explorerUrl) ?: return null
-        return "https://$apiHost/api?${etherscanAccountQuery(action, address, nextEtherscanApiKey()).removePrefix("&")}"
+        return "https://$apiHost/api?${legacyExplorerAccountQuery(action, address).removePrefix("&")}"
     }
 
-    private fun etherscanAccountQuery(action: String, address: String, apiKey: String): String = buildString {
+    private fun etherscanAccountQuery(chainId: Long, action: String, address: String): String = buildString {
+        append("chainId=")
+        append(chainId)
+        append("&action=")
+        append(action)
+        append("&address=")
+        append(address)
+        append("&startblock=0&endblock=99999999&page=1&offset=")
+        append(20)
+        append("&sort=desc")
+    }
+
+    private fun legacyExplorerAccountQuery(action: String, address: String): String = buildString {
         append("&module=account&action=")
         append(action)
         append("&address=")
@@ -1035,37 +1034,6 @@ class EvmRepository(context: Context) {
         append("&startblock=0&endblock=99999999&page=1&offset=")
         append(20)
         append("&sort=desc")
-        append("&apikey=").append(apiKey)
-    }
-
-    private fun effectiveEtherscanApiKeys(): List<String> {
-        val saved = prefs.getString(KeyEtherscanApiKey, null)
-            ?.trim()
-            ?.takeIf { it.isNotBlank() }
-        return (listOfNotNull(saved) + DefaultEtherscanApiKeys).distinct()
-    }
-
-    @Synchronized
-    private fun nextEtherscanApiKey(): String {
-        val keys = effectiveEtherscanApiKeys()
-        val key = keys[Math.floorMod(etherscanKeyCursor++, keys.size)]
-        return key
-    }
-
-    @Synchronized
-    private fun throttleEtherscanRequest() {
-        val now = System.currentTimeMillis()
-        val waitMs = (EtherscanMinRequestGapMs - (now - lastEtherscanRequestAt)).coerceAtLeast(0L)
-        if (waitMs > 0L) Thread.sleep(waitMs)
-        lastEtherscanRequestAt = System.currentTimeMillis()
-    }
-
-    private fun isEtherscanRateLimit(error: Throwable): Boolean {
-        val message = error.message.orEmpty().lowercase()
-        return message.contains("rate") ||
-            message.contains("limit") ||
-            message.contains("429") ||
-            message.contains("too many")
     }
 
     private fun explorerApiHost(explorerUrl: String): String? {
@@ -1189,12 +1157,20 @@ class EvmRepository(context: Context) {
     }
 
     private fun normalizeDefaultNetwork(network: EvmNetwork): EvmNetwork = when {
-        network.id == "eth-mainnet" && network.rpcUrl.contains("publicnode", ignoreCase = true) -> defaultMainnetNetwork()
-        network.id == "eth-sepolia" && network.rpcUrl.contains("publicnode", ignoreCase = true) -> defaultSepoliaNetwork()
-        network.id == "eth-mainnet" && network.rpcUrl.contains("0f25b4f0665c497aaee6260b72cfed28", ignoreCase = true) -> defaultMainnetNetwork()
-        network.id == "eth-mainnet" && network.rpcUrl.contains("15c9add2e165435db52e6789bd959a33", ignoreCase = true) -> defaultMainnetNetwork()
-        network.chainId == EthereumMainnetChainId && network.rpcUrl.contains("0f25b4f0665c497aaee6260b72cfed28", ignoreCase = true) -> network.copy(rpcUrl = MainnetInfuraRpcUrl)
-        network.chainId == EthereumMainnetChainId && network.rpcUrl.contains("15c9add2e165435db52e6789bd959a33", ignoreCase = true) -> network.copy(rpcUrl = MainnetInfuraRpcUrl)
+        network.id == "eth-mainnet" && network.rpcUrl.contains("mainnet.infura.io/v3/", ignoreCase = true) -> defaultMainnetNetwork()
+        network.id == "eth-sepolia" && network.rpcUrl.contains("sepolia.infura.io/v3/", ignoreCase = true) -> defaultSepoliaNetwork()
+        network.id == "eth-mainnet" && network.rpcUrl.contains(LegacyPoctraBackendHost, ignoreCase = true) -> defaultMainnetNetwork()
+        network.id == "eth-sepolia" && network.rpcUrl.contains(LegacyPoctraBackendHost, ignoreCase = true) -> defaultSepoliaNetwork()
+        network.id == "eth-mainnet" && network.rpcUrl.contains(LegacyNetBackendHost, ignoreCase = true) -> defaultMainnetNetwork()
+        network.id == "eth-sepolia" && network.rpcUrl.contains(LegacyNetBackendHost, ignoreCase = true) -> defaultSepoliaNetwork()
+        network.id == "eth-mainnet-publicnode" -> publicNodeMainnetNetwork()
+        network.id == "eth-sepolia-publicnode" -> publicNodeSepoliaNetwork()
+        network.chainId == EthereumMainnetChainId && network.rpcUrl.contains("mainnet.infura.io/v3/", ignoreCase = true) -> network.copy(rpcUrl = MainnetBackendRpcUrl)
+        network.chainId == EthereumSepoliaChainId && network.rpcUrl.contains("sepolia.infura.io/v3/", ignoreCase = true) -> network.copy(rpcUrl = SepoliaBackendRpcUrl)
+        network.chainId == EthereumMainnetChainId && network.rpcUrl.contains(LegacyPoctraBackendHost, ignoreCase = true) -> network.copy(rpcUrl = MainnetBackendRpcUrl)
+        network.chainId == EthereumSepoliaChainId && network.rpcUrl.contains(LegacyPoctraBackendHost, ignoreCase = true) -> network.copy(rpcUrl = SepoliaBackendRpcUrl)
+        network.chainId == EthereumMainnetChainId && network.rpcUrl.contains(LegacyNetBackendHost, ignoreCase = true) -> network.copy(rpcUrl = MainnetBackendRpcUrl)
+        network.chainId == EthereumSepoliaChainId && network.rpcUrl.contains(LegacyNetBackendHost, ignoreCase = true) -> network.copy(rpcUrl = SepoliaBackendRpcUrl)
         network.id == "eth-mainnet" && network.rpcUrl.isBlank() -> defaultMainnetNetwork()
         network.id == "eth-sepolia" && network.rpcUrl.isBlank() -> defaultSepoliaNetwork()
         else -> network
@@ -1238,7 +1214,7 @@ class EvmRepository(context: Context) {
             id = "eth-sepolia",
             name = "Ethereum Sepolia",
             chainId = 11155111L,
-            rpcUrl = SepoliaInfuraRpcUrl,
+            rpcUrl = SepoliaBackendRpcUrl,
             symbol = "ETH",
             explorerUrl = "https://sepolia.etherscan.io",
             isTestnet = true,
@@ -1249,25 +1225,41 @@ class EvmRepository(context: Context) {
             id = "eth-mainnet",
             name = "Ethereum Mainnet",
             chainId = 1L,
-            rpcUrl = MainnetInfuraRpcUrl,
+            rpcUrl = MainnetBackendRpcUrl,
             symbol = "ETH",
             explorerUrl = "https://etherscan.io",
             isTestnet = false,
         )
 
-    private fun defaultPublicNodeMainnetNetwork(): EvmNetwork =
+    private fun publicNodeMainnetNetwork(): EvmNetwork =
         EvmNetwork(
             id = "eth-mainnet-publicnode",
             name = "Ethereum Mainnet PublicNode",
-            chainId = 1L,
-            rpcUrl = EthereumPublicNodeRpcUrl,
+            chainId = EthereumMainnetChainId,
+            rpcUrl = PublicNodeMainnetRpcUrl,
             symbol = "ETH",
             explorerUrl = "https://etherscan.io",
             isTestnet = false,
         )
 
+    private fun publicNodeSepoliaNetwork(): EvmNetwork =
+        EvmNetwork(
+            id = "eth-sepolia-publicnode",
+            name = "Ethereum Sepolia PublicNode",
+            chainId = EthereumSepoliaChainId,
+            rpcUrl = PublicNodeSepoliaRpcUrl,
+            symbol = "ETH",
+            explorerUrl = "https://sepolia.etherscan.io",
+            isTestnet = true,
+        )
+
     private fun defaultNetworks(): List<EvmNetwork> =
-        listOf(defaultMainnetNetwork(), defaultPublicNodeMainnetNetwork(), defaultSepoliaNetwork())
+        listOf(
+            defaultMainnetNetwork(),
+            defaultSepoliaNetwork(),
+            publicNodeMainnetNetwork(),
+            publicNodeSepoliaNetwork(),
+        )
 
     private fun String.hexQuantityToBigInteger(): BigInteger {
         val clean = removePrefix("0x").removePrefix("0X")
@@ -1328,29 +1320,26 @@ class EvmRepository(context: Context) {
         private const val KeyActiveNetwork = "active_evm_network"
         private const val KeyTokens = "evm_tokens"
         private const val KeyNfts = "evm_nfts"
-        private const val KeyEtherscanApiKey = "evm_etherscan_key"
         private const val KeyPriceCoin = "evm_price_coin"
         private const val KeyPriceUsd = "evm_price_usd"
         private const val KeyPriceFetchedAt = "evm_price_fetched_at"
         private const val PoctraUserAgent = "poctra-android"
+        private const val PoctraBackendUrl = "https://rpc.xme.my.id"
+        private const val LegacyPoctraBackendHost = "poctra.xme.my.id"
+        private const val LegacyNetBackendHost = "net.xme.my.id"
         private const val PriceCacheMs = 60_000L
+        private const val TokenRefreshBatchSize = 4
+        private const val NftRefreshBatchSize = 3
         private const val EthereumMainnetChainId = 1L
-        private const val MainnetInfuraRpcUrl = "https://mainnet.infura.io/v3/f7ea6a596e8c4a038f8700e42e7c3494"
-        private const val EthereumPublicNodeRpcUrl = "https://ethereum-rpc.publicnode.com"
-        private val MainnetInfuraRpcPool = listOf(
-            EthereumPublicNodeRpcUrl,
-        )
-        private const val SepoliaInfuraRpcUrl = "https://sepolia.infura.io/v3/f7ea6a596e8c4a038f8700e42e7c3494"
+        private const val EthereumSepoliaChainId = 11155111L
+        private const val MainnetBackendRpcUrl = "$PoctraBackendUrl/eth-mainnet"
+        private const val SepoliaBackendRpcUrl = "$PoctraBackendUrl/eth-sepolia"
+        private const val PublicNodeMainnetRpcUrl = "https://ethereum-rpc.publicnode.com"
+        private const val PublicNodeSepoliaRpcUrl = "https://ethereum-sepolia-rpc.publicnode.com"
         private const val DefaultWOctAddress = "0x4647e1fE715c9e23959022C2416C71867F5a6E80"
         private const val DefaultUsdtAddress = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
         private const val EnsRegistryAddress = "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e"
         private const val ZeroAddress = "0x0000000000000000000000000000000000000000"
-        private val DefaultEtherscanApiKeys = listOf(
-            "R55MP9892QWR6ATUUWSXHHRTNMP3FNV5QI",
-            "JA9XFEKAJAQKGG6GDJRIU42CPVGFFBJUX1",
-            "WKPCCDJDXEN17P89TX984CCQFEND95JI61",
-        )
-        private const val EtherscanMinRequestGapMs = 240L
         private val DefaultNativeGasLimit = BigInteger.valueOf(21_000L)
         private val DefaultTokenGasLimit = BigInteger.valueOf(80_000L)
         private val DefaultNftGasLimit = BigInteger.valueOf(120_000L)

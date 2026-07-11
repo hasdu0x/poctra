@@ -2,6 +2,8 @@ package com.poctra.wallet.data
 
 import com.poctra.wallet.core.EvmCrypto
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -120,9 +122,12 @@ class BridgeRepository {
 
     suspend fun fetchBalances(wallet: Wallet): BridgeBalances = withContext(Dispatchers.IO) {
         val evmAddress = deriveEvmAddress(wallet)
-        val octRaw = octraBalanceRaw(wallet.address)
-        val ethWei = evmQuantity(activeEthereumRpcUrl, "eth_getBalance", JSONArray().put(evmAddress).put("latest"))
-        val woctRaw = erc20BalanceRaw(evmAddress)
+        val (octRaw, ethWei, woctRaw) = coroutineScope {
+            val oct = async { octraBalanceRaw(wallet.address) }
+            val eth = async { evmQuantity(activeEthereumRpcUrl, "eth_getBalance", JSONArray().put(evmAddress).put("latest")) }
+            val woct = async { erc20BalanceRaw(evmAddress) }
+            Triple(oct.await(), eth.await(), woct.await())
+        }
         BridgeBalances(
             octRaw = octRaw,
             ethWei = ethWei,
@@ -134,17 +139,23 @@ class BridgeRepository {
     }
 
     suspend fun fetchStatus(wallet: Wallet): BridgeStatus = withContext(Dispatchers.IO) {
-        var firstError: String? = null
-        fun read(method: String): String? = runCatching {
-            octraContractCall(method, JSONArray(), wallet.address)
-        }.onFailure { exception ->
-            if (firstError == null) firstError = exception.message ?: "Bridge status lookup failed."
-        }.getOrNull()
+        val reads = coroutineScope {
+            listOf(
+                "is_paused",
+                "daily_lock_remaining",
+                "daily_unlock_remaining",
+                "get_unlock_operator",
+            ).associateWith { method ->
+                async { runCatching { octraContractCall(method, JSONArray(), wallet.address) } }
+            }.mapValues { (_, deferred) -> deferred.await() }
+        }
+        val firstError = reads.values.firstOrNull { it.isFailure }?.exceptionOrNull()?.message
+            ?: reads.values.firstOrNull { it.isFailure }?.exceptionOrNull()?.let { "Bridge status lookup failed." }
 
-        val paused = read("is_paused")?.toBridgePaused()
-        val lockRaw = read("daily_lock_remaining")?.toRawAmount()
-        val unlockRaw = read("daily_unlock_remaining")?.toRawAmount()
-        val unlockOperator = read("get_unlock_operator").orEmpty()
+        val paused = reads["is_paused"]?.getOrNull()?.toBridgePaused()
+        val lockRaw = reads["daily_lock_remaining"]?.getOrNull()?.toRawAmount()
+        val unlockRaw = reads["daily_unlock_remaining"]?.getOrNull()?.toRawAmount()
+        val unlockOperator = reads["get_unlock_operator"]?.getOrNull().orEmpty()
 
         BridgeStatus(
             isPaused = paused,
@@ -221,18 +232,24 @@ class BridgeRepository {
     ): BridgeEvmGasEstimate = withContext(Dispatchers.IO) {
         val from = deriveEvmAddress(wallet)
         val safeAmount = amountRaw.takeIf { it > BigInteger.ZERO } ?: BigInteger.ONE
-        val marketGasPrice = evmQuantity(activeEthereumRpcUrl, "eth_gasPrice", JSONArray())
+        val (marketGasPrice, gasLimit) = coroutineScope {
+            val gasPrice = async { evmQuantity(activeEthereumRpcUrl, "eth_gasPrice", JSONArray()) }
+            val limit = async {
+                when (direction) {
+                    BridgeDirection.OctToWoct -> ClaimGasLimit
+                    BridgeDirection.WoctToOct -> coroutineScope {
+                        val approveData = "0x095ea7b3${addressWord(WoctBridgeContract)}${safeAmount.toAbiWord()}"
+                        val burnData = "0x$BurnToOctraSelector${encodeStringUint(wallet.address, safeAmount)}"
+                        val approve = async { estimateGas(from, WoctTokenAddress, approveData, ApproveGasLimit) }
+                        val burn = async { estimateGas(from, WoctBridgeContract, burnData, BurnGasLimit) }
+                        approve.await().add(burn.await())
+                    }
+                }
+            }
+            gasPrice.await() to limit.await()
+        }
         val lowGasPrice = marketGasPrice.multiply(BigInteger.valueOf(85)).divide(BigInteger.valueOf(100)).coerceAtLeast(BigInteger.ONE)
         val fastGasPrice = marketGasPrice.multiply(BigInteger.valueOf(125)).divide(BigInteger.valueOf(100)).coerceAtLeast(BigInteger.ONE)
-        val gasLimit = when (direction) {
-            BridgeDirection.OctToWoct -> ClaimGasLimit
-            BridgeDirection.WoctToOct -> {
-                val approveData = "0x095ea7b3${addressWord(WoctBridgeContract)}${safeAmount.toAbiWord()}"
-                val burnData = "0x$BurnToOctraSelector${encodeStringUint(wallet.address, safeAmount)}"
-                estimateGas(from, WoctTokenAddress, approveData, ApproveGasLimit)
-                    .add(estimateGas(from, WoctBridgeContract, burnData, BurnGasLimit))
-            }
-        }
         BridgeEvmGasEstimate(
             gasLimit = gasLimit,
             lowGasPriceWei = lowGasPrice,
@@ -411,8 +428,11 @@ class BridgeRepository {
 
     suspend fun fetchOnChainHistory(wallet: Wallet): List<BridgeChainHistoryRecord> = withContext(Dispatchers.IO) {
         val evmAddress = deriveEvmAddress(wallet)
-        val octToWoct = runCatching { fetchOctToWoctHistory(wallet.address, evmAddress) }.getOrDefault(emptyList())
-        val woctToOct = runCatching { fetchWoctToOctHistory(wallet.address, evmAddress) }.getOrDefault(emptyList())
+        val (octToWoct, woctToOct) = coroutineScope {
+            val octToWoctJob = async { fetchOctToWoctHistory(wallet.address, evmAddress) }
+            val woctToOctJob = async { fetchWoctToOctHistory(wallet.address, evmAddress) }
+            octToWoctJob.await() to woctToOctJob.await()
+        }
         (octToWoct + woctToOct)
             .distinctBy { "${it.direction}:${it.octraTxHash.orEmpty()}:${it.evmTxHash.orEmpty()}:${it.id}" }
             .sortedByDescending { it.updatedAt }
@@ -529,7 +549,7 @@ class BridgeRepository {
     }
 
     private fun fetchOctToWoctHistory(octraAddress: String, evmAddress: String): List<BridgeChainHistoryRecord> {
-        val latestEpoch = runCatching { lightClientLatestEpoch() }.getOrDefault(0L)
+        val latestEpoch = historyRpcRetry { lightClientLatestEpoch() }
         return fetchLockTransactions(octraAddress).mapNotNull { tx ->
             val hash = tx.optString("hash", tx.optString("tx_hash")).ifBlank { return@mapNotNull null }
             val timestamp = tx.optDouble("timestamp", 0.0).takeIf { it > 0.0 }?.times(1000)?.toLong()
@@ -547,8 +567,10 @@ class BridgeRepository {
                 Triple("running", BridgeStep.WaitingRelayer, "Waiting for Ethereum lightclient header.")
             } else {
                 val claimStatus = runCatching {
-                    val msgHash = bridgeMessageHash(recipient, amountRaw, srcNonce)
-                    isMessageClaimed(msgHash)
+                    historyRpcRetry {
+                        val msgHash = bridgeMessageHash(recipient, amountRaw, srcNonce)
+                        isMessageClaimed(msgHash)
+                    }
                 }.getOrNull()
                 when (claimStatus) {
                     true -> Triple("completed", BridgeStep.Completed, "wOCT claim already completed.")
@@ -575,10 +597,10 @@ class BridgeRepository {
 
     private fun fetchLockTransactions(octraAddress: String, limit: Int = 20): List<JSONObject> {
         val result = runCatching {
-            octraRpc("octra_transactionsByAddress", JSONArray().put(octraAddress).put(50).put(0))
+            historyRpcRetry { octraRpc("octra_transactionsByAddress", JSONArray().put(octraAddress).put(50).put(0)) }
         }.getOrNull() ?: runCatching {
-            octraRpc("octra_account", JSONArray().put(octraAddress).put(50))
-        }.getOrNull()
+            historyRpcRetry { octraRpc("octra_account", JSONArray().put(octraAddress).put(50)) }
+        }.getOrNull() ?: throw IllegalStateException("Octra bridge history could not be fetched.")
 
         val transactions = when (result) {
             is JSONObject -> result.optJSONArray("transactions")
@@ -606,41 +628,49 @@ class BridgeRepository {
     }
 
     private fun fetchWoctToOctHistory(octraAddress: String, evmAddress: String): List<BridgeChainHistoryRecord> {
-        val latestBlock = runCatching {
+        val latestBlock = historyRpcRetry {
             evmQuantity(activeEthereumRpcUrl, "eth_blockNumber", JSONArray()).toLong()
-        }.getOrDefault(0L)
-        if (latestBlock <= 0L) return emptyList()
+        }
+        if (latestBlock <= 0L) throw IllegalStateException("Ethereum bridge history block height is unavailable.")
         val burnerTopic = "0x" + evmAddress.cleanHex().lowercase().padStart(64, '0')
         val logs = mutableListOf<JSONObject>()
         val startBlock = (latestBlock - BurnHistoryLookbackBlocks).coerceAtLeast(0L)
         var toBlock = latestBlock
+        var successfulChunks = 0
+        var lastChunkError: Throwable? = null
         while (toBlock > startBlock && logs.size < MaxBridgeHistoryLogs) {
             val fromBlock = (toBlock - BurnHistoryChunkBlocks + 1L).coerceAtLeast(startBlock)
             val chunk = runCatching {
-                evmRaw(
-                    activeEthereumRpcUrl,
-                    "eth_getLogs",
-                    JSONArray().put(
-                        JSONObject()
-                            .put("address", WoctBridgeContract)
-                            .put(
-                                "topics",
-                                JSONArray()
-                                    .put(BurnInitiatedTopic)
-                                    .put(JSONObject.NULL)
-                                    .put(burnerTopic),
-                            )
-                            .put("fromBlock", "0x${fromBlock.toString(16)}")
-                            .put("toBlock", "0x${toBlock.toString(16)}"),
-                    ),
-                ) as? JSONArray
-            }.getOrNull()
+                historyRpcRetry {
+                    evmRaw(
+                        activeEthereumRpcUrl,
+                        "eth_getLogs",
+                        JSONArray().put(
+                            JSONObject()
+                                .put("address", WoctBridgeContract)
+                                .put(
+                                    "topics",
+                                    JSONArray()
+                                        .put(BurnInitiatedTopic)
+                                        .put(JSONObject.NULL)
+                                        .put(burnerTopic),
+                                )
+                                .put("fromBlock", "0x${fromBlock.toString(16)}")
+                                .put("toBlock", "0x${toBlock.toString(16)}"),
+                        ),
+                    ) as? JSONArray ?: JSONArray()
+                }
+            }.onFailure { lastChunkError = it }.getOrNull()
             if (chunk != null) {
+                successfulChunks++
                 for (index in 0 until chunk.length()) {
                     chunk.optJSONObject(index)?.let(logs::add)
                 }
             }
             toBlock = fromBlock - 1L
+        }
+        if (successfulChunks == 0 && lastChunkError != null) {
+            throw IllegalStateException(lastChunkError?.message ?: "Ethereum bridge history could not be fetched.")
         }
 
         return logs
@@ -649,7 +679,7 @@ class BridgeRepository {
             .mapNotNull { log ->
                 val decoded = decodeBurnLog(log) ?: return@mapNotNull null
                 if (!decoded.octraRecipient.equals(octraAddress, ignoreCase = true)) return@mapNotNull null
-                val unlocked = runCatching { isBurnUnlocked(decoded.burnId) }.getOrNull()
+                val unlocked = runCatching { historyRpcRetry { isBurnUnlocked(decoded.burnId) } }.getOrNull()
                 val statusData = when (unlocked) {
                     true -> Triple("completed", BridgeStep.Completed, "OCT unlocked by Unlock Operator.")
                     false -> Triple("running", BridgeStep.WaitingUnlock, "Burn confirmed. Waiting for Unlock Operator.")
@@ -942,6 +972,21 @@ class BridgeRepository {
     private fun signerRpc(method: String, params: JSONArray): Any? =
         jsonRpc("${RelayerRpcUrl.trimEnd('/')}/", method, params)
 
+    private fun <T> historyRpcRetry(block: () -> T): T {
+        var lastError: Throwable? = null
+        repeat(BridgeHistoryRpcAttempts) { attempt ->
+            try {
+                return block()
+            } catch (error: Throwable) {
+                lastError = error
+                if (attempt < BridgeHistoryRpcAttempts - 1) {
+                    Thread.sleep(BridgeHistoryRetryDelayMs * (attempt + 1L))
+                }
+            }
+        }
+        throw lastError ?: IllegalStateException("Bridge history RPC failed.")
+    }
+
     private fun evmQuantity(rpcUrl: String, method: String, params: JSONArray): BigInteger =
         evmString(rpcUrl, method, params).hexQuantityToBigInteger()
 
@@ -1046,7 +1091,7 @@ class BridgeRepository {
         const val OctraUnlockMethod = "unlock_trusted"
         const val WoctBridgeContract = "0xE7eD69b852fd2a1406080B26A37e8E04e7dA4caE"
         const val WoctTokenAddress = "0x4647e1fE715c9e23959022C2416C71867F5a6E80"
-        const val EthereumRpcUrl = "https://mainnet.infura.io/v3/f7ea6a596e8c4a038f8700e42e7c3494"
+        const val EthereumRpcUrl = "https://rpc.xme.my.id/eth-mainnet"
         const val RelayerRpcUrl = "https://relayer-002838819188.octra.network"
         private const val PoctraUserAgent = "poctra-android"
         const val OctDecimals = 6
@@ -1063,6 +1108,8 @@ class BridgeRepository {
         private const val BurnHistoryChunkBlocks = 9_000L
         private const val BurnHistoryLookbackBlocks = 200_000L
         private const val MaxBridgeHistoryLogs = 20
+        private const val BridgeHistoryRpcAttempts = 3
+        private const val BridgeHistoryRetryDelayMs = 350L
         private const val BurnToOctraSelector = "e3e3aed0"
         private val OneGweiWei = BigInteger("1000000000")
         private val ApproveGasLimit = BigInteger.valueOf(196_608L)

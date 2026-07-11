@@ -3,17 +3,32 @@ package com.poctra.wallet.data
 import android.content.Context
 import android.util.Base64
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
 import org.bouncycastle.crypto.signers.Ed25519Signer
+import org.bouncycastle.crypto.digests.SHA256Digest
+import org.bouncycastle.crypto.generators.PKCS5S2ParametersGenerator
+import org.bouncycastle.crypto.params.KeyParameter
 import org.json.JSONArray
 import org.json.JSONObject
+import org.json.JSONTokener
+import java.io.ByteArrayOutputStream
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.io.OutputStreamWriter
+import java.security.MessageDigest
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
+import javax.crypto.Cipher
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.PBEKeySpec
+import javax.crypto.spec.SecretKeySpec
 
 data class CircleAsset(
     val circleId: String,
@@ -23,8 +38,32 @@ data class CircleAsset(
     val sizeBytes: Long,
 )
 
+private data class CircleReadCacheEntry(
+    val expiresAtMs: Long,
+    val value: Any?,
+)
+
+private data class CircleRpcBatchCall(
+    val index: Int,
+    val request: JSONObject,
+    val method: String,
+    val params: JSONArray,
+    val cacheKey: String,
+)
+
+private data class TokenLookupResult(
+    val name: String?,
+    val symbol: String?,
+    val decimals: String?,
+    val balance: String?,
+    val supply: String?,
+)
+
 class RpcRepository(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("poctra_rpc", Context.MODE_PRIVATE)
+    private val unsupportedCircleProgramViewUrls = ConcurrentHashMap.newKeySet<String>()
+    private val circleReadCache = ConcurrentHashMap<String, CircleReadCacheEntry>()
+    private val circleReadLocks = ConcurrentHashMap<String, Any>()
 
     fun currentUrl(): String = activeNetwork().url
 
@@ -373,40 +412,52 @@ class RpcRepository(context: Context) {
 
     suspend fun fetchTransactionHistory(address: String, limit: Int = 11, url: String = currentUrl()): List<TransactionHistoryItem> =
         withContext(Dispatchers.IO) {
-            val confirmed = runCatching {
-                val json = postRpc(
-                    url = url,
-                    payload = JSONObject()
-                        .put("jsonrpc", "2.0")
-                        .put("id", 1)
-                        .put("method", "octra_account")
-                        .put("params", JSONArray().put(address).put(limit)),
-                )
-                val result = json.optJSONObject("result") ?: return@runCatching emptyList()
-                val recent = result.optJSONArray("recent_txs") ?: JSONArray()
-                buildList {
-                    for (index in 0 until recent.length()) {
-                        val item = recent.optJSONObject(index) ?: continue
-                        val hash = item.optString("hash", item.optString("tx_hash"))
-                        if (hash.isBlank()) continue
-                        val tx = runCatching { fetchTransactionDetails(hash, address, url) }.getOrElse {
-                            TransactionHistoryItem(
-                                hash = hash,
-                                from = item.optString("from", "unknown"),
-                                to = item.optString("to", item.optString("to_", "unknown")),
-                                amount = parseAmount(item.opt("amount_raw"), item.opt("amount")),
-                                timestamp = item.optDouble("timestamp", 0.0),
-                                status = "confirmed",
-                                type = if (item.optString("from").equals(address, ignoreCase = true)) "sent" else "received",
-                                opType = item.optString("op_type", "standard"),
-                            )
-                        }
-                        add(tx)
+            val confirmedJob = async {
+                runCatching {
+                    val json = postRpc(
+                        url = url,
+                        payload = JSONObject()
+                            .put("jsonrpc", "2.0")
+                            .put("id", 1)
+                            .put("method", "octra_account")
+                            .put("params", JSONArray().put(address).put(limit)),
+                    )
+                    val result = json.optJSONObject("result") ?: return@runCatching emptyList()
+                    val recent = result.optJSONArray("recent_txs") ?: JSONArray()
+                    val items = buildList {
+                        for (index in 0 until recent.length()) recent.optJSONObject(index)?.let(::add)
                     }
-                }
-            }.getOrDefault(emptyList())
+                    items.chunked(HistoryDetailsBatchSize).flatMap { batch ->
+                        coroutineScope {
+                            batch.map { item ->
+                                async {
+                                    val hash = item.optString("hash", item.optString("tx_hash"))
+                                    if (hash.isBlank()) {
+                                        null
+                                    } else {
+                                        runCatching { fetchTransactionDetails(hash, address, url) }.getOrElse {
+                                            TransactionHistoryItem(
+                                                hash = hash,
+                                                from = item.optString("from", "unknown"),
+                                                to = item.optString("to", item.optString("to_", "unknown")),
+                                                amount = parseAmount(item.opt("amount_raw"), item.opt("amount")),
+                                                timestamp = item.optDouble("timestamp", 0.0),
+                                                status = "confirmed",
+                                                type = if (item.optString("from").equals(address, ignoreCase = true)) "sent" else "received",
+                                                opType = item.optString("op_type", "standard"),
+                                            )
+                                        }
+                                    }
+                                }
+                            }.awaitAll().filterNotNull()
+                        }
+                    }
+                }.getOrDefault(emptyList())
+            }
 
-            val pending = fetchPendingTransactions(address, url)
+            val pendingJob = async { runCatching { fetchPendingTransactions(address, url) }.getOrDefault(emptyList()) }
+            val confirmed = confirmedJob.await()
+            val pending = pendingJob.await()
             (confirmed + pending)
                 .distinctBy { it.hash }
                 .sortedByDescending { it.timestamp }
@@ -453,7 +504,13 @@ class RpcRepository(context: Context) {
 
             val known = fetched.map { it.address }.toSet()
             val missing = savedAddresses.filterNot { it in known }
-            val lookedUp = missing.mapNotNull { lookupOctraToken(it, walletAddress, url) }
+            val lookedUp = missing.chunked(OctraTokenLookupBatchSize).flatMap { batch ->
+                coroutineScope {
+                    batch.map { address ->
+                        async { lookupOctraToken(address, walletAddress, url) }
+                    }.awaitAll().filterNotNull()
+                }
+            }
             fetched + lookedUp
         }
 
@@ -461,17 +518,28 @@ class RpcRepository(context: Context) {
         withContext(Dispatchers.IO) {
             if (!contractAddress.startsWith("oct") || contractAddress.length != 47) return@withContext null
 
-            val name = contractCall(contractAddress, "get_name", JSONArray(), walletAddress, url)
-            val symbol = contractCall(contractAddress, "get_symbol", JSONArray(), walletAddress, url)
-            val decimals = contractCall(contractAddress, "decimals", JSONArray(), walletAddress, url)
-            val balance = contractCall(
-                contractAddress = contractAddress,
-                method = "balance_of",
-                params = JSONArray().put(walletAddress),
-                walletAddress = walletAddress,
-                url = url,
-            )
-            val supply = contractCall(contractAddress, "get_total_supply", JSONArray(), walletAddress, url)
+            val (name, symbol, decimals, balance, supply) = coroutineScope {
+                val nameJob = async { contractCall(contractAddress, "get_name", JSONArray(), walletAddress, url) }
+                val symbolJob = async { contractCall(contractAddress, "get_symbol", JSONArray(), walletAddress, url) }
+                val decimalsJob = async { contractCall(contractAddress, "decimals", JSONArray(), walletAddress, url) }
+                val balanceJob = async {
+                    contractCall(
+                        contractAddress = contractAddress,
+                        method = "balance_of",
+                        params = JSONArray().put(walletAddress),
+                        walletAddress = walletAddress,
+                        url = url,
+                    )
+                }
+                val supplyJob = async { contractCall(contractAddress, "get_total_supply", JSONArray(), walletAddress, url) }
+                TokenLookupResult(
+                    name = nameJob.await(),
+                    symbol = symbolJob.await(),
+                    decimals = decimalsJob.await(),
+                    balance = balanceJob.await(),
+                    supply = supplyJob.await(),
+                )
+            }
 
             if (name.isNullOrBlank() && symbol.isNullOrBlank()) return@withContext null
 
@@ -561,6 +629,342 @@ class RpcRepository(context: Context) {
         return json.optJSONObject("result") ?: throw IllegalStateException("Circle info was not found.")
     }
 
+    fun circleProgramView(address: String, method: String, params: JSONArray): Any? {
+        val cleanAddress = address.trim()
+        val cleanMethod = method.trim()
+        require(cleanAddress.startsWith("oct") && cleanAddress.length == 47) { "Enter a valid Octra address." }
+        require(cleanMethod.matches(Regex("^[A-Za-z_][A-Za-z0-9_]{0,63}$"))) { "Enter a valid view method." }
+        require(params.length() <= MaxCircleRpcParams) { "Circle view params are too large." }
+
+        val rpcUrl = currentUrl()
+        return cachedCircleRead(circleProgramViewCacheKey(rpcUrl, cleanAddress, cleanMethod, params)) {
+            executeCircleProgramView(rpcUrl, cleanAddress, cleanMethod, params)
+        }
+    }
+
+    fun circleReadRpc(method: String, params: JSONArray): Any? {
+        val cleanMethod = validateCircleReadRpc(method, params)
+        val rpcUrl = currentUrl()
+        return cachedCircleRead(circleReadRpcCacheKey(rpcUrl, cleanMethod, params)) {
+            executeCircleReadRpc(rpcUrl, cleanMethod, params)
+        }
+    }
+
+    fun circleReadRpcBatch(requests: JSONArray): JSONArray {
+        val rpcUrl = currentUrl()
+        require(requests.length() <= MaxCircleRpcBatchSize) { "Circle RPC batch is too large." }
+        val responses = arrayOfNulls<JSONObject>(requests.length())
+        val misses = mutableListOf<CircleRpcBatchCall>()
+        val firstMissIndexByKey = mutableMapOf<String, Int>()
+        val duplicateMisses = mutableListOf<Pair<Int, Int>>()
+
+        for (index in 0 until requests.length()) {
+            val request = requests.optJSONObject(index)
+            if (request == null) {
+                responses[index] = circleRpcError(JSONObject.NULL, -32600, "Invalid JSON-RPC request.")
+                continue
+            }
+            try {
+                val method = validateCircleReadRpc(request.optString("method"), request.optJSONArray("params") ?: JSONArray())
+                val params = request.optJSONArray("params") ?: JSONArray()
+                val cacheKey = circleReadRpcCacheKey(rpcUrl, method, params)
+                val cached = cachedCircleReadValue(cacheKey)
+                if (cached != null) {
+                    responses[index] = circleRpcSuccess(request, cached.value)
+                    continue
+                }
+                val duplicateIndex = cacheKey?.let { firstMissIndexByKey[it] }
+                if (duplicateIndex != null) {
+                    duplicateMisses += index to duplicateIndex
+                    continue
+                }
+                if (cacheKey != null) firstMissIndexByKey[cacheKey] = index
+                misses += CircleRpcBatchCall(index, request, method, params, cacheKey.orEmpty())
+            } catch (exception: Exception) {
+                responses[index] = circleRpcError(request, -32602, exception.message ?: "Invalid circle RPC request.")
+            }
+        }
+
+        if (misses.isNotEmpty()) {
+            executeCircleReadBatch(rpcUrl, misses).forEach { (index, response) ->
+                responses[index] = response
+            }
+        }
+        duplicateMisses.forEach { (duplicateIndex, sourceIndex) ->
+            responses[duplicateIndex] = responses[sourceIndex]?.let { response ->
+                if (response.has("error")) {
+                    circleRpcError(
+                        requests.optJSONObject(duplicateIndex) ?: JSONObject.NULL,
+                        response.optJSONObject("error")?.optInt("code", -32000) ?: -32000,
+                        response.optJSONObject("error")?.optString("message", "Circle RPC failed.") ?: "Circle RPC failed.",
+                    )
+                } else {
+                    circleRpcSuccess(
+                        requests.optJSONObject(duplicateIndex) ?: JSONObject(),
+                        response.opt("result").takeUnless { it == null } ?: JSONObject.NULL,
+                    )
+                }
+            }
+        }
+
+        return JSONArray().also { output ->
+            responses.forEachIndexed { index, response ->
+                output.put(response ?: circleRpcError(requests.optJSONObject(index) ?: JSONObject.NULL, -32000, "Circle RPC failed."))
+            }
+        }
+    }
+
+    private fun executeCircleProgramView(
+        rpcUrl: String,
+        cleanAddress: String,
+        cleanMethod: String,
+        params: JSONArray,
+    ): Any? {
+        if (!unsupportedCircleProgramViewUrls.contains(rpcUrl)) {
+            val direct = postRpc(
+                url = rpcUrl,
+                payload = JSONObject()
+                    .put("jsonrpc", "2.0")
+                    .put("id", 1)
+                    .put("method", "octra_callProgramView")
+                    .put(
+                        "params",
+                        JSONArray().put(
+                            JSONObject()
+                                .put("address", cleanAddress)
+                                .put("method", cleanMethod)
+                                .put("params", params),
+                        ),
+                    ),
+            )
+            val directError = direct.optJSONObject("error")
+            if (directError == null) return direct.opt("result")
+            val directMessage = directError.optString("message")
+            if (!isMethodNotFound(directMessage)) {
+                throw IllegalStateException(directMessage.ifBlank { "Circle program view failed." })
+            }
+            unsupportedCircleProgramViewUrls.add(rpcUrl)
+        }
+
+        return executeContractCallView(rpcUrl, cleanAddress, cleanMethod, params)
+    }
+
+    private fun executeContractCallView(
+        rpcUrl: String,
+        cleanAddress: String,
+        cleanMethod: String,
+        params: JSONArray,
+    ): Any? {
+        val fallback = postRpc(
+            url = rpcUrl,
+            payload = JSONObject()
+                .put("jsonrpc", "2.0")
+                .put("id", 1)
+                .put("method", "contract_call")
+                .put("params", JSONArray().put(cleanAddress).put(cleanMethod).put(params)),
+        )
+        fallback.optJSONObject("error")?.let { error ->
+            throw IllegalStateException(error.optString("message").ifBlank { "Circle program view failed." })
+        }
+        return fallback.opt("result")
+    }
+
+    private fun executeCircleReadRpc(rpcUrl: String, cleanMethod: String, params: JSONArray): Any? {
+        if (cleanMethod == "octra_callProgramView") {
+            val request = params.optJSONObject(0) ?: throw IllegalArgumentException("octra_callProgramView payload is required.")
+            return circleProgramView(
+                address = request.optString("address"),
+                method = request.optString("method"),
+                params = request.optJSONArray("params") ?: JSONArray(),
+            )
+        }
+
+        val direct = postRpc(
+            url = rpcUrl,
+            payload = JSONObject()
+                .put("jsonrpc", "2.0")
+                .put("id", 1)
+                .put("method", cleanMethod)
+                .put("params", params),
+        )
+        direct.optJSONObject("error")?.let { error ->
+            throw IllegalStateException(error.optString("message").ifBlank { "Circle RPC failed." })
+        }
+        return direct.opt("result")
+    }
+
+    private fun executeCircleReadBatch(rpcUrl: String, calls: List<CircleRpcBatchCall>): Map<Int, JSONObject> {
+        val responses = mutableMapOf<Int, JSONObject>()
+        val useProgramView = !unsupportedCircleProgramViewUrls.contains(rpcUrl)
+        val rawBatch = JSONArray()
+        calls.forEachIndexed { batchIndex, call ->
+            rawBatch.put(rawCircleRpcPayload(call, batchIndex + 1, useProgramView))
+        }
+
+        val rawResponses = postRpcBatch(rpcUrl, rawBatch)
+        val byId = jsonRpcResponsesById(rawResponses)
+        val fallbackCalls = mutableListOf<CircleRpcBatchCall>()
+
+        calls.forEachIndexed { batchIndex, call ->
+            val rawResponse = byId[batchIndex + 1] ?: JSONObject()
+                .put("error", JSONObject().put("code", -32000).put("message", "Missing circle RPC response."))
+            if (useProgramView && call.method == "octra_callProgramView" && isMethodNotFound(rawResponse.optJSONObject("error")?.optString("message").orEmpty())) {
+                fallbackCalls += call
+            } else {
+                responses[call.index] = normalizeCircleRpcBatchResponse(call, rawResponse)
+            }
+        }
+
+        if (fallbackCalls.isNotEmpty()) {
+            unsupportedCircleProgramViewUrls.add(rpcUrl)
+            val fallbackBatch = JSONArray()
+            fallbackCalls.forEachIndexed { batchIndex, call ->
+                fallbackBatch.put(rawCircleRpcPayload(call, batchIndex + 1, useProgramView = false))
+            }
+            val fallbackResponses = jsonRpcResponsesById(postRpcBatch(rpcUrl, fallbackBatch))
+            fallbackCalls.forEachIndexed { batchIndex, call ->
+                val rawResponse = fallbackResponses[batchIndex + 1] ?: JSONObject()
+                    .put("error", JSONObject().put("code", -32000).put("message", "Missing circle RPC fallback response."))
+                responses[call.index] = normalizeCircleRpcBatchResponse(call, rawResponse)
+            }
+        }
+
+        return responses
+    }
+
+    private fun validateCircleReadRpc(method: String, params: JSONArray): String {
+        val cleanMethod = method.trim()
+        require(cleanMethod in CircleReadRpcMethods) { "Circle RPC method is not allowed: $cleanMethod" }
+        require(params.length() <= MaxCircleRpcParams) { "Circle RPC params are too large." }
+        return cleanMethod
+    }
+
+    private fun rawCircleRpcPayload(call: CircleRpcBatchCall, id: Int, useProgramView: Boolean): JSONObject {
+        if (call.method == "octra_callProgramView") {
+            val request = call.params.optJSONObject(0) ?: throw IllegalArgumentException("octra_callProgramView payload is required.")
+            val address = request.optString("address")
+            val method = request.optString("method")
+            val params = request.optJSONArray("params") ?: JSONArray()
+            require(address.startsWith("oct") && address.length == 47) { "Enter a valid Octra address." }
+            require(method.matches(Regex("^[A-Za-z_][A-Za-z0-9_]{0,63}$"))) { "Enter a valid view method." }
+            require(params.length() <= MaxCircleRpcParams) { "Circle view params are too large." }
+            if (useProgramView) {
+                return JSONObject()
+                    .put("jsonrpc", "2.0")
+                    .put("id", id)
+                    .put("method", "octra_callProgramView")
+                    .put(
+                        "params",
+                        JSONArray().put(
+                            JSONObject()
+                                .put("address", address)
+                                .put("method", method)
+                                .put("params", params),
+                        ),
+                    )
+            }
+            return JSONObject()
+                .put("jsonrpc", "2.0")
+                .put("id", id)
+                .put("method", "contract_call")
+                .put("params", JSONArray().put(address).put(method).put(params))
+        }
+
+        return JSONObject()
+            .put("jsonrpc", call.request.optString("jsonrpc", "2.0").ifBlank { "2.0" })
+            .put("id", id)
+            .put("method", call.method)
+            .put("params", call.params)
+    }
+
+    private fun normalizeCircleRpcBatchResponse(call: CircleRpcBatchCall, rawResponse: JSONObject): JSONObject {
+        rawResponse.optJSONObject("error")?.let { error ->
+            return circleRpcError(
+                call.request,
+                error.optInt("code", -32000),
+                error.optString("message").ifBlank { "Circle RPC failed." },
+            )
+        }
+
+        val result = rawResponse.opt("result") ?: JSONObject.NULL
+        putCircleReadCache(call.cacheKey.takeIf { it.isNotBlank() }, result)
+        return circleRpcSuccess(call.request, result)
+    }
+
+    private fun jsonRpcResponsesById(responses: JSONArray): Map<Int, JSONObject> {
+        val output = mutableMapOf<Int, JSONObject>()
+        for (index in 0 until responses.length()) {
+            val response = responses.optJSONObject(index) ?: continue
+            output[response.optInt("id", index + 1)] = response
+        }
+        return output
+    }
+
+    private fun circleRpcSuccess(request: Any, result: Any?): JSONObject =
+        JSONObject()
+            .put("jsonrpc", (request as? JSONObject)?.optString("jsonrpc", "2.0")?.ifBlank { "2.0" } ?: "2.0")
+            .put("id", (request as? JSONObject)?.opt("id") ?: JSONObject.NULL)
+            .put("result", result ?: JSONObject.NULL)
+
+    private fun circleRpcError(request: Any, code: Int, message: String): JSONObject =
+        JSONObject()
+            .put("jsonrpc", (request as? JSONObject)?.optString("jsonrpc", "2.0")?.ifBlank { "2.0" } ?: "2.0")
+            .put("id", (request as? JSONObject)?.opt("id") ?: JSONObject.NULL)
+            .put(
+                "error",
+                JSONObject()
+                    .put("code", code)
+                    .put("message", message),
+            )
+
+    private fun circleProgramViewCacheKey(rpcUrl: String, address: String, method: String, params: JSONArray): String =
+        "$rpcUrl|octra_callProgramView|$address|$method|${params}"
+
+    private fun circleReadRpcCacheKey(rpcUrl: String, method: String, params: JSONArray): String? {
+        if (method !in CircleReadCacheMethods) return null
+        return "$rpcUrl|$method|${params}"
+    }
+
+    private fun cachedCircleReadValue(key: String?): CircleReadCacheEntry? {
+        if (key.isNullOrBlank()) return null
+        val entry = circleReadCache[key] ?: return null
+        if (entry.expiresAtMs <= System.currentTimeMillis()) {
+            circleReadCache.remove(key)
+            return null
+        }
+        return entry
+    }
+
+    private fun cachedCircleRead(key: String?, loader: () -> Any?): Any? {
+        val cached = cachedCircleReadValue(key)
+        if (cached != null) return cached.value
+        if (key.isNullOrBlank()) return loader()
+        val lock = circleReadLocks.getOrPut(key) { Any() }
+        return synchronized(lock) {
+            val lockedCached = cachedCircleReadValue(key)
+            if (lockedCached != null) {
+                lockedCached.value
+            } else {
+                loader().also { value ->
+                    putCircleReadCache(key, value)
+                }
+            }
+        }
+    }
+
+    private fun putCircleReadCache(key: String?, value: Any?) {
+        if (key.isNullOrBlank()) return
+        if (circleReadCache.size > MaxCircleReadCacheEntries) circleReadCache.clear()
+        circleReadCache[key] = CircleReadCacheEntry(
+            expiresAtMs = System.currentTimeMillis() + CircleReadCacheMillis,
+            value = value,
+        )
+    }
+
+    private fun isMethodNotFound(message: String): Boolean =
+        message.contains("method not found", ignoreCase = true) ||
+            message.contains("-32601", ignoreCase = true)
+
     fun fetchCircleAsset(circleId: String, path: String): CircleAsset {
         val cleanCircleId = circleId.trim()
         val cleanPath = normalizeCircleAssetPath(path)
@@ -588,6 +992,144 @@ class RpcRepository(context: Context) {
             sizeBytes = result.optLong("size_bytes", body.size.toLong()),
         )
     }
+
+    fun fetchSealedCircleAsset(circleId: String, path: String, passphrase: String): CircleAsset {
+        val cleanCircleId = circleId.trim()
+        val cleanPath = normalizeCircleAssetPath(path)
+        require(cleanCircleId.startsWith("oct") && cleanCircleId.length == 47) { "Enter a valid Octra circle address." }
+        require(passphrase.isNotBlank()) { "Sealed read passphrase is required." }
+
+        val result = fetchCircleCiphertext(cleanCircleId, cleanPath)
+        val ciphertextB64 = result.optString("ciphertext_b64")
+        val keyId = result.optString("key_id")
+        val plaintextHash = result.optString("plaintext_hash")
+        require(ciphertextB64.isNotBlank() && keyId.isNotBlank() && plaintextHash.isNotBlank()) {
+            "Sealed asset metadata is incomplete."
+        }
+        val body = decryptSealedCircleBytes(
+            circleId = cleanCircleId,
+            keyId = keyId,
+            passphrase = passphrase,
+            ciphertextB64 = ciphertextB64,
+            plaintextHash = plaintextHash,
+        )
+        return CircleAsset(
+            circleId = result.optString("circle_id", cleanCircleId),
+            canonicalPath = normalizeCircleAssetPath(result.optString("canonical_path", cleanPath)),
+            contentType = result.optString("content_type", "application/octet-stream").ifBlank { "application/octet-stream" },
+            body = body,
+            sizeBytes = body.size.toLong(),
+        )
+    }
+
+    private fun fetchCircleCiphertext(circleId: String, path: String): JSONObject {
+        val resourceKey = circleResourceKey(circleId, path)
+        runCatching {
+            val json = postRpc(
+                url = currentUrl(),
+                payload = JSONObject()
+                    .put("jsonrpc", "2.0")
+                    .put("id", 1)
+                    .put("method", "circle_asset_ciphertext_by_resource_key")
+                    .put("params", JSONArray().put(circleId).put(resourceKey)),
+            )
+            json.optJSONObject("error")?.let { error ->
+                throw IllegalStateException(error.optString("message").ifBlank { "Circle sealed asset lookup failed." })
+            }
+            json.optJSONObject("result") ?: throw IllegalStateException("Circle sealed asset was not found.")
+        }.getOrNull()?.let { return it }
+
+        val json = postRpc(
+            url = currentUrl(),
+            payload = JSONObject()
+                .put("jsonrpc", "2.0")
+                .put("id", 1)
+                .put("method", "circle_asset_ciphertext")
+                .put("params", JSONArray().put(circleId).put(path)),
+        )
+        json.optJSONObject("error")?.let { error ->
+            throw IllegalStateException(error.optString("message").ifBlank { "Circle sealed asset lookup failed." })
+        }
+        return json.optJSONObject("result") ?: throw IllegalStateException("Circle sealed asset was not found.")
+    }
+
+    private fun decryptSealedCircleBytes(
+        circleId: String,
+        keyId: String,
+        passphrase: String,
+        ciphertextB64: String,
+        plaintextHash: String,
+    ): ByteArray {
+        val envelope = Base64.decode(ciphertextB64, Base64.DEFAULT)
+        val magic = "OCRS1".toByteArray(Charsets.UTF_8)
+        require(envelope.size > magic.size + 12 && envelope.copyOfRange(0, magic.size).contentEquals(magic)) {
+            "Invalid sealed circle envelope."
+        }
+        val nonceStart = magic.size
+        val nonceEnd = nonceStart + 12
+        val nonce = envelope.copyOfRange(nonceStart, nonceEnd)
+        val cipherBytes = envelope.copyOfRange(nonceEnd, envelope.size)
+        val cipher = Cipher.getInstance(AesGcmMode)
+        cipher.init(Cipher.DECRYPT_MODE, deriveCircleReadKey(circleId, keyId, passphrase), GCMParameterSpec(128, nonce))
+        val plainFrame = runCatching { cipher.doFinal(cipherBytes) }.getOrElse {
+            throw IllegalStateException("Sealed read passphrase did not match this circle.")
+        }
+        require(plainFrame.size >= 4) { "Invalid sealed circle payload." }
+        val plainSize = readU32Be(plainFrame, 0)
+        require(plainSize >= 0 && plainSize <= plainFrame.size - 4) { "Invalid sealed circle payload length." }
+        val plaintext = plainFrame.copyOfRange(4, 4 + plainSize)
+        val actualHash = sha256Hex(plaintext)
+        require(actualHash.equals(plaintextHash.trim(), ignoreCase = true)) {
+            "Sealed circle plaintext hash mismatch."
+        }
+        return plaintext
+    }
+
+    private fun deriveCircleReadKey(circleId: String, keyId: String, passphrase: String): SecretKeySpec {
+        val salt = "octra:circle:sealed_read:v1:$circleId:$keyId".toByteArray(Charsets.UTF_8)
+        val platformKey = runCatching {
+            val spec = PBEKeySpec(passphrase.toCharArray(), salt, SealedReadIterations, AesKeyBits)
+            try {
+                SecretKeyFactory.getInstance(PbkdfSha256).generateSecret(spec).encoded
+            } finally {
+                spec.clearPassword()
+            }
+        }.getOrNull()
+        if (platformKey != null) return SecretKeySpec(platformKey, "AES")
+
+        val generator = PKCS5S2ParametersGenerator(SHA256Digest())
+        generator.init(passphrase.toByteArray(Charsets.UTF_8), salt, SealedReadIterations)
+        val key = (generator.generateDerivedParameters(AesKeyBits) as KeyParameter).key
+        return SecretKeySpec(key, "AES")
+    }
+
+    private fun circleResourceKey(circleId: String, canonicalPath: String): String {
+        val out = ByteArrayOutputStream()
+        out.write("octra:circle_resource_key:v1".toByteArray(Charsets.UTF_8))
+        out.write(0)
+        writeFrame(out, circleId.toByteArray(Charsets.UTF_8))
+        writeFrame(out, canonicalPath.toByteArray(Charsets.UTF_8))
+        return sha256Hex(out.toByteArray())
+    }
+
+    private fun writeFrame(out: ByteArrayOutputStream, bytes: ByteArray) {
+        out.write((bytes.size ushr 24) and 0xff)
+        out.write((bytes.size ushr 16) and 0xff)
+        out.write((bytes.size ushr 8) and 0xff)
+        out.write(bytes.size and 0xff)
+        out.write(bytes)
+    }
+
+    private fun readU32Be(bytes: ByteArray, offset: Int): Int =
+        ((bytes[offset].toInt() and 0xff) shl 24) or
+            ((bytes[offset + 1].toInt() and 0xff) shl 16) or
+            ((bytes[offset + 2].toInt() and 0xff) shl 8) or
+            (bytes[offset + 3].toInt() and 0xff)
+
+    private fun sha256Hex(bytes: ByteArray): String =
+        MessageDigest.getInstance("SHA-256")
+            .digest(bytes)
+            .joinToString("") { byte -> "%02x".format(byte) }
 
     private fun isValidIdentityPath(value: String): Boolean {
         val parts = value.split('.')
@@ -769,6 +1311,16 @@ class RpcRepository(context: Context) {
     }
 
     private fun postRpc(url: String, payload: JSONObject): JSONObject {
+        val value = postRpcValue(url, payload)
+        return value as? JSONObject ?: throw IllegalStateException("RPC response was not an object.")
+    }
+
+    private fun postRpcBatch(url: String, payload: JSONArray): JSONArray {
+        val value = postRpcValue(url, payload)
+        return value as? JSONArray ?: throw IllegalStateException("RPC batch response was not an array.")
+    }
+
+    private fun postRpcValue(url: String, payload: Any): Any {
         val rpcUrl = URL("${url.trim().trimEnd('/')}/rpc")
         val connection = (rpcUrl.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
@@ -793,7 +1345,7 @@ class RpcRepository(context: Context) {
             if (responseCode !in 200..299) {
                 throw IllegalStateException("HTTP $responseCode")
             }
-            JSONObject(body)
+            JSONTokener(body).nextValue()
         } finally {
             connection.disconnect()
         }
@@ -958,5 +1510,36 @@ class RpcRepository(context: Context) {
         private const val KeyDefaultRpcSeeded = "default_rpc_seeded"
         private const val KeyMainnetDefaultMigrated = "mainnet_default_migrated"
         private const val MicroUnits = 1_000_000L
+        private const val AesGcmMode = "AES/GCM/NoPadding"
+        private const val PbkdfSha256 = "PBKDF2WithHmacSHA256"
+        private const val SealedReadIterations = 120_000
+        private const val AesKeyBits = 256
+        private const val MaxCircleRpcParams = 32
+        private const val MaxCircleRpcBatchSize = 64
+        private const val HistoryDetailsBatchSize = 6
+        private const val OctraTokenLookupBatchSize = 4
+        private const val CircleReadCacheMillis = 8_000L
+        private const val MaxCircleReadCacheEntries = 512
+        private val CircleReadRpcMethods = setOf(
+            "octra_callProgramView",
+            "contract_call",
+            "circle_info",
+            "circle_asset",
+            "node_status",
+            "epoch_current",
+            "octra_balance",
+            "octra_account",
+            "octra_transaction",
+            "contract_receipt",
+            "octra_recommendedFee",
+        )
+        private val CircleReadCacheMethods = setOf(
+            "octra_callProgramView",
+            "contract_call",
+            "circle_info",
+            "circle_asset",
+            "node_status",
+            "epoch_current",
+        )
     }
 }

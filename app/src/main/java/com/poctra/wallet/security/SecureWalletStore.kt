@@ -9,6 +9,9 @@ import android.util.Base64
 import com.poctra.wallet.data.SecurityMethod
 import com.poctra.wallet.data.Wallet
 import com.poctra.wallet.data.WalletVault
+import org.bouncycastle.crypto.digests.SHA256Digest
+import org.bouncycastle.crypto.generators.PKCS5S2ParametersGenerator
+import org.bouncycastle.crypto.params.KeyParameter
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.KeyStore
@@ -174,13 +177,16 @@ class SecureWalletStore(context: Context) {
         val raw = prefs.getString(KeyWalletMetadata, null) ?: return vault
         val metadata = runCatching { JSONObject(raw) }.getOrNull() ?: return vault
         val nameByAddress = mutableMapOf<String, String>()
+        val identiconByAddress = mutableMapOf<String, String>()
         val walletMetadata = metadata.optJSONArray("wallets")
         if (walletMetadata != null) {
             for (index in 0 until walletMetadata.length()) {
                 val item = walletMetadata.optJSONObject(index) ?: continue
                 val address = item.optString("address")
                 val name = item.optString("name")
+                val identiconSvg = item.optString("identiconSvg")
                 if (address.isNotBlank() && name.isNotBlank()) nameByAddress[address] = name
+                if (address.isNotBlank() && identiconSvg.isNotBlank()) identiconByAddress[address] = identiconSvg
             }
         }
         val order = buildList {
@@ -191,7 +197,10 @@ class SecureWalletStore(context: Context) {
             }
         }
         val renamed = vault.wallets.map { wallet ->
-            nameByAddress[wallet.address]?.let { wallet.copy(name = it) } ?: wallet
+            wallet.copy(
+                name = nameByAddress[wallet.address] ?: wallet.name,
+                identiconSvg = identiconByAddress[wallet.address] ?: wallet.identiconSvg,
+            )
         }
         val reordered = if (order.isEmpty()) {
             renamed
@@ -214,7 +223,8 @@ class SecureWalletStore(context: Context) {
                     put(
                         JSONObject()
                             .put("address", wallet.address)
-                            .put("name", wallet.name),
+                            .put("name", wallet.name)
+                            .put("identiconSvg", wallet.identiconSvg),
                     )
                 }
             })
@@ -222,10 +232,17 @@ class SecureWalletStore(context: Context) {
     }
 
     private fun derivePinKey(pin: String, salt: ByteArray): SecretKeySpec {
-        val spec = PBEKeySpec(pin.toCharArray(), salt, PbkdfIterations, KeyLengthBytes * 8)
-        val key = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-            .generateSecret(spec)
-            .encoded
+        val platformKey = runCatching {
+            val spec = PBEKeySpec(pin.toCharArray(), salt, PbkdfIterations, KeyLengthBytes * 8)
+            SecretKeyFactory.getInstance(PbkdfAlgorithm).generateSecret(spec).encoded
+        }.getOrNull()
+        if (platformKey != null) {
+            return SecretKeySpec(platformKey, "AES")
+        }
+
+        val generator = PKCS5S2ParametersGenerator(SHA256Digest())
+        generator.init(pin.toByteArray(Charsets.UTF_8), salt, PbkdfIterations)
+        val key = (generator.generateDerivedParameters(KeyLengthBytes * 8) as KeyParameter).key
         return SecretKeySpec(key, "AES")
     }
 
@@ -242,7 +259,10 @@ class SecureWalletStore(context: Context) {
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
             .setRandomizedEncryptionRequired(true)
             .setUserAuthenticationRequired(true)
-            .setInvalidatedByBiometricEnrollment(true)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            builder.setInvalidatedByBiometricEnrollment(true)
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             builder.setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
@@ -308,6 +328,7 @@ class SecureWalletStore(context: Context) {
         private const val SaltLength = 32
         private const val IvLength = 12
         private const val KeyLengthBytes = 32
+        private const val PbkdfAlgorithm = "PBKDF2WithHmacSHA256"
         private const val PbkdfIterations = 310_000
         private const val MaxPinAttempts = 5
         private const val PinLockoutMs = 5 * 60 * 1000L

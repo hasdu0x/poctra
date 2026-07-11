@@ -1,6 +1,9 @@
 package com.poctra.wallet.core
 
 import android.content.Context
+import org.bouncycastle.crypto.digests.SHA512Digest
+import org.bouncycastle.crypto.generators.PKCS5S2ParametersGenerator
+import org.bouncycastle.crypto.params.KeyParameter
 import org.json.JSONArray
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -33,10 +36,15 @@ class Bip39Mnemonic private constructor(private val words: List<String>) {
     fun toSeed(mnemonic: String, passphrase: String = ""): ByteArray {
         val normalizedMnemonic = normalize(mnemonic)
         val salt = normalize("mnemonic$passphrase").toByteArray(Charsets.UTF_8)
-        val spec = PBEKeySpec(normalizedMnemonic.toCharArray(), salt, 2048, 512)
-        return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA512")
-            .generateSecret(spec)
-            .encoded
+        val platformSeed = runCatching {
+            val spec = PBEKeySpec(normalizedMnemonic.toCharArray(), salt, Bip39Iterations, Bip39SeedBits)
+            SecretKeyFactory.getInstance(PbkdfSha512).generateSecret(spec).encoded
+        }.getOrNull()
+        if (platformSeed != null) return platformSeed
+
+        val generator = PKCS5S2ParametersGenerator(SHA512Digest())
+        generator.init(normalizedMnemonic.toByteArray(Charsets.UTF_8), salt, Bip39Iterations)
+        return (generator.generateDerivedParameters(Bip39SeedBits) as KeyParameter).key
     }
 
     private fun entropyToMnemonic(entropy: ByteArray): String {
@@ -83,6 +91,10 @@ class Bip39Mnemonic private constructor(private val words: List<String>) {
     private fun sha256(bytes: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(bytes)
 
     companion object {
+        private const val Bip39Iterations = 2048
+        private const val Bip39SeedBits = 512
+        private const val PbkdfSha512 = "PBKDF2WithHmacSHA512"
+
         fun fromAssets(context: Context): Bip39Mnemonic {
             val json = context.assets.open("bip39_english.json").bufferedReader().use { it.readText() }
             val array = JSONArray(json)

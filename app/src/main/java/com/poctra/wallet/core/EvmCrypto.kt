@@ -24,6 +24,9 @@ class EvmCrypto {
         return checksumAddress(address)
     }
 
+    fun exportPrivateKeyHex(wallet: Wallet): String =
+        "0x${wallet.evmPrivateKey().toFixedBytes(32).toHex()}"
+
     fun signLegacyTransaction(
         wallet: Wallet,
         nonce: BigInteger,

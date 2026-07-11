@@ -190,17 +190,7 @@ private val OverviewHeaderHeight = 48.dp
 fun PoctraApp(activity: Activity, controller: PoctraController) {
     Surface(color = SurfaceBase, modifier = Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize()) {
-            AnimatedContent(
-                targetState = controller.route,
-                transitionSpec = {
-                    fadeIn(animationSpec = tween(180, delayMillis = 30, easing = FastOutSlowInEasing)) togetherWith
-                        fadeOut(animationSpec = tween(120))
-                },
-                contentAlignment = Alignment.Center,
-                modifier = Modifier.fillMaxSize(),
-                label = "appRouteTransition",
-            ) { route ->
-                when (route) {
+            when (controller.route) {
                 AppRoute.Loading -> LoadingScreen()
                 AppRoute.Welcome -> WelcomeScreen(controller)
                 AppRoute.ImportWallet -> ImportWalletScreen(controller)
@@ -245,7 +235,6 @@ fun PoctraApp(activity: Activity, controller: PoctraController) {
                 AppRoute.TransactionDetails -> TransactionDetailsScreen(controller)
                 AppRoute.DAppBrowser -> DAppBrowserScreen(controller)
                 AppRoute.About -> AboutScreen(controller)
-                }
             }
 
             controller.error?.let { message ->
@@ -1927,24 +1916,15 @@ private fun DashboardScreen(controller: PoctraController) {
                 .padding(horizontal = Space.x8, vertical = Space.x7)
                 .padding(bottom = 106.dp),
         ) {
-            AnimatedContent(
-                targetState = controller.dashboardTab,
-                transitionSpec = {
-                    fadeIn(animationSpec = tween(180, easing = FastOutSlowInEasing)) togetherWith
-                        fadeOut(animationSpec = tween(120))
-                },
-                label = "dashboardTabTransition",
-            ) { tab ->
-                when (tab) {
-                    DashboardTab.Overview -> OverviewContent(
-                        controller = controller,
-                        address = wallet.address,
-                        onOpenWallets = { walletDrawerOpen = true },
-                    )
-                    DashboardTab.Assets -> AssetsContent(controller)
-                    DashboardTab.Explore -> ExploreDAppsContent(controller)
-                    DashboardTab.Trade -> TradeContent(controller)
-                }
+            when (controller.dashboardTab) {
+                DashboardTab.Overview -> OverviewContent(
+                    controller = controller,
+                    address = wallet.address,
+                    onOpenWallets = { walletDrawerOpen = true },
+                )
+                DashboardTab.Assets -> AssetsContent(controller)
+                DashboardTab.Explore -> ExploreDAppsContent(controller)
+                DashboardTab.Trade -> TradeContent(controller)
             }
         }
 
@@ -6260,7 +6240,7 @@ private fun BottomNavItem(
     )
     Column(
         modifier = modifier
-            .height(52.dp)
+            .height(56.dp)
             .graphicsLayer {
                 scaleX = itemScale
                 scaleY = itemScale

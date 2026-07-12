@@ -54,6 +54,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
@@ -107,6 +108,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.Velocity
@@ -127,7 +129,6 @@ import com.poctra.wallet.DashboardTab
 import com.poctra.wallet.DAppBrowserTab
 import com.poctra.wallet.DAppInputPreview
 import com.poctra.wallet.DAppInputPreviewStatus
-import com.poctra.wallet.DomainGuardRule
 import com.poctra.wallet.FundingProvider
 import com.poctra.wallet.PendingDAppRequest
 import com.poctra.wallet.PortfolioHolding
@@ -197,6 +198,10 @@ fun PoctraApp(activity: Activity, controller: PoctraController) {
                 AppRoute.SecuritySetup -> SecuritySetupScreen(activity, controller)
                 AppRoute.Unlock -> UnlockScreen(activity, controller)
                 AppRoute.Dashboard -> DashboardScreen(controller)
+                AppRoute.PrivacyEncrypt -> PrivacyEncryptScreen(controller)
+                AppRoute.PrivacyDecrypt -> PrivacyDecryptScreen(controller)
+                AppRoute.PrivacyStealth -> PrivacyStealthScreen(controller)
+                AppRoute.PrivacyClaim -> PrivacyClaimScreen(controller)
                 AppRoute.Settings -> SettingsScreen(controller)
                 AppRoute.RpcManagement -> RpcManagementScreen(controller)
                 AppRoute.RpcAddNetwork -> AddRpcNetworkScreen(controller)
@@ -208,10 +213,8 @@ fun PoctraApp(activity: Activity, controller: PoctraController) {
                 AppRoute.PortfolioAnalytics -> PortfolioAnalyticsScreen(controller)
                 AppRoute.PortfolioAssetHistory -> PortfolioAssetHistoryScreen(controller)
                 AppRoute.ApprovalDashboard -> ApprovalDashboardScreen(controller)
-                AppRoute.DomainGuard -> DomainGuardScreen(controller)
                 AppRoute.RecoveryPlan -> RecoveryPlanScreen(controller)
                 AppRoute.FundingProviders -> SettingsScreen(controller)
-                AppRoute.OctraProfile -> OctraProfileScreen(controller)
                 AppRoute.AppearanceSettings -> AppearanceSettingsScreen(controller)
                 AppRoute.ConnectedDApps -> ConnectedDAppsScreen(controller)
                 AppRoute.IdentityProviderSettings -> IdentityProviderSettingsScreen(controller)
@@ -271,6 +274,8 @@ fun PoctraApp(activity: Activity, controller: PoctraController) {
             if (controller.evmSendDialogVisible) {
                 EvmSendReviewDialog(controller)
             }
+
+            PrivacyOverlay(controller)
 
             controller.pendingDAppRequest?.let { request ->
                 DAppApprovalDialog(
@@ -440,7 +445,7 @@ private fun DAppRequestDetailRow(label: String, value: String) {
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = Space.x2),
-        verticalAlignment = Alignment.Top,
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
             label,
@@ -812,7 +817,7 @@ private fun EvmSendGasPanel(
         Column(Modifier.padding(Space.x5)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("Network fee", color = TextTertiary, fontWeight = FontWeight.SemiBold)
+                    Text("Network Fee", color = TextTertiary, fontWeight = FontWeight.SemiBold)
                     Text(
                         gasEstimate?.let { "${it.gasLimit} gas estimated for ${it.label}" } ?: "Estimating gas from active RPC",
                         color = TextSecondary,
@@ -850,7 +855,7 @@ private fun EvmSendGasPanel(
                         BridgeFeePreset.Low to weiToEthLabel(gasEstimate.lowFeeWei),
                         BridgeFeePreset.Medium to weiToEthLabel(gasEstimate.marketFeeWei),
                         BridgeFeePreset.Market to weiToEthLabel(gasEstimate.fastFeeWei),
-                        BridgeFeePreset.Custom to "Custom",
+                        BridgeFeePreset.Custom to evmSendCustomGasFeeLabel(gasEstimate, customGasGwei, networkSymbol),
                     ),
                     titles = mapOf(
                         BridgeFeePreset.Medium to "Recommended",
@@ -867,7 +872,7 @@ private fun EvmSendGasPanel(
                         label = "Custom gas price (gwei)",
                         keyboardType = KeyboardType.Decimal,
                         singleLine = true,
-                        supportingText = evmSendCustomGasFeeLabel(gasEstimate, customGasGwei, networkSymbol),
+                        supportingText = if (customGasGwei.gweiToWeiOrNull() == null) "Enter a valid gas price." else null,
                     )
                 }
             }
@@ -1914,7 +1919,7 @@ private fun DashboardScreen(controller: PoctraController) {
                 .nestedScroll(pullRefreshConnection)
                 .verticalScroll(scrollState)
                 .padding(horizontal = Space.x8, vertical = Space.x7)
-                .padding(bottom = 106.dp),
+                .padding(bottom = 88.dp),
         ) {
             when (controller.dashboardTab) {
                 DashboardTab.Overview -> OverviewContent(
@@ -1923,6 +1928,7 @@ private fun DashboardScreen(controller: PoctraController) {
                     onOpenWallets = { walletDrawerOpen = true },
                 )
                 DashboardTab.Assets -> AssetsContent(controller)
+                DashboardTab.Privacy -> PrivacyContent(controller)
                 DashboardTab.Explore -> ExploreDAppsContent(controller)
                 DashboardTab.Trade -> TradeContent(controller)
             }
@@ -2109,7 +2115,7 @@ private fun AddressDropdownBlock(
         Column(Modifier.weight(1f)) {
             Text(
                 text = walletName,
-                color = TextTertiary,
+                color = SurfaceRaised,
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
@@ -2174,14 +2180,6 @@ private fun WalletDrawerOverlay(
                         .fillMaxSize()
                         .padding(Space.x7),
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .width(46.dp)
-                            .height(3.dp)
-                            .clip(RoundedCornerShape(Radius.sm))
-                            .background(SurfaceRaised),
-                    )
-                    Spacer(Modifier.height(Space.x6))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(
                             modifier = Modifier
@@ -2352,17 +2350,17 @@ private fun DrawerWalletRow(
             .clip(cardShape)
             .background(
                 when {
-                    dragging -> SurfaceRaised.copy(alpha = 0.20f)
-                    active -> SurfaceRaised.copy(alpha = 0.16f)
+                    dragging -> SurfaceRaised.copy(alpha = 0.15f)
+                    active -> SurfaceRaised.copy(alpha = 0.09f)
                     else -> SurfaceStrong
                 }
             )
             .border(
                 1.dp,
                 when {
-                    dragging -> SurfaceRaised
-                    active -> SurfaceRaised
-                    else -> BorderLine
+                    dragging -> SurfaceRaised.copy(alpha = 0.62f)
+                    active -> SurfaceRaised.copy(alpha = 0.30f)
+                    else -> BorderLine.copy(alpha = 0.62f)
                 },
                 cardShape,
             )
@@ -2413,13 +2411,12 @@ private fun DrawerWalletRow(
                             modifier = Modifier
                                 .size(24.dp)
                                 .clip(RoundedCornerShape(Radius.sm))
-                                .background(if (active) SurfaceRaised else SurfaceMuted)
-                                .border(1.dp, if (active) SurfaceRaised else BorderLine, RoundedCornerShape(Radius.sm)),
+                                .background(if (active) SurfaceRaised.copy(alpha = 0.14f) else SurfaceMuted.copy(alpha = 0.72f)),
                             contentAlignment = Alignment.Center,
                         ) {
                             Text(
                                 text = position.toString(),
-                                color = if (active) PrimaryContent else TextTertiary,
+                                color = if (active) SurfaceRaised else TextSecondary,
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.SemiBold,
                             )
@@ -2566,7 +2563,6 @@ private fun WalletMetaChip(text: String, background: Color, color: Color) {
         modifier = Modifier
             .clip(RoundedCornerShape(Radius.sm))
             .background(background)
-            .border(1.dp, BorderLine, RoundedCornerShape(Radius.sm))
             .padding(horizontal = Space.x4, vertical = Space.x2),
         color = color,
         style = MaterialTheme.typography.labelSmall,
@@ -2621,7 +2617,7 @@ private fun BalanceHero(controller: PoctraController) {
             Text("Syncing balance", color = TextSecondary)
         } else {
             Text(
-            text = "Total Balance",
+                text = "Public Balance",
                 color = SurfaceRaised,
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.SemiBold,
@@ -2802,7 +2798,7 @@ private fun RecentActivityRow(
                     identityName = identityName,
                 ),
                 color = TextSecondary,
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -3902,7 +3898,7 @@ private fun TradeReviewGasPanel(
         Column(Modifier.padding(Space.x5)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("Network fee", color = TextTertiary, fontWeight = FontWeight.SemiBold)
+                    Text("Network Fee", color = TextTertiary, fontWeight = FontWeight.SemiBold)
                     Text(
                         "${quote.gasEstimate} gas estimated for route execution",
                         color = TextSecondary,
@@ -3918,7 +3914,7 @@ private fun TradeReviewGasPanel(
                     BridgeFeePreset.Low to quote.lowGasFeeEth,
                     BridgeFeePreset.Medium to quote.gasFeeEth,
                     BridgeFeePreset.Market to quote.fastGasFeeEth,
-                    BridgeFeePreset.Custom to "Custom",
+                    BridgeFeePreset.Custom to tradeCustomGasFeeLabel(quote, customGasGwei),
                 ),
                 titles = mapOf(
                     BridgeFeePreset.Medium to "Recommended",
@@ -3935,7 +3931,7 @@ private fun TradeReviewGasPanel(
                     label = "Custom gas price (gwei)",
                     keyboardType = KeyboardType.Decimal,
                     singleLine = true,
-                    supportingText = tradeCustomGasFeeLabel(quote, customGasGwei),
+                    supportingText = if (customGasGwei.gweiToWeiOrNull() == null) "Enter a valid gas price." else null,
                 )
             }
         }
@@ -5252,7 +5248,7 @@ private fun CirclePassphraseDialog(
             usePlatformDefaultWidth = false,
         ),
     ) {
-        BoxWithConstraints(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color.Black.copy(alpha = scrimAlpha)),
@@ -6186,13 +6182,16 @@ private fun DashboardBottomNav(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .navigationBarsPadding()
-            .padding(horizontal = Space.x8, vertical = Space.x5)
-            .clip(RoundedCornerShape(Radius.md))
+            .clip(RoundedCornerShape(topStart = Radius.md, topEnd = Radius.md))
             .background(SurfaceStrong)
-            .border(1.dp, BorderLine.copy(alpha = 0.86f), RoundedCornerShape(Radius.md))
-            .padding(Space.x3),
-        horizontalArrangement = Arrangement.spacedBy(Space.x3),
+            .border(
+                1.dp,
+                BorderLine.copy(alpha = 0.78f),
+                RoundedCornerShape(topStart = Radius.md, topEnd = Radius.md),
+            )
+            .navigationBarsPadding()
+            .padding(start = Space.x5, top = Space.x3, end = Space.x5),
+        horizontalArrangement = Arrangement.spacedBy(Space.x1),
     ) {
         BottomNavItem(
             label = "Overview",
@@ -6222,6 +6221,16 @@ private fun DashboardBottomNav(
             onClick = { onSelect(DashboardTab.Explore) },
             modifier = Modifier.weight(1f),
         )
+        BottomNavItem(
+            label = "Privacy",
+            glyph = Glyph.Privacy,
+            selected = selected == DashboardTab.Privacy,
+            onClick = { onSelect(DashboardTab.Privacy) },
+            modifier = Modifier.weight(1f),
+            accentColor = PrivacyPrimary,
+            compactLabel = true,
+            iconicPrivacy = true,
+        )
     }
 }
 
@@ -6232,42 +6241,56 @@ private fun BottomNavItem(
     selected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    accentColor: Color = SurfaceRaised,
+    compactLabel: Boolean = false,
+    iconicPrivacy: Boolean = false,
 ) {
     val itemScale by animateFloatAsState(
         targetValue = if (selected) 1f else 0.98f,
         animationSpec = tween(ScrimMotionMillis, easing = FastOutSlowInEasing),
         label = "bottomNavItemScale",
     )
-    Column(
+    Box(
         modifier = modifier
-            .height(56.dp)
+            .height(50.dp)
             .graphicsLayer {
                 scaleX = itemScale
                 scaleY = itemScale
             }
             .clip(RoundedCornerShape(Radius.md))
-            .background(if (selected) SurfaceRaised.copy(alpha = 0.12f) else Color.Transparent)
-            .clickable(onClick = onClick)
-            .padding(horizontal = Space.x2, vertical = Space.x3),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally,
+            .clickable(onClick = onClick),
     ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(start = Space.x1, top = Space.x2, end = Space.x1, bottom = Space.x3),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            GlyphIcon(
+                glyph,
+                modifier = Modifier.size(if (iconicPrivacy) 17.dp else 16.dp),
+                color = if (selected) accentColor else TextSecondary,
+            )
+            Spacer(Modifier.height(Space.x1))
+            Text(
+                label,
+                color = if (selected) accentColor else TextSecondary,
+                fontWeight = FontWeight.SemiBold,
+                style = if (compactLabel) {
+                    MaterialTheme.typography.labelSmall.copy(fontSize = 8.sp, lineHeight = 9.sp)
+                } else {
+                    MaterialTheme.typography.labelSmall
+                },
+                maxLines = 1,
+            )
+        }
         Box(
             modifier = Modifier
-                .width(16.dp)
-                .height(2.dp)
-                .clip(RoundedCornerShape(Radius.pill))
-                .background(if (selected) SurfaceRaised else Color.Transparent),
-        )
-        Spacer(Modifier.height(Space.x2))
-        GlyphIcon(glyph, modifier = Modifier.size(17.dp), color = if (selected) SurfaceRaised else TextSecondary)
-        Spacer(Modifier.height(Space.x2))
-        Text(
-            label,
-            color = if (selected) SurfaceRaised else TextSecondary,
-            fontWeight = FontWeight.SemiBold,
-            style = MaterialTheme.typography.labelSmall,
-            maxLines = 1,
+                .align(Alignment.BottomCenter)
+                .size(width = 20.dp, height = 3.dp)
+                .clip(RoundedCornerShape(Radius.md))
+                .background(if (selected) accentColor else Color.Transparent),
         )
     }
 }
@@ -6490,15 +6513,11 @@ private fun SendScreen(controller: PoctraController) {
             .padding(Space.x8),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconCircleButton(Glyph.Back, "Back", controller::closeSend, enabled = !controller.busy)
-            Spacer(Modifier.width(Space.x6))
-            Text("Send OCT", color = TextTertiary, style = MaterialTheme.typography.titleLarge)
-        }
-        Spacer(Modifier.height(Space.x7))
-        CompactScreenIntro(
-            glyph = Glyph.Send,
+        DetailScreenHeader(
+            title = "Send OCT",
             description = "Send OCT to foo.oct or an Octra address.",
+            onBack = controller::closeSend,
+            backEnabled = !controller.busy,
         )
         Spacer(Modifier.height(Space.x8))
         RecipientLookupField(
@@ -6572,67 +6591,38 @@ private fun SendScreen(controller: PoctraController) {
             )
         }
         Spacer(Modifier.height(Space.x6))
-        PoctraTextField(
-            value = feeOu,
-            onValueChange = {
+        OctraNetworkFeePanel(
+            recommendedFeeOu = controller.recommendedFeeOu,
+            feeOu = feeOu,
+            customSelected = feeEdited && feeOu.toLongOrNull() != controller.recommendedFeeOu * 2,
+            loading = controller.feeLoading,
+            error = feeError,
+            onAuto = {
+                feeEdited = false
+                feeOu = controller.recommendedFeeOu.toString()
+                feeError = null
+            },
+            onFast = {
+                feeEdited = true
+                feeOu = (controller.recommendedFeeOu * 2).toString()
+                feeError = null
+            },
+            onCustom = {
+                feeEdited = true
+                feeError = null
+            },
+            onFeeChange = {
                 feeOu = it.filter(Char::isDigit).take(12)
                 feeEdited = true
                 feeError = null
             },
-            label = "Fee / Gas (OU)",
-            singleLine = true,
-            keyboardType = KeyboardType.Number,
-            isError = feeError != null,
-            supportingText = feeError ?: if (controller.feeLoading) {
-                "Fetching recommended fee..."
-            } else {
-                "Recommended ${controller.recommendedFeeOu} OU ~= ${ouToOct(controller.recommendedFeeOu)} OCT"
+            onRefresh = {
+                feeEdited = false
+                feeError = null
+                controller.refreshRecommendedFee()
             },
+            optionVerticalPadding = Space.x4,
         )
-        Spacer(Modifier.height(Space.x5))
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Space.x5)) {
-            val currentFee = feeOu.toLongOrNull()
-            FeeOptionButton(
-                label = "Auto",
-                subtitle = "RPC",
-                glyph = Glyph.Check,
-                selected = currentFee == controller.recommendedFeeOu && !feeEdited,
-                onClick = {
-                    feeEdited = false
-                    feeOu = controller.recommendedFeeOu.toString()
-                    feeError = null
-                },
-                modifier = Modifier.weight(1f),
-                enabled = !controller.feeLoading,
-            )
-            FeeOptionButton(
-                label = "Fast",
-                subtitle = "2x",
-                glyph = Glyph.Send,
-                selected = currentFee == controller.recommendedFeeOu * 2,
-                onClick = {
-                    feeEdited = true
-                    feeOu = (controller.recommendedFeeOu * 2).toString()
-                    feeError = null
-                },
-                modifier = Modifier.weight(1f),
-                enabled = !controller.feeLoading,
-            )
-            FeeOptionButton(
-                label = "Refresh",
-                subtitle = "fee",
-                glyph = Glyph.Refresh,
-                selected = controller.feeLoading,
-                onClick = {
-                    feeEdited = false
-                    feeError = null
-                    controller.refreshRecommendedFee()
-                },
-                modifier = Modifier.weight(1f),
-                enabled = !controller.feeLoading,
-                loading = controller.feeLoading,
-            )
-        }
         val sendRisks = controller.octraRecipientRiskItems(
             recipientInput = recipient,
             resolvedAddress = recipientLookup.resolution?.address,
@@ -6645,20 +6635,39 @@ private fun SendScreen(controller: PoctraController) {
             }
         }
         Spacer(Modifier.height(Space.x6))
-        PoctraButton(
-            text = if (messageExpanded) "Remove Message" else "Add Message",
-            onClick = {
-                messageExpanded = !messageExpanded
-                if (!messageExpanded) message = ""
-            },
-            modifier = Modifier.fillMaxWidth(),
-            variant = ButtonVariant.Ghost,
-            leadingGlyph = if (messageExpanded) Glyph.Revoke else Glyph.Plus,
-            enabled = !controller.busy,
-            compact = true,
-        )
-        if (messageExpanded) {
+        if (!messageExpanded) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.Start)
+                    .clip(RoundedCornerShape(Radius.sm))
+                    .clickable(enabled = !controller.busy) { messageExpanded = true }
+                    .padding(vertical = Space.x2),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                GlyphIcon(Glyph.Plus, modifier = Modifier.size(13.dp), color = SurfaceRaised)
+                Spacer(Modifier.width(Space.x2))
+                Text("Add Message", color = SurfaceRaised, style = MaterialTheme.typography.labelMedium)
+            }
+        } else {
             Spacer(Modifier.height(Space.x6))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(24.dp)
+                        .clip(RoundedCornerShape(Radius.sm))
+                        .clickable(enabled = !controller.busy) {
+                            message = ""
+                            messageExpanded = false
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    GlyphIcon(Glyph.Close, modifier = Modifier.size(12.dp), color = TextSecondary)
+                }
+            }
+            Spacer(Modifier.height(Space.x1))
             PoctraTextField(
                 value = message,
                 onValueChange = { message = it.take(160) },
@@ -6722,72 +6731,96 @@ private fun SendScreen(controller: PoctraController) {
 }
 
 @Composable
-private fun FeeOptionButton(
-    label: String,
-    subtitle: String,
-    glyph: Glyph,
-    selected: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-    loading: Boolean = false,
+private fun OctraNetworkFeePanel(
+    recommendedFeeOu: Long,
+    feeOu: String,
+    customSelected: Boolean,
+    loading: Boolean,
+    error: String?,
+    onAuto: () -> Unit,
+    onFast: () -> Unit,
+    onCustom: () -> Unit,
+    onFeeChange: (String) -> Unit,
+    onRefresh: () -> Unit,
+    optionVerticalPadding: Dp = Space.x3,
 ) {
-    val borderColor = when {
-        selected -> SurfaceRaised
-        enabled -> BorderLine
-        else -> BorderLine.copy(alpha = 0.45f)
+    val current = feeOu.toLongOrNull()
+    val selected = when {
+        customSelected -> BridgeFeePreset.Custom
+        current == recommendedFeeOu * 2 -> BridgeFeePreset.Market
+        else -> BridgeFeePreset.Medium
     }
-    Row(
-        modifier = modifier
-            .height(46.dp)
-            .clip(RoundedCornerShape(Radius.md))
-            .background(if (selected) SurfaceRaised.copy(alpha = 0.16f) else SurfaceStrong)
-            .border(1.dp, borderColor, RoundedCornerShape(Radius.md))
-            .clickable(enabled = enabled && !loading, onClick = onClick)
-            .padding(horizontal = Space.x3),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center,
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(Radius.md),
+        colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
+        border = BorderStroke(1.dp, BorderLine),
     ) {
-        Box(
-            modifier = Modifier
-                .size(22.dp)
-                .clip(RoundedCornerShape(Radius.sm))
-                .background(if (selected) SurfaceRaised else SurfaceMuted),
-            contentAlignment = Alignment.Center,
-        ) {
-            if (loading) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(12.dp),
-                    color = if (selected) PrimaryContent else TextTertiary,
-                    strokeWidth = 1.5.dp,
-                )
-            } else {
-                GlyphIcon(
-                    glyph = glyph,
-                    modifier = Modifier.size(12.dp),
-                    color = when {
-                        !enabled -> TextSecondary
-                        selected -> PrimaryContent
-                        else -> TextTertiary
-                    },
-                )
+        Column(Modifier.padding(Space.x5)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Network Fee", color = TextTertiary, style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        if (loading) "Fetching recommended fee..." else "Recommended by active RPC",
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(Radius.md))
+                        .background(SurfaceRaised.copy(alpha = 0.10f))
+                        .clickable(enabled = !loading, onClick = onRefresh),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (loading) CircularProgressIndicator(Modifier.size(14.dp), color = SurfaceRaised, strokeWidth = 2.dp)
+                    else GlyphIcon(Glyph.Refresh, Modifier.size(15.dp), SurfaceRaised)
+                }
             }
-        }
-        Spacer(Modifier.width(Space.x3))
-        Column {
-            Text(
-                label,
-                color = if (enabled) TextTertiary else TextSecondary,
-                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 11.sp),
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
+            Spacer(Modifier.height(Space.x5))
+            BridgeFeePresetRow(
+                selected = selected,
+                presets = listOf(BridgeFeePreset.Medium, BridgeFeePreset.Market, BridgeFeePreset.Custom),
+                titles = mapOf(
+                    BridgeFeePreset.Medium to "Auto",
+                    BridgeFeePreset.Market to "Fast",
+                    BridgeFeePreset.Custom to "Custom",
+                ),
+                labels = mapOf(
+                    BridgeFeePreset.Medium to ouToOct(recommendedFeeOu),
+                    BridgeFeePreset.Market to ouToOct(recommendedFeeOu * 2),
+                    BridgeFeePreset.Custom to current?.takeIf { it > 0L }
+                        ?.let { "${ouToOct(it)} OCT" }
+                        .orEmpty()
+                        .ifBlank { "Set fee" },
+                ),
+                suffix = "OCT",
+                verticalPadding = optionVerticalPadding,
+                onSelect = {
+                    when (it) {
+                        BridgeFeePreset.Medium -> onAuto()
+                        BridgeFeePreset.Market -> onFast()
+                        BridgeFeePreset.Custom -> onCustom()
+                        else -> Unit
+                    }
+                },
             )
-            Text(
-                subtitle,
-                color = TextSecondary,
-                style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, lineHeight = 10.sp),
-                maxLines = 1,
-            )
+            if (customSelected) {
+                Spacer(Modifier.height(Space.x4))
+                PoctraTextField(
+                    value = feeOu,
+                    onValueChange = onFeeChange,
+                    label = "Custom fee (OU)",
+                    keyboardType = KeyboardType.Number,
+                    singleLine = true,
+                    isError = error != null || current?.let { it <= 0L } != false,
+                    supportingText = error ?: if (current?.let { it > 0L } == true) null else "Enter a valid fee.",
+                )
+            } else if (error != null) {
+                Spacer(Modifier.height(Space.x3))
+                StateBanner(error, isError = true, compact = true)
+            }
         }
     }
 }
@@ -6804,7 +6837,7 @@ private fun SendPreflightRow(item: ConsumerRiskItem) {
         GlyphIcon(
             glyph = if (item.level == ConsumerRiskLevel.Safe) Glyph.Check else Glyph.Info,
             modifier = Modifier
-                .padding(top = Space.x1)
+                .offset(y = (-1).dp)
                 .size(14.dp),
             color = color,
         )
@@ -6875,15 +6908,11 @@ private fun SendAssetScreen(controller: PoctraController) {
             .padding(Space.x8),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconCircleButton(Glyph.Back, "Back", controller::closeSendAsset, enabled = !controller.busy)
-            Spacer(Modifier.width(Space.x6))
-            Text("Send ${token.symbol}", color = TextTertiary, style = MaterialTheme.typography.titleLarge)
-        }
-        Spacer(Modifier.height(Space.x7))
-        CompactScreenIntro(
-            glyph = Glyph.Assets,
+        DetailScreenHeader(
+            title = "Send ${token.symbol}",
             description = "Transfer ${token.symbol} to foo.oct or an Octra address.",
+            onBack = controller::closeSendAsset,
+            backEnabled = !controller.busy,
         )
         Spacer(Modifier.height(Space.x8))
         Card(
@@ -6983,21 +7012,35 @@ private fun SendAssetScreen(controller: PoctraController) {
             )
         }
         Spacer(Modifier.height(Space.x6))
-        PoctraTextField(
-            value = feeOu,
-            onValueChange = {
+        OctraNetworkFeePanel(
+            recommendedFeeOu = controller.recommendedFeeOu,
+            feeOu = feeOu,
+            customSelected = feeEdited && feeOu.toLongOrNull() != controller.recommendedFeeOu * 2,
+            loading = controller.feeLoading,
+            error = feeError,
+            onAuto = {
+                feeEdited = false
+                feeOu = controller.recommendedFeeOu.toString()
+                feeError = null
+            },
+            onFast = {
+                feeEdited = true
+                feeOu = (controller.recommendedFeeOu * 2).toString()
+                feeError = null
+            },
+            onCustom = {
+                feeEdited = true
+                feeError = null
+            },
+            onFeeChange = {
                 feeOu = it.filter(Char::isDigit).take(12)
                 feeEdited = true
                 feeError = null
             },
-            label = "Fee / Gas (OU)",
-            singleLine = true,
-            keyboardType = KeyboardType.Number,
-            isError = feeError != null,
-            supportingText = feeError ?: if (controller.feeLoading) {
-                "Fetching recommended fee..."
-            } else {
-                "Recommended ${controller.recommendedFeeOu} OU ~= ${ouToOct(controller.recommendedFeeOu)} OCT"
+            onRefresh = {
+                feeEdited = false
+                feeError = null
+                controller.refreshRecommendedFee()
             },
         )
         Spacer(Modifier.height(Space.x5))
@@ -8493,10 +8536,10 @@ private fun BridgeReviewFeePanel(
         border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(Space.x5)) {
-            Text("Network fee", color = TextTertiary, fontWeight = FontWeight.SemiBold)
+            Text("Network Fee", color = TextTertiary, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(Space.x4))
             if (showOctraFee && direction == BridgeDirection.OctToWoct) {
-                Text("Octra call fee", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+                Text("Octra", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
                 Spacer(Modifier.height(Space.x3))
                 BridgeFeePresetRow(
                     selected = selectedOctraFee,
@@ -8509,7 +8552,7 @@ private fun BridgeReviewFeePanel(
                     labels = mapOf(
                         BridgeFeePreset.Medium to ouToOct(recommendedFeeOu),
                         BridgeFeePreset.Market to ouToOct(bridgeFastOctraFee(recommendedFeeOu)),
-                        BridgeFeePreset.Custom to "Custom",
+                        BridgeFeePreset.Custom to "${ouToOct(customOctraFeeOu.toLongOrNull() ?: recommendedFeeOu)} OCT",
                     ),
                     suffix = "OCT",
                     onSelect = onSelectedOctraFee,
@@ -8522,7 +8565,7 @@ private fun BridgeReviewFeePanel(
                         label = "Custom fee (OU)",
                         keyboardType = KeyboardType.Number,
                         singleLine = true,
-                        supportingText = "${ouToOct(customOctraFeeOu.toLongOrNull() ?: recommendedFeeOu)} OCT",
+                        supportingText = if (customOctraFeeOu.toLongOrNull()?.let { it > 0L } == true) null else "Enter a valid fee.",
                     )
                 }
                 Spacer(Modifier.height(Space.x5))
@@ -8533,18 +8576,12 @@ private fun BridgeReviewFeePanel(
                 StateBanner("No new gas fee is required. Poctra will verify the existing bridge transaction.", isError = false, compact = true)
             } else {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            if (direction == BridgeDirection.OctToWoct) "Ethereum claim gas" else "Ethereum bridge gas",
-                            color = TextSecondary,
-                            style = MaterialTheme.typography.labelSmall,
-                        )
-                        Text(
-                            gasEstimate?.steps ?: bridgeReviewGasLabel(direction, recommendedFeeOu),
-                            color = TextSecondary,
-                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                        )
-                    }
+                    Text(
+                        "Ethereum",
+                        modifier = Modifier.weight(1f),
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
                     if (gasLoading) CircularProgressIndicator(modifier = Modifier.size(14.dp), color = SurfaceRaised, strokeWidth = 2.dp)
                 }
                 Spacer(Modifier.height(Space.x3))
@@ -8572,7 +8609,7 @@ private fun BridgeReviewFeePanel(
                             BridgeFeePreset.Low to weiToEthLabel(gasEstimate.lowFeeWei),
                             BridgeFeePreset.Medium to weiToEthLabel(gasEstimate.marketFeeWei),
                             BridgeFeePreset.Market to weiToEthLabel(gasEstimate.fastFeeWei),
-                            BridgeFeePreset.Custom to "Custom",
+                            BridgeFeePreset.Custom to bridgeCustomGasFeeLabel(gasEstimate, customGasGwei),
                         ),
                         suffix = "ETH",
                         onSelect = onSelectedGas,
@@ -8585,7 +8622,7 @@ private fun BridgeReviewFeePanel(
                             label = "Custom gas price (gwei)",
                             keyboardType = KeyboardType.Decimal,
                             singleLine = true,
-                            supportingText = bridgeCustomGasFeeLabel(gasEstimate, customGasGwei),
+                            supportingText = if (customGasGwei.gweiToWeiOrNull() == null) "Enter a valid gas price." else null,
                         )
                     }
                 }
@@ -8602,6 +8639,7 @@ private fun BridgeFeePresetRow(
     onSelect: (BridgeFeePreset) -> Unit,
     presets: List<BridgeFeePreset> = BridgeFeePreset.values().toList(),
     titles: Map<BridgeFeePreset, String> = emptyMap(),
+    verticalPadding: Dp = Space.x3,
 ) {
     Row(horizontalArrangement = Arrangement.spacedBy(Space.x3)) {
         presets.forEach { preset ->
@@ -8613,16 +8651,29 @@ private fun BridgeFeePresetRow(
                     .background(if (selected == preset) SurfaceRaised.copy(alpha = 0.18f) else SurfaceStrong)
                     .border(1.dp, if (selected == preset) SurfaceRaised else BorderLine, RoundedCornerShape(Radius.sm))
                     .clickable { onSelect(preset) }
-                    .padding(horizontal = Space.x2, vertical = Space.x3),
+                    .padding(horizontal = Space.x2, vertical = verticalPadding),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Text(
-                    titles[preset] ?: preset.name.lowercase().replaceFirstChar { it.uppercase() },
-                    color = if (selected == preset) TextTertiary else TextSecondary,
-                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    GlyphIcon(
+                        glyph = when (preset) {
+                            BridgeFeePreset.Low -> Glyph.Info
+                            BridgeFeePreset.Medium -> Glyph.Check
+                            BridgeFeePreset.Market -> Glyph.Send
+                            BridgeFeePreset.Custom -> Glyph.Settings
+                        },
+                        modifier = Modifier.size(10.dp),
+                        color = if (selected == preset) SurfaceRaised else TextSecondary,
+                    )
+                    Spacer(Modifier.width(Space.x1))
+                    Text(
+                        titles[preset] ?: preset.name.lowercase().replaceFirstChar { it.uppercase() },
+                        color = if (selected == preset) TextTertiary else TextSecondary,
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                    )
+                }
                 Spacer(Modifier.height(Space.x1))
                 Text(
                     if (preset == BridgeFeePreset.Custom) value else "$value $suffix",
@@ -9521,19 +9572,15 @@ private fun EvmSendScreen(controller: PoctraController) {
             .padding(Space.x8),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconCircleButton(Glyph.Back, "Back", controller::closeEvmSend, enabled = !controller.evmSending)
-            Spacer(Modifier.width(Space.x6))
-            Text("Send $symbol", color = TextTertiary, style = MaterialTheme.typography.titleLarge)
-        }
-        Spacer(Modifier.height(Space.x7))
-        CompactScreenIntro(
-            glyph = Glyph.Send,
+        DetailScreenHeader(
+            title = "Send $symbol",
             description = when {
                 selectedNft != null -> "Send ${selectedNft.symbol} NFT from your derived EVM account."
                 selectedToken != null -> "Send ${selectedToken.symbol} ERC20 from your derived EVM account."
                 else -> "Send ${network?.symbol ?: "native EVM coin"} from your derived EVM account."
             },
+            onBack = controller::closeEvmSend,
+            backEnabled = !controller.evmSending,
         )
         Spacer(Modifier.height(Space.x8))
         TokenLikeRow(
@@ -9633,15 +9680,10 @@ private fun EvmReceiveScreen(controller: PoctraController) {
             .padding(Space.x8),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconCircleButton(Glyph.Back, "Back", controller::closeEvmReceive)
-            Spacer(Modifier.width(Space.x6))
-            Text("Receive EVM", color = TextTertiary, style = MaterialTheme.typography.titleLarge)
-        }
-        Spacer(Modifier.height(Space.x7))
-        CompactScreenIntro(
-            glyph = Glyph.Receive,
+        DetailScreenHeader(
+            title = "Receive EVM",
             description = "Use this address for native EVM coins, ERC20 tokens, and NFTs.",
+            onBack = controller::closeEvmReceive,
         )
         Spacer(Modifier.height(Space.x8))
         EvmReceivePanel(controller, clipboard)
@@ -9662,15 +9704,11 @@ private fun EvmNetworkSettingsScreen(controller: PoctraController) {
             .padding(Space.x8),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconCircleButton(Glyph.Back, "Back", controller::closeEvmNetworkSettings, enabled = !controller.busy)
-            Spacer(Modifier.width(Space.x6))
-            Text("EVM Network", color = TextTertiary, style = MaterialTheme.typography.titleLarge)
-        }
-        Spacer(Modifier.height(Space.x7))
-        CompactScreenIntro(
-            glyph = Glyph.Wifi,
+        DetailScreenHeader(
+            title = "EVM Network",
             description = "Choose the active EVM chain for balances, assets, gas, and transactions.",
+            onBack = controller::closeEvmNetworkSettings,
+            backEnabled = !controller.busy,
         )
         Spacer(Modifier.height(Space.x8))
         EvmNetworkPanel(
@@ -9721,19 +9759,15 @@ private fun EvmAddNetworkScreen(controller: PoctraController) {
             .padding(Space.x8),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconCircleButton(Glyph.Back, "Back", controller::closeEvmAddNetwork, enabled = !controller.busy)
-            Spacer(Modifier.width(Space.x6))
-            Text(if (isEditing) "Edit Network" else "Add Custom Network", color = TextTertiary, style = MaterialTheme.typography.titleLarge)
-        }
-        Spacer(Modifier.height(Space.x7))
-        CompactScreenIntro(
-            glyph = if (isEditing) Glyph.Pencil else Glyph.Plus,
+        DetailScreenHeader(
+            title = if (isEditing) "Edit Network" else "Add Custom Network",
             description = if (isEditing) {
                 "Update this EVM network endpoint, symbol, and explorer."
             } else {
                 "Add an EVM-compatible network with its RPC and explorer endpoint."
             },
+            onBack = controller::closeEvmAddNetwork,
+            backEnabled = !controller.busy,
         )
         Spacer(Modifier.height(Space.x8))
         Card(
@@ -10061,15 +10095,11 @@ private fun EvmAddTokenScreen(controller: PoctraController) {
             .padding(Space.x8),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconCircleButton(Glyph.Back, "Back", controller::closeEvmAddToken, enabled = !controller.evmLookupLoading)
-            Spacer(Modifier.width(Space.x6))
-            Text("Add ERC20", color = TextTertiary, style = MaterialTheme.typography.titleLarge)
-        }
-        Spacer(Modifier.height(Space.x7))
-        CompactScreenIntro(
-            glyph = Glyph.Assets,
+        DetailScreenHeader(
+            title = "Add ERC20",
             description = "Lookup an ERC20 contract and add it to this EVM account.",
+            onBack = controller::closeEvmAddToken,
+            backEnabled = !controller.evmLookupLoading,
         )
         Spacer(Modifier.height(Space.x8))
         Card(
@@ -10141,15 +10171,11 @@ private fun EvmAddNftScreen(controller: PoctraController) {
             .padding(Space.x8),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconCircleButton(Glyph.Back, "Back", controller::closeEvmAddNft, enabled = !controller.evmLookupLoading)
-            Spacer(Modifier.width(Space.x6))
-            Text("Add NFT", color = TextTertiary, style = MaterialTheme.typography.titleLarge)
-        }
-        Spacer(Modifier.height(Space.x7))
-        CompactScreenIntro(
-            glyph = Glyph.Browser,
+        DetailScreenHeader(
+            title = "Add NFT",
             description = "Lookup an NFT contract and token ID before adding it locally.",
+            onBack = controller::closeEvmAddNft,
+            backEnabled = !controller.evmLookupLoading,
         )
         Spacer(Modifier.height(Space.x8))
         Card(
@@ -10738,9 +10764,9 @@ private fun isValidOctraRecipientInput(value: String): Boolean {
     return isValidOctraAddress(clean) || isValidOctraIdentityName(clean)
 }
 
-private fun isValidOctraAddress(value: String): Boolean = value.startsWith("oct") && value.length == 47
+internal fun isValidOctraAddress(value: String): Boolean = value.startsWith("oct") && value.length == 47
 
-private fun isValidOctraIdentityName(value: String): Boolean {
+internal fun isValidOctraIdentityName(value: String): Boolean {
     val normalized = value.trim().lowercase()
     val path = normalized
         .removeSuffix(".oct")
@@ -10753,20 +10779,20 @@ private fun isValidOctraIdentityName(value: String): Boolean {
         parts.all { it.matches(Regex("^[a-z0-9]{3,63}$")) }
 }
 
-private data class RecipientResolutionPreview(
+internal data class RecipientResolutionPreview(
     val name: String,
     val address: String,
     val source: String,
 )
 
-private data class RecipientLookupUiState(
+internal data class RecipientLookupUiState(
     val resolution: RecipientResolutionPreview? = null,
     val loading: Boolean = false,
     val error: String? = null,
 )
 
 @Composable
-private fun rememberOctraRecipientLookup(
+internal fun rememberOctraRecipientLookup(
     controller: PoctraController,
     value: String,
 ): RecipientLookupUiState {
@@ -10840,7 +10866,7 @@ private fun rememberEvmRecipientLookup(
 }
 
 @Composable
-private fun RecipientLookupField(
+internal fun RecipientLookupField(
     value: String,
     onValueChange: (String) -> Unit,
     label: String,
@@ -10853,6 +10879,7 @@ private fun RecipientLookupField(
     isError: Boolean = false,
     supportingText: String? = null,
     trailingContent: (@Composable () -> Unit)? = null,
+    accentColor: Color = InfoBlue,
 ) {
     val cleanValue = value.trim()
     val directResolution = if (showDirectOctraAddressPreview && isValidOctraAddress(cleanValue)) {
@@ -10870,6 +10897,7 @@ private fun RecipientLookupField(
             resolution = resolution,
             glyph = glyph,
             onClear = onClear,
+            accentColor = accentColor,
         )
         return
     }
@@ -10886,6 +10914,7 @@ private fun RecipientLookupField(
             else -> null
         },
         trailingContent = trailingContent,
+        focusColor = accentColor,
     )
 }
 
@@ -10894,12 +10923,13 @@ private fun ResolvedRecipientCard(
     resolution: RecipientResolutionPreview,
     glyph: Glyph,
     onClear: () -> Unit,
+    accentColor: Color = InfoBlue,
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
-        colors = CardDefaults.cardColors(containerColor = InfoBlue.copy(alpha = 0.12f)),
-        border = BorderStroke(1.dp, InfoBlue.copy(alpha = 0.42f)),
+        colors = CardDefaults.cardColors(containerColor = accentColor.copy(alpha = 0.12f)),
+        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.42f)),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = Space.x5, vertical = Space.x4),
@@ -10909,10 +10939,10 @@ private fun ResolvedRecipientCard(
                 modifier = Modifier
                     .size(34.dp)
                     .clip(RoundedCornerShape(Radius.sm))
-                    .background(InfoBlue.copy(alpha = 0.18f)),
+                    .background(accentColor.copy(alpha = 0.18f)),
                 contentAlignment = Alignment.Center,
             ) {
-                GlyphIcon(glyph, modifier = Modifier.size(17.dp), color = InfoBlue)
+                GlyphIcon(glyph, modifier = Modifier.size(17.dp), color = accentColor)
             }
             Spacer(Modifier.width(Space.x4))
             Column(Modifier.weight(1f)) {
@@ -11296,15 +11326,10 @@ private fun SettingsScreen(controller: PoctraController) {
             .padding(Space.x8),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconCircleButton(Glyph.Back, "Back", controller::closeSettings)
-            Spacer(Modifier.width(Space.x6))
-            Text("Settings", color = TextTertiary, style = MaterialTheme.typography.titleLarge)
-        }
-        Spacer(Modifier.height(Space.x7))
-        CompactScreenIntro(
-            glyph = Glyph.Settings,
+        DetailScreenHeader(
+            title = "Settings",
             description = "Network, security, and wallet preferences.",
+            onBack = controller::closeSettings,
         )
         Spacer(Modifier.height(Space.x8))
         Column(verticalArrangement = Arrangement.spacedBy(Space.x5)) {
@@ -11314,12 +11339,6 @@ private fun SettingsScreen(controller: PoctraController) {
                 subtitle = if (controller.portfolioHoldings.isEmpty()) "Track wallet value" else "${controller.portfolioHoldings.size} holdings",
                 glyph = Glyph.Assets,
                 onClick = controller::openPortfolioAnalytics,
-            )
-            SettingsDestinationButton(
-                title = "Octra Profile",
-                subtitle = controller.wallet?.address?.let { controller.walletIdentityNames[it] ?: shortAddress(it) } ?: "Identity and addresses",
-                glyph = Glyph.Wallet,
-                onClick = controller::openOctraProfile,
             )
             SettingsDestinationButton(
                 title = "Activity Center",
@@ -11363,12 +11382,6 @@ private fun SettingsScreen(controller: PoctraController) {
                 subtitle = "Review ERC20 spending permissions",
                 glyph = Glyph.Revoke,
                 onClick = controller::openApprovalDashboard,
-            )
-            SettingsDestinationButton(
-                title = "Phishing Guard",
-                subtitle = "${controller.domainGuardRules.count { !it.trusted }} blocked, ${controller.domainGuardRules.count { it.trusted }} trusted",
-                glyph = Glyph.Browser,
-                onClick = controller::openDomainGuard,
             )
             SettingsSectionTitle("Networks")
             SettingsDestinationButton(
@@ -11696,28 +11709,42 @@ private fun SettingsDestinationButton(
 }
 
 @Composable
-private fun CompactScreenIntro(glyph: Glyph, description: String) {
+private fun DetailScreenHeader(
+    title: String,
+    description: String,
+    onBack: () -> Unit,
+    backEnabled: Boolean = true,
+    headerAction: (@Composable () -> Unit)? = null,
+) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(
-            modifier = Modifier
-                .size(38.dp)
-                .clip(RoundedCornerShape(Radius.md))
-                .background(SurfaceRaised.copy(alpha = 0.12f)),
-            contentAlignment = Alignment.Center,
-        ) {
-            GlyphIcon(glyph, modifier = Modifier.size(19.dp), color = SurfaceRaised)
+        IconCircleButton(Glyph.Back, "Back", onBack, enabled = backEnabled)
+        Spacer(Modifier.width(Space.x6))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                color = TextTertiary,
+                style = MaterialTheme.typography.titleLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (description.isNotBlank()) {
+                Spacer(Modifier.height(Space.x1))
+                Text(
+                    text = description,
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontSize = 10.sp,
+                        lineHeight = 13.sp,
+                    ),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
-        Spacer(Modifier.width(Space.x5))
-        Text(
-            text = description,
-            color = TextSecondary,
-            style = MaterialTheme.typography.bodySmall,
-            maxLines = 3,
-            overflow = TextOverflow.Ellipsis,
-        )
+        headerAction?.invoke()
     }
 }
 
@@ -11739,21 +11766,12 @@ fun SettingsDetailScreen(
             .padding(Space.x8),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconCircleButton(Glyph.Back, "Back", onBack)
-            Spacer(Modifier.width(Space.x6))
-            Text(
-                title,
-                modifier = Modifier.weight(1f),
-                color = TextTertiary,
-                style = MaterialTheme.typography.titleLarge,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            headerAction?.invoke()
-        }
-        Spacer(Modifier.height(Space.x7))
-        CompactScreenIntro(glyph = glyph, description = description)
+        DetailScreenHeader(
+            title = title,
+            description = description,
+            onBack = onBack,
+            headerAction = headerAction,
+        )
         Spacer(Modifier.height(Space.x8))
         content()
     }
@@ -11898,6 +11916,8 @@ private fun BackupSettingsScreen(activity: Activity, controller: PoctraControlle
                 name = controller.walletDisplayName(wallet.address),
                 address = wallet.address,
                 type = walletTypeLabel(wallet),
+                evmAddress = controller.evmAccount?.address,
+                evmNetwork = controller.activeEvmNetwork?.name,
             )
         }
     }
@@ -12055,7 +12075,13 @@ private fun SensitiveKeyCard(
 }
 
 @Composable
-private fun BackupWalletSummaryCard(name: String, address: String, type: String) {
+private fun BackupWalletSummaryCard(
+    name: String,
+    address: String,
+    type: String,
+    evmAddress: String?,
+    evmNetwork: String?,
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
@@ -12073,6 +12099,8 @@ private fun BackupWalletSummaryCard(name: String, address: String, type: String)
             BackupWalletInfoRow("Name", name)
             BackupWalletInfoRow("Address", address)
             BackupWalletInfoRow("Type", type)
+            BackupWalletInfoRow("EVM", evmAddress ?: "Not available")
+            BackupWalletInfoRow("Chain", evmNetwork ?: "Not selected")
         }
     }
 }
@@ -12585,7 +12613,15 @@ private fun AddressBookScreen(controller: PoctraController) {
         )
         Spacer(Modifier.height(Space.x7))
         if (controller.addressBookContacts.isEmpty()) {
-            EmptyPanel("No saved recipients", compact = true)
+            Text(
+                "No saved recipients",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = Space.x4),
+                color = TextSecondary,
+                style = MaterialTheme.typography.labelSmall,
+                textAlign = TextAlign.Center,
+            )
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(Space.x5)) {
                 controller.addressBookContacts.forEach { contact ->
@@ -12952,6 +12988,16 @@ private fun AboutScreen(controller: PoctraController) {
                 DetailLine("Explorer", controller.activeRpcNetwork?.explorerUrl.orEmpty())
                 DetailSeparator()
                 DetailLine("Wallets", "${controller.vault?.wallets?.size ?: 0}")
+                DetailSeparator()
+                DetailLine("EVM Network", controller.activeEvmNetwork?.name ?: "Not selected")
+                DetailSeparator()
+                DetailLine("EVM Chain ID", controller.activeEvmNetwork?.chainId?.toString() ?: "-")
+                DetailSeparator()
+                DetailLine("EVM RPC", controller.activeEvmNetwork?.rpcUrl ?: "Not configured")
+                DetailSeparator()
+                DetailLine("EVM Explorer", controller.activeEvmNetwork?.explorerUrl ?: "Not configured")
+                DetailSeparator()
+                DetailLine("EVM Address", controller.evmAccount?.address ?: "Not available")
             }
         }
     }

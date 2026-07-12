@@ -2,6 +2,8 @@ package com.poctra.wallet.data
 
 import android.content.Context
 import android.util.Base64
+import com.poctra.wallet.privacy.PrivacyEncryptedBalance
+import com.poctra.wallet.core.Base58
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -24,6 +26,7 @@ import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
+import java.util.Collections
 import javax.crypto.Cipher
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
@@ -61,9 +64,10 @@ private data class TokenLookupResult(
 
 class RpcRepository(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("poctra_rpc", Context.MODE_PRIVATE)
-    private val unsupportedCircleProgramViewUrls = ConcurrentHashMap.newKeySet<String>()
+    private val unsupportedCircleProgramViewUrls = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
     private val circleReadCache = ConcurrentHashMap<String, CircleReadCacheEntry>()
     private val circleReadLocks = ConcurrentHashMap<String, Any>()
+    private val registeredPvacKeys = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
 
     fun currentUrl(): String = activeNetwork().url
 
@@ -376,10 +380,13 @@ class RpcRepository(context: Context) {
         feeOu = feeOu,
     )
 
-    suspend fun checkTransactionStatus(hash: String): TransactionNetworkState = withContext(Dispatchers.IO) {
+    suspend fun checkTransactionStatus(
+        hash: String,
+        url: String = currentUrl(),
+    ): TransactionNetworkState = withContext(Dispatchers.IO) {
         runCatching {
             val json = postRpc(
-                url = currentUrl(),
+                url = url,
                 payload = JSONObject()
                     .put("jsonrpc", "2.0")
                     .put("id", 1)
@@ -390,14 +397,19 @@ class RpcRepository(context: Context) {
             val data = json.optJSONObject("result") ?: return@runCatching TransactionNetworkState(TransactionNetworkStatus.NotFound)
             val status = data.optString("status").lowercase()
             val stageStatus = data.optString("stage_status").lowercase()
+            val rejectionReason = data.optString("reason").ifBlank {
+                data.optJSONObject("error")?.optString("reason").orEmpty()
+            }.ifBlank {
+                data.optJSONObject("error")?.optString("message").orEmpty()
+            }.ifBlank { null }
             when {
                 status == "rejected" -> TransactionNetworkState(
                     TransactionNetworkStatus.Rejected,
-                    data.optString("reason").ifBlank { null },
+                    rejectionReason,
                 )
                 status == "dropped" -> TransactionNetworkState(
                     TransactionNetworkStatus.Dropped,
-                    data.optString("reason").ifBlank { null },
+                    rejectionReason,
                 )
                 (data.has("epoch") && !data.isNull("epoch")) ||
                     status == "confirmed" ||
@@ -408,6 +420,227 @@ class RpcRepository(context: Context) {
                 else -> TransactionNetworkState(TransactionNetworkStatus.NotFound)
             }
         }.getOrDefault(TransactionNetworkState(TransactionNetworkStatus.NotFound))
+    }
+
+    suspend fun fetchEncryptedBalance(
+        wallet: Wallet,
+        url: String = currentUrl(),
+    ): PrivacyEncryptedBalance? = withContext(Dispatchers.IO) {
+        val signature = signMessage(wallet, "octra_encryptedBalance|${wallet.address}")
+        val publicKey = Base64.encodeToString(signingMaterial(wallet).second, Base64.NO_WRAP)
+        val response = postRpc(
+            url = url,
+            payload = JSONObject()
+                .put("jsonrpc", "2.0")
+                .put("id", System.currentTimeMillis())
+                .put("method", "octra_encryptedBalance")
+                .put("params", JSONArray().put(wallet.address).put(signature).put(publicKey)),
+        )
+        if (response.has("error")) return@withContext null
+        val result = response.opt("result")
+        val cipher = when (result) {
+            is JSONObject -> result.optString("cipher")
+            is String -> result
+            else -> ""
+        }.trim()
+        normalizeEncryptedBalanceCipher(cipher)?.let(::PrivacyEncryptedBalance)
+    }
+
+    suspend fun fetchPrivacyHistory(
+        address: String,
+        limit: Int = 7,
+        url: String = currentUrl(),
+    ): List<TransactionHistoryItem> = withContext(Dispatchers.IO) {
+        val response = postRpc(
+            url = url,
+            payload = JSONObject()
+                .put("jsonrpc", "2.0")
+                .put("id", System.currentTimeMillis())
+                .put("method", "octra_account")
+                .put("params", JSONArray().put(address).put(PrivacyHistoryQueryLimit)),
+        )
+        val recent = response.optJSONObject("result")?.optJSONArray("recent_txs") ?: JSONArray()
+        buildList {
+            for (index in 0 until recent.length()) {
+                val item = recent.optJSONObject(index) ?: continue
+                val opType = item.optString("op_type").lowercase()
+                if (opType !in PrivacyOperationTypes) continue
+                val from = item.optString("from", address)
+                val to = item.optString("to", item.optString("to_", address))
+                add(
+                    TransactionHistoryItem(
+                        hash = item.optString("hash", item.optString("tx_hash")),
+                        from = from,
+                        to = to,
+                        amount = parseAmount(item.opt("amount_raw"), item.opt("amount")),
+                        timestamp = item.optDouble("timestamp", 0.0),
+                        status = item.optString("status", "confirmed"),
+                        type = if (from.equals(address, ignoreCase = true)) "sent" else "received",
+                        opType = opType,
+                    ),
+                )
+                if (size >= limit) break
+            }
+        }.sortedByDescending { it.timestamp }
+    }
+
+    suspend fun fetchStealthOutputs(url: String = currentUrl()): JSONArray = withContext(Dispatchers.IO) {
+        val response = postRpc(
+            url = url,
+            payload = JSONObject()
+                .put("jsonrpc", "2.0")
+                .put("id", System.currentTimeMillis())
+                .put("method", "octra_stealthOutputs")
+                .put("params", JSONArray().put(0)),
+            connectTimeoutMs = 20_000,
+            readTimeoutMs = 120_000,
+        )
+        response.optJSONObject("error")?.let { error ->
+            throw IllegalStateException(error.optString("message", "Unable to scan claimable transfers."))
+        }
+        response.optJSONObject("result")?.optJSONArray("outputs") ?: JSONArray()
+    }
+
+    suspend fun fetchOctraPublicKey(
+        address: String,
+        url: String = currentUrl(),
+    ): ByteArray = withContext(Dispatchers.IO) {
+        require(address.startsWith("oct") && address.length == 47) { "Recipient address is invalid." }
+        val response = postRpc(
+            url = url,
+            payload = JSONObject()
+                .put("jsonrpc", "2.0")
+                .put("id", System.currentTimeMillis())
+                .put("method", "octra_publicKey")
+                .put("params", JSONArray().put(address)),
+        )
+        response.optJSONObject("error")?.let { error ->
+            throw IllegalStateException(error.optString("message", "Recipient public key is unavailable."))
+        }
+        val encoded = response.optJSONObject("result")?.optString("public_key").orEmpty()
+        require(encoded.isNotBlank()) {
+            "Recipient has no public key registered on the active network."
+        }
+        val publicKey = runCatching { Base64.decode(encoded, Base64.DEFAULT) }
+            .getOrElse { throw IllegalStateException("Recipient public key is invalid.") }
+        require(publicKey.size == 32) { "Recipient public key has an invalid size." }
+        val derivedAddress = "oct" + Base58.encode(
+            MessageDigest.getInstance("SHA-256").digest(publicKey),
+        ).padStart(44, '1')
+        require(derivedAddress == address) {
+            "Recipient public key does not match the requested address."
+        }
+        publicKey
+    }
+
+    suspend fun ensurePvacRegistered(
+        wallet: Wallet,
+        pvacPublicKey: ByteArray,
+        aesKat: ByteArray,
+        url: String = currentUrl(),
+    ) = withContext(Dispatchers.IO) {
+        val pvacPublicKeyBase64 = Base64.encodeToString(pvacPublicKey, Base64.NO_WRAP)
+        val publicKeyHash = MessageDigest.getInstance("SHA-256").digest(pvacPublicKey).toHex()
+        val cacheKey = "${url.trimEnd('/')}|${wallet.address}|$publicKeyHash"
+        if (cacheKey in registeredPvacKeys) return@withContext
+
+        val existingResponse = postRpc(
+            url = url,
+            payload = JSONObject()
+                .put("jsonrpc", "2.0")
+                .put("id", System.currentTimeMillis())
+                .put("method", "octra_pvacPubkey")
+                .put("params", JSONArray().put(wallet.address)),
+        )
+        val existing = existingResponse.optJSONObject("result")?.optString("pvac_pubkey")
+            ?.trim()
+            .orEmpty()
+        if (existing == pvacPublicKeyBase64) {
+            registeredPvacKeys += cacheKey
+            return@withContext
+        }
+        require(existing.isBlank()) {
+            "This wallet is registered with a different Privacy key on the active network."
+        }
+
+        val registrationMessage = "register_pvac|${wallet.address}|$publicKeyHash"
+        val response = postRpc(
+            url = url,
+            payload = JSONObject()
+                .put("jsonrpc", "2.0")
+                .put("id", System.currentTimeMillis())
+                .put("method", "octra_registerPvacPubkey")
+                .put(
+                    "params",
+                    JSONArray()
+                        .put(wallet.address)
+                        .put(pvacPublicKeyBase64)
+                        .put(signMessage(wallet, registrationMessage))
+                        .put(Base64.encodeToString(signingMaterial(wallet).second, Base64.NO_WRAP))
+                        .put(aesKat.toHex()),
+                ),
+            connectTimeoutMs = 60_000,
+            readTimeoutMs = 60_000,
+        )
+        val errorMessage = response.optJSONObject("error")?.optString("message").orEmpty()
+        if (errorMessage.isNotBlank() && !errorMessage.contains("already registered", ignoreCase = true)) {
+            throw IllegalStateException(errorMessage)
+        }
+        registeredPvacKeys += cacheKey
+    }
+
+    suspend fun submitPrivacyTransaction(
+        wallet: Wallet,
+        amountRaw: String,
+        feeOu: Long,
+        opType: String,
+        encryptedData: String,
+        recipientAddress: String = wallet.address,
+        url: String = currentUrl(),
+    ): SendResult = withContext(Dispatchers.IO) {
+        require(opType in PrivacyOperationTypes) { "Unsupported privacy operation." }
+        require(
+            (opType == "stealth" && recipientAddress == "stealth") ||
+                (opType != "stealth" && recipientAddress == wallet.address),
+        ) { "Privacy transaction recipient is invalid." }
+        val snapshot = fetchBalanceStrict(wallet.address, url)
+        val transaction = createSignedTransactionRaw(
+            wallet = wallet,
+            recipientAddress = recipientAddress,
+            amountRaw = amountRaw,
+            nonce = snapshot.nonce + 1,
+            message = null,
+            feeOu = feeOu,
+            opType = opType,
+            encryptedData = encryptedData,
+        )
+        val response = postRpc(
+            url = url,
+            payload = JSONObject()
+                .put("jsonrpc", "2.0")
+                .put("id", System.currentTimeMillis())
+                .put("method", "octra_submit")
+                .put("params", JSONArray().put(transaction)),
+            connectTimeoutMs = 20_000,
+            readTimeoutMs = 45_000,
+        )
+        response.optJSONObject("error")?.let { rpcError ->
+            return@withContext SendResult(
+                success = false,
+                error = rpcError.optString("message", rpcError.optString("reason", "Privacy transaction failed")),
+                finality = "rejected",
+            )
+        }
+        val result = response.optJSONObject("result") ?: JSONObject()
+        val status = result.optString("status").lowercase()
+        val hash = result.optString("tx_hash", result.optString("hash")).ifBlank { null }
+        if (status == "rejected") {
+            SendResult(false, error = result.optString("reason", "Privacy transaction rejected"), finality = status)
+        } else if (status == "accepted" || hash != null) {
+            SendResult(true, hash = hash, finality = "accepted")
+        } else {
+            SendResult(false, error = "Unknown privacy transaction response.")
+        }
     }
 
     suspend fun fetchTransactionHistory(address: String, limit: Int = 11, url: String = currentUrl()): List<TransactionHistoryItem> =
@@ -425,7 +658,9 @@ class RpcRepository(context: Context) {
                     val result = json.optJSONObject("result") ?: return@runCatching emptyList()
                     val recent = result.optJSONArray("recent_txs") ?: JSONArray()
                     val items = buildList {
-                        for (index in 0 until recent.length()) recent.optJSONObject(index)?.let(::add)
+                        for (index in 0 until recent.length()) {
+                            recent.optJSONObject(index)?.let { add(it) }
+                        }
                     }
                     items.chunked(HistoryDetailsBatchSize).flatMap { batch ->
                         coroutineScope {
@@ -1190,32 +1425,28 @@ class RpcRepository(context: Context) {
         encryptedData: String?,
     ): JSONObject {
         val ou = feeOu.coerceAtLeast(1L).toString()
-        val timestamp = BigDecimal.valueOf(System.currentTimeMillis())
-            .divide(BigDecimal.valueOf(1000))
-            .toPlainString()
+        val timestampMillis = System.currentTimeMillis()
+        val timestamp = timestampMillis / 1000.0
+        // Octra's verifier canonicalizes epoch seconds as a plain decimal.
+        // JSONObject.numberToString(Double) switches values this large to
+        // scientific notation, which produces a different signed message.
+        val canonicalTimestamp = canonicalOctraTimestamp(timestampMillis)
 
-        val canonical = buildString {
-            append("{")
-            append("\"from\":").append(JSONObject.quote(wallet.address))
-            append(",\"to_\":").append(JSONObject.quote(recipientAddress))
-            append(",\"amount\":").append(JSONObject.quote(amountRaw))
-            append(",\"nonce\":").append(nonce)
-            append(",\"ou\":").append(JSONObject.quote(ou))
-            append(",\"timestamp\":").append(timestamp)
-            append(",\"op_type\":").append(JSONObject.quote(opType.ifBlank { "standard" }))
-            if (!encryptedData.isNullOrBlank()) {
-                append(",\"encrypted_data\":").append(JSONObject.quote(encryptedData))
-            }
-            if (!message.isNullOrBlank()) {
-                append(",\"message\":").append(JSONObject.quote(message))
-            }
-            append("}")
-        }
+        val canonical = canonicalOctraTransaction(
+            from = wallet.address,
+            to = recipientAddress,
+            amountRaw = amountRaw,
+            nonce = nonce,
+            ou = ou,
+            timestamp = canonicalTimestamp,
+            opType = opType,
+            encryptedData = encryptedData,
+            message = message,
+        )
 
-        val privateKey = Base64.decode(wallet.privateKeyBase64, Base64.NO_WRAP)
-        val publicKey = wallet.publicKeyHex.hexToBytes()
+        val (privateKey, publicKey) = signingMaterial(wallet)
         val signer = Ed25519Signer()
-        signer.init(true, Ed25519PrivateKeyParameters(privateKey, 0))
+        signer.init(true, privateKey)
         val signingBytes = canonical.toByteArray(Charsets.UTF_8)
         signer.update(signingBytes, 0, signingBytes.size)
         val signature = signer.generateSignature()
@@ -1226,7 +1457,7 @@ class RpcRepository(context: Context) {
             .put("amount", amountRaw)
             .put("nonce", nonce)
             .put("ou", ou)
-            .put("timestamp", timestamp.toDouble())
+            .put("timestamp", timestamp)
             .put("op_type", opType.ifBlank { "standard" })
             .apply {
                 if (!encryptedData.isNullOrBlank()) put("encrypted_data", encryptedData)
@@ -1254,6 +1485,7 @@ class RpcRepository(context: Context) {
         val status = data.optString("status").lowercase()
         val stageStatus = data.optString("stage_status").lowercase()
         val normalizedStatus = when {
+            status == "rejected" || status == "dropped" -> status
             (data.has("epoch") && !data.isNull("epoch")) || status == "confirmed" || stageStatus == "confirmed" -> "confirmed"
             status.isNotBlank() -> status
             stageStatus.isNotBlank() -> stageStatus
@@ -1310,8 +1542,39 @@ class RpcRepository(context: Context) {
         }.getOrDefault(emptyList())
     }
 
-    private fun postRpc(url: String, payload: JSONObject): JSONObject {
-        val value = postRpcValue(url, payload)
+    private fun fetchBalanceStrict(address: String, url: String): BalanceSnapshot {
+        val response = postRpc(
+            url = url,
+            payload = JSONObject()
+                .put("jsonrpc", "2.0")
+                .put("id", System.currentTimeMillis())
+                .put("method", "octra_balance")
+                .put("params", JSONArray().put(address)),
+        )
+        response.optJSONObject("error")?.let { error ->
+            throw IllegalStateException(error.optString("message", "Unable to fetch wallet nonce."))
+        }
+        val result = response.optJSONObject("result")
+            ?: throw IllegalStateException("Octra balance response is empty.")
+        val raw = when (val value = result.opt("balance_raw")) {
+            is Number -> value.toLong()
+            is String -> value.toLongOrNull() ?: 0L
+            else -> 0L
+        }
+        val balance = if (raw > 0L) raw / MicroUnits.toDouble() else result.optDouble("balance", 0.0)
+        return BalanceSnapshot(
+            balance = balance,
+            nonce = result.optLong("pending_nonce", result.optLong("nonce", 0L)),
+        )
+    }
+
+    private fun postRpc(
+        url: String,
+        payload: JSONObject,
+        connectTimeoutMs: Int = 10_000,
+        readTimeoutMs: Int = 10_000,
+    ): JSONObject {
+        val value = postRpcValue(url, payload, connectTimeoutMs, readTimeoutMs)
         return value as? JSONObject ?: throw IllegalStateException("RPC response was not an object.")
     }
 
@@ -1320,12 +1583,17 @@ class RpcRepository(context: Context) {
         return value as? JSONArray ?: throw IllegalStateException("RPC batch response was not an array.")
     }
 
-    private fun postRpcValue(url: String, payload: Any): Any {
+    private fun postRpcValue(
+        url: String,
+        payload: Any,
+        connectTimeoutMs: Int = 10_000,
+        readTimeoutMs: Int = 10_000,
+    ): Any {
         val rpcUrl = URL("${url.trim().trimEnd('/')}/rpc")
         val connection = (rpcUrl.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
-            connectTimeout = 10_000
-            readTimeout = 10_000
+            connectTimeout = connectTimeoutMs
+            readTimeout = readTimeoutMs
             doOutput = true
             setRequestProperty("Content-Type", "application/json")
         }
@@ -1467,8 +1735,8 @@ class RpcRepository(context: Context) {
     }
 
     private fun feeFallback(opType: String): Long = when (opType) {
-        "stealth" -> 5000L
-        "decrypt", "encrypt" -> 3000L
+        "encrypt", "decrypt" -> 10000L
+        "stealth", "claim" -> 5000L
         "deploy", "upgrade" -> 200000L
         else -> 1000L
     }
@@ -1497,6 +1765,30 @@ class RpcRepository(context: Context) {
         }
     }
 
+    private fun signMessage(wallet: Wallet, message: String): String {
+        val (privateKey, _) = signingMaterial(wallet)
+        val signer = Ed25519Signer()
+        signer.init(true, privateKey)
+        val bytes = message.toByteArray(Charsets.UTF_8)
+        signer.update(bytes, 0, bytes.size)
+        return Base64.encodeToString(signer.generateSignature(), Base64.NO_WRAP)
+    }
+
+    private fun signingMaterial(wallet: Wallet): Pair<Ed25519PrivateKeyParameters, ByteArray> {
+        val seed = runCatching { Base64.decode(wallet.privateKeyBase64, Base64.DEFAULT) }
+            .getOrElse { throw IllegalArgumentException("Wallet private key is invalid.") }
+        require(seed.size >= 32) { "Wallet private key is invalid." }
+        val privateKey = Ed25519PrivateKeyParameters(seed, 0)
+        val publicKey = privateKey.generatePublicKey().encoded
+        val derivedAddress = "oct" + Base58.encode(MessageDigest.getInstance("SHA-256").digest(publicKey))
+        require(derivedAddress == wallet.address) {
+            "Wallet signing key does not match the active Octra address."
+        }
+        return privateKey to publicKey
+    }
+
+    private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it.toInt() and 0xff) }
+
     companion object {
         const val DefaultMainnetUrl = "https://octra.network"
         const val DefaultDevnetUrl = "http://165.227.225.79:8080"
@@ -1518,6 +1810,8 @@ class RpcRepository(context: Context) {
         private const val MaxCircleRpcBatchSize = 64
         private const val HistoryDetailsBatchSize = 6
         private const val OctraTokenLookupBatchSize = 4
+        private const val PrivacyHistoryQueryLimit = 50
+        private val PrivacyOperationTypes = setOf("encrypt", "decrypt", "stealth", "claim")
         private const val CircleReadCacheMillis = 8_000L
         private const val MaxCircleReadCacheEntries = 512
         private val CircleReadRpcMethods = setOf(
@@ -1542,4 +1836,69 @@ class RpcRepository(context: Context) {
             "epoch_current",
         )
     }
+}
+
+internal fun normalizeEncryptedBalanceCipher(value: String): String? {
+    val cipher = value.trim()
+    if (cipher.isBlank() || cipher == "0" || cipher.equals("null", ignoreCase = true)) return null
+    require(cipher.startsWith("hfhe_v1|")) {
+        "Encrypted balance uses an unsupported ciphertext format."
+    }
+    val payload = cipher.removePrefix("hfhe_v1|")
+    require(payload.isNotBlank() && payload.length % 4 != 1 && payload.matches(Regex("[A-Za-z0-9+/]+={0,2}"))) {
+        "Encrypted balance contains invalid Base64 data."
+    }
+    return cipher
+}
+
+internal fun canonicalJsonQuote(value: String): String = buildString(value.length + 2) {
+    append('"')
+    value.forEach { character ->
+        when (character) {
+            '"' -> append("\\\"")
+            '\\' -> append("\\\\")
+            '\b' -> append("\\b")
+            '\u000C' -> append("\\f")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            '\t' -> append("\\t")
+            else -> append(character)
+        }
+    }
+    append('"')
+}
+
+internal fun canonicalOctraTransaction(
+    from: String,
+    to: String,
+    amountRaw: String,
+    nonce: Long,
+    ou: String,
+    timestamp: String,
+    opType: String,
+    encryptedData: String? = null,
+    message: String? = null,
+): String = buildString {
+    append("{\"from\":").append(canonicalJsonQuote(from))
+    append(",\"to_\":").append(canonicalJsonQuote(to))
+    append(",\"amount\":").append(canonicalJsonQuote(amountRaw))
+    append(",\"nonce\":").append(nonce)
+    append(",\"ou\":").append(canonicalJsonQuote(ou))
+    append(",\"timestamp\":").append(timestamp)
+    append(",\"op_type\":").append(canonicalJsonQuote(opType.ifBlank { "standard" }))
+    if (!encryptedData.isNullOrBlank()) {
+        append(",\"encrypted_data\":").append(canonicalJsonQuote(encryptedData))
+    }
+    if (!message.isNullOrBlank()) {
+        append(",\"message\":").append(canonicalJsonQuote(message))
+    }
+    append('}')
+}
+
+internal fun canonicalOctraTimestamp(epochMillis: Long): String {
+    val value = BigDecimal.valueOf(epochMillis)
+        .movePointLeft(3)
+        .stripTrailingZeros()
+        .toPlainString()
+    return if ('.' in value) value else "$value.0"
 }

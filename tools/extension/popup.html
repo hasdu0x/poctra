@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>circle viewer</title>
+  <link rel="icon" href="assets/icon.svg">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="popup-page">
+  <main class="popup-shell">
+    <section id="homeScreen" class="popup-screen is-active" data-screen="home">
+      <header class="topbar">
+        <div class="brand-mark">c</div>
+        <div class="brand-copy">
+          <h1>circle viewer</h1>
+          <p>oct:// browser</p>
+        </div>
+        <div class="topbar-actions">
+          <button id="topNetworkBadge" class="network-type-button" type="button" title="Change Octra network">Mainnet</button>
+          <button id="settingsButton" class="icon-button" type="button" title="Settings" aria-label="Settings">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"></path>
+              <path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.04.04a2.16 2.16 0 0 1-3.05 3.05l-.04-.04a1.8 1.8 0 0 0-1.98-.36 1.8 1.8 0 0 0-1.09 1.65V21.5a2.16 2.16 0 0 1-4.32 0v-.06a1.8 1.8 0 0 0-1.18-1.69 1.8 1.8 0 0 0-1.98.36l-.04.04a2.16 2.16 0 0 1-3.05-3.05l.04-.04A1.8 1.8 0 0 0 3.46 15a1.8 1.8 0 0 0-1.65-1.09H1.75a2.16 2.16 0 0 1 0-4.32h.06A1.8 1.8 0 0 0 3.5 8.41a1.8 1.8 0 0 0-.36-1.98l-.04-.04a2.16 2.16 0 0 1 3.05-3.05l.04.04a1.8 1.8 0 0 0 1.98.36h.01A1.8 1.8 0 0 0 9.27 2.1V2a2.16 2.16 0 0 1 4.32 0v.06a1.8 1.8 0 0 0 1.09 1.65 1.8 1.8 0 0 0 1.98-.36l.04-.04a2.16 2.16 0 0 1 3.05 3.05l-.04.04a1.8 1.8 0 0 0-.36 1.98v.01a1.8 1.8 0 0 0 1.65 1.09h.1a2.16 2.16 0 0 1 0 4.32h-.06A1.8 1.8 0 0 0 19.4 15Z"></path>
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <form id="openForm" class="search-form">
+        <label class="field-label" for="dappInput">dApp URL</label>
+        <div class="input-wrap">
+          <span id="protocolBadge" class="protocol-badge hidden">oct://</span>
+          <input id="dappInput" type="text" autocomplete="off" spellcheck="false" placeholder="circle address, octra identity or dApp URL">
+          <button id="goButton" class="field-go" type="submit" title="Go" aria-label="Go">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 12h13"></path>
+              <path d="m13 6 6 6-6 6"></path>
+            </svg>
+          </button>
+        </div>
+      </form>
+
+      <button id="previewCard" class="preview-card hidden" type="button">
+        <div class="preview-icon" id="previewIcon">o</div>
+        <div class="preview-copy">
+          <strong id="previewTitle">Preview</strong>
+          <span id="previewSubtitle"></span>
+          <small id="previewDetail"></small>
+        </div>
+      </button>
+
+      <div id="statusLine" class="status-line"></div>
+
+      <section class="quick-list">
+        <div class="section-heading">
+          <span>Examples</span>
+        </div>
+        <button class="quick-item" type="button" data-input="oct://oct9rofAj2yrS4uaisrZ9yqPwPpYHHCiHzFEGWFNFVGbZhK/index.html">
+          <span>Public HTML circle</span>
+          <small>oct://oct9rof...</small>
+        </button>
+        <button class="quick-item" type="button" data-input="root.oct">
+          <span>Octra Identity</span>
+          <small>Resolve then open circle or explorer</small>
+        </button>
+      </section>
+    </section>
+
+    <section id="settingsScreen" class="popup-screen" data-screen="settings">
+      <header class="screen-header">
+        <button class="icon-button" type="button" data-back-screen="home" aria-label="Back">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m15 18-6-6 6-6"></path>
+          </svg>
+        </button>
+        <div class="screen-title">
+          <h1>Settings</h1>
+          <p>Network, identity, and appearance.</p>
+        </div>
+        <button id="resetButton" class="small-button neutral" type="button">Reset</button>
+      </header>
+
+      <div class="settings-menu">
+        <button id="networkCard" class="setting-card" type="button">
+          <span class="setting-icon">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 12.55a11 11 0 0 1 14.08 0"></path>
+              <path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path>
+              <path d="M12 20h.01"></path>
+            </svg>
+          </span>
+          <span class="setting-copy">
+            <strong>RPC Network</strong>
+            <small id="networkSummary">Loading</small>
+          </span>
+        </button>
+
+        <button id="providerCard" class="setting-card" type="button">
+          <span class="setting-icon">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3 4 7v6c0 5 3.4 7.5 8 8 4.6-.5 8-3 8-8V7l-8-4Z"></path>
+              <path d="M9 12h6"></path>
+              <path d="M12 9v6"></path>
+            </svg>
+          </span>
+          <span class="setting-copy">
+            <strong>Identity Provider</strong>
+            <small id="providerSummary">Loading</small>
+          </span>
+        </button>
+
+        <button id="appearanceCard" class="setting-card" type="button">
+          <span class="setting-icon">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3a6 6 0 0 0 9 7.5A9 9 0 1 1 12 3Z"></path>
+            </svg>
+          </span>
+          <span class="setting-copy">
+            <strong>Appearance</strong>
+            <small id="themeSummary">Dark theme</small>
+          </span>
+        </button>
+      </div>
+    </section>
+
+    <section id="networkScreen" class="popup-screen" data-screen="network">
+      <header class="screen-header">
+        <button class="icon-button" type="button" data-back-screen="settings" aria-label="Back">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m15 18-6-6 6-6"></path>
+          </svg>
+        </button>
+        <div class="screen-title">
+          <h1>RPC Network</h1>
+          <p>Select active RPC or add custom.</p>
+        </div>
+      </header>
+      <div class="screen-scroll">
+        <div id="networkList" class="list-stack"></div>
+        <div class="inline-separator"></div>
+        <form id="networkForm" class="form-stack">
+          <label>
+            <span>RPC name</span>
+            <input id="networkName" type="text" placeholder="Octra Mainnet">
+          </label>
+          <label>
+            <span>RPC endpoint URL</span>
+            <input id="networkRpc" type="url" placeholder="https://octra.network">
+          </label>
+          <label>
+            <span>Network type</span>
+            <select id="networkType">
+              <option value="mainnet">Mainnet</option>
+              <option value="devnet">Devnet</option>
+            </select>
+          </label>
+          <label>
+            <span>Explorer URL</span>
+            <input id="networkExplorer" type="url" placeholder="https://octrascan.io">
+          </label>
+          <button class="primary-button" type="submit">Add network</button>
+        </form>
+      </div>
+    </section>
+
+    <section id="providerScreen" class="popup-screen" data-screen="provider">
+      <header class="screen-header">
+        <button class="icon-button" type="button" data-back-screen="settings" aria-label="Back">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m15 18-6-6 6-6"></path>
+          </svg>
+        </button>
+        <div class="screen-title">
+          <h1>Identity Provider</h1>
+          <p>Manage provider for active network.</p>
+        </div>
+      </header>
+      <div class="screen-scroll">
+        <div id="providerList" class="list-stack"></div>
+        <div class="inline-separator"></div>
+        <form id="providerForm" class="form-stack">
+          <label>
+            <span>Provider name</span>
+            <input id="providerName" type="text" placeholder="Octra Identity">
+          </label>
+          <label>
+            <span>Contract address</span>
+            <input id="providerContract" type="text" placeholder="oct...">
+          </label>
+          <label>
+            <span>Network type</span>
+            <select id="providerNetwork">
+              <option value="mainnet">Mainnet</option>
+              <option value="devnet">Devnet</option>
+            </select>
+          </label>
+          <button class="primary-button" type="submit">Add provider</button>
+        </form>
+      </div>
+    </section>
+
+    <section id="appearanceScreen" class="popup-screen" data-screen="appearance">
+      <header class="screen-header">
+        <button class="icon-button" type="button" data-back-screen="settings" aria-label="Back">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m15 18-6-6 6-6"></path>
+          </svg>
+        </button>
+        <div class="screen-title">
+          <h1>Appearance</h1>
+          <p>Choose the extension theme.</p>
+        </div>
+      </header>
+      <div id="themeOptions" class="theme-options"></div>
+    </section>
+
+    <div id="settingsStatus" class="floating-status"></div>
+  </main>
+  <script type="module" src="src/popup.js"></script>
+</body>
+</html>

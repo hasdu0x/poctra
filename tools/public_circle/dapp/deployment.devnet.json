@@ -1,0 +1,227 @@
+{
+  "network": "devnet",
+  "rpc": "http://165.227.225.79:8080",
+  "explorerHost": "https://devnet.octrascan.io",
+  "deployer": "oct5ZHUXnGVJwwZowQsQuVrEWmE6qqvDNgak9PorPYoctra",
+  "circleId": "oct2EPYSkqjD6f1zLuWhyP6G2rDGB8rZp1nNDirVCqp3drD",
+  "uri": "oct://oct2EPYSkqjD6f1zLuWhyP6G2rDGB8rZp1nNDirVCqp3drD/index.html",
+  "sealedRead": null,
+  "publicRead": {
+    "passphraseRequired": false,
+    "resourceMode": "public_resources"
+  },
+  "payload": {
+    "runtime": "octb",
+    "privacy_class": "public",
+    "browser_mode": "gateway_allowed",
+    "resource_mode": "public_resources",
+    "code_b64": null,
+    "policy_hash": null,
+    "members_root": null,
+    "export_policy": null,
+    "limits": {
+      "max_stable_bytes": "33554432",
+      "max_assets_bytes": "33554432",
+      "max_inline_value": "65536",
+      "max_wasm_bytes": "33554432"
+    }
+  },
+  "deployTxHash": "a3c4de3612e86ae211117af5c987cc2e4dcd3b31958388ef42c1553a241b6a64",
+  "assets": [
+    {
+      "path": "/assets/fira_code_medium-DL69PIB5.ttf",
+      "contentType": "font/ttf",
+      "bytes": 283684,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "97091f90623661fb4f7979c10d188f30f4806d8ce326b0bc8d1acc79dcc20d8f",
+      "ou": 80000,
+      "txHash": "bab82e8ddffbcf6d303cca29036890daae21aa37b0b6b6fcd3a4f7237b6fe64a"
+    },
+    {
+      "path": "/assets/fira_code_regular-CzoQJ4O7.ttf",
+      "contentType": "font/ttf",
+      "bytes": 289624,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "5992ab9640e2df491b2f609467b1de60e8bc39b2c28db184342a0592d98f6117",
+      "ou": 80000,
+      "txHash": "8430421c54c544998b61ec3ff0d2bf7e9e7841f9b7662b406ff528b76ee2848b"
+    },
+    {
+      "path": "/assets/fira_code_semibold-CssfnJAs.ttf",
+      "contentType": "font/ttf",
+      "bytes": 304248,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "500c74eec6249b06d49aef922dd3e8fc754c70c3b3f7791cd7b1a09ca9a26140",
+      "ou": 80000,
+      "txHash": "363080bac8b629051e066d47838927de3a0210885c8769e768ce5a52c79413fc"
+    },
+    {
+      "path": "/assets/index-_0aZuKoj.js",
+      "contentType": "application/javascript; charset=utf-8",
+      "bytes": 197247,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "f923f0473dc3ca30b6485258ecc0e5aa7f0aa833a30caaebc8812d98bc0bd98f",
+      "ou": 80000,
+      "txHash": "bd4e0a22813a3ca0c035fe36df581893f81a50a2c1f652d72dca9b15e6769a9e"
+    },
+    {
+      "path": "/assets/index-DWG_HBKf.css",
+      "contentType": "text/css; charset=utf-8",
+      "bytes": 19571,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "a556779cf001b0a88241483b74b1a5249dd005a5d0a21187445993d80e0b50d5",
+      "ou": 20000,
+      "txHash": "f0e79ceb435d4a04ff4479b9159a2b73303e8c96b0efcaadd97083ba1a38642e"
+    },
+    {
+      "path": "/favicon.svg",
+      "contentType": "image/svg+xml",
+      "bytes": 484,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "159116ebc373b0a15237bf69741feabf02b9a34cfcede4f2f6e0fa7c098f312e",
+      "ou": 5000,
+      "txHash": "90b8680c64a5b553bbf14426007f27d6f8951503ec874ae63e5fecdadbe7a57b"
+    },
+    {
+      "path": "/octra-id.svg",
+      "contentType": "image/svg+xml",
+      "bytes": 484,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "159116ebc373b0a15237bf69741feabf02b9a34cfcede4f2f6e0fa7c098f312e",
+      "ou": 5000,
+      "txHash": "7695d2ff01419fdc5b8660b36fa02d06052f5e698e9c3b9943ee70424837321f"
+    },
+    {
+      "path": "/poctra.svg",
+      "contentType": "image/svg+xml",
+      "bytes": 695,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "460b8ab46b2d082733f577aa17ab314486c1d9fb9c425d1661ccfcb023b29bca",
+      "ou": 5000,
+      "txHash": "ed138a6634e407fb4e3c67f4eeac99ebc137ff36eb68d668d4cb0dfc1084fd20"
+    },
+    {
+      "path": "/index.html",
+      "contentType": "text/html; charset=utf-8",
+      "bytes": 969,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "2871cf478a075a092d6c00b3e8b545e74a3e89619e92d534f0056c82875a9e9d",
+      "ou": 5000,
+      "txHash": "126a4165aec42aaa05693a45f321eebface8337ce73bda57db9ca112e4c22ad7"
+    }
+  ],
+  "deployedAt": "2026-07-06T00:18:32.568Z",
+  "updatedAt": "2026-07-06T01:15:01.199Z",
+  "updates": [
+    {
+      "network": "devnet",
+      "rpc": "http://165.227.225.79:8080",
+      "explorerHost": "https://devnet.octrascan.io",
+      "deployer": "oct5ZHUXnGVJwwZowQsQuVrEWmE6qqvDNgak9PorPYoctra",
+      "circleId": "oct2EPYSkqjD6f1zLuWhyP6G2rDGB8rZp1nNDirVCqp3drD",
+      "uri": "oct://oct2EPYSkqjD6f1zLuWhyP6G2rDGB8rZp1nNDirVCqp3drD/index.html",
+      "assets": [
+        {
+          "path": "/assets/fira_code_medium-DL69PIB5.ttf",
+          "contentType": "font/ttf",
+          "bytes": 283684,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "97091f90623661fb4f7979c10d188f30f4806d8ce326b0bc8d1acc79dcc20d8f",
+          "ou": 80000,
+          "txHash": "bab82e8ddffbcf6d303cca29036890daae21aa37b0b6b6fcd3a4f7237b6fe64a"
+        },
+        {
+          "path": "/assets/fira_code_regular-CzoQJ4O7.ttf",
+          "contentType": "font/ttf",
+          "bytes": 289624,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "5992ab9640e2df491b2f609467b1de60e8bc39b2c28db184342a0592d98f6117",
+          "ou": 80000,
+          "txHash": "8430421c54c544998b61ec3ff0d2bf7e9e7841f9b7662b406ff528b76ee2848b"
+        },
+        {
+          "path": "/assets/fira_code_semibold-CssfnJAs.ttf",
+          "contentType": "font/ttf",
+          "bytes": 304248,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "500c74eec6249b06d49aef922dd3e8fc754c70c3b3f7791cd7b1a09ca9a26140",
+          "ou": 80000,
+          "txHash": "363080bac8b629051e066d47838927de3a0210885c8769e768ce5a52c79413fc"
+        },
+        {
+          "path": "/assets/index-_0aZuKoj.js",
+          "contentType": "application/javascript; charset=utf-8",
+          "bytes": 197247,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "f923f0473dc3ca30b6485258ecc0e5aa7f0aa833a30caaebc8812d98bc0bd98f",
+          "ou": 80000,
+          "txHash": "bd4e0a22813a3ca0c035fe36df581893f81a50a2c1f652d72dca9b15e6769a9e"
+        },
+        {
+          "path": "/assets/index-DWG_HBKf.css",
+          "contentType": "text/css; charset=utf-8",
+          "bytes": 19571,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "a556779cf001b0a88241483b74b1a5249dd005a5d0a21187445993d80e0b50d5",
+          "ou": 20000,
+          "txHash": "f0e79ceb435d4a04ff4479b9159a2b73303e8c96b0efcaadd97083ba1a38642e"
+        },
+        {
+          "path": "/favicon.svg",
+          "contentType": "image/svg+xml",
+          "bytes": 484,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "159116ebc373b0a15237bf69741feabf02b9a34cfcede4f2f6e0fa7c098f312e",
+          "ou": 5000,
+          "txHash": "90b8680c64a5b553bbf14426007f27d6f8951503ec874ae63e5fecdadbe7a57b"
+        },
+        {
+          "path": "/octra-id.svg",
+          "contentType": "image/svg+xml",
+          "bytes": 484,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "159116ebc373b0a15237bf69741feabf02b9a34cfcede4f2f6e0fa7c098f312e",
+          "ou": 5000,
+          "txHash": "7695d2ff01419fdc5b8660b36fa02d06052f5e698e9c3b9943ee70424837321f"
+        },
+        {
+          "path": "/poctra.svg",
+          "contentType": "image/svg+xml",
+          "bytes": 695,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "460b8ab46b2d082733f577aa17ab314486c1d9fb9c425d1661ccfcb023b29bca",
+          "ou": 5000,
+          "txHash": "ed138a6634e407fb4e3c67f4eeac99ebc137ff36eb68d668d4cb0dfc1084fd20"
+        },
+        {
+          "path": "/index.html",
+          "contentType": "text/html; charset=utf-8",
+          "bytes": 969,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "2871cf478a075a092d6c00b3e8b545e74a3e89619e92d534f0056c82875a9e9d",
+          "ou": 5000,
+          "txHash": "126a4165aec42aaa05693a45f321eebface8337ce73bda57db9ca112e4c22ad7"
+        }
+      ],
+      "updatedAt": "2026-07-06T01:15:01.199Z"
+    }
+  ]
+}

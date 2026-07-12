@@ -16,6 +16,7 @@ enum class Glyph(@DrawableRes val resId: Int) {
     Assets(R.drawable.ic_assets),
     Explore(R.drawable.ic_explore),
     Trade(R.drawable.ic_trade),
+    Privacy(R.drawable.ic_privacy),
     Swap(R.drawable.ic_swap),
     SwapVertical(R.drawable.ic_swap_vertical),
     Settings(R.drawable.ic_settings),

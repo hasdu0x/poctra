@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>circle viewer</title>
+  <link rel="icon" href="assets/icon.svg">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="settings-shell">
+    <header class="page-header settings-hero">
+      <div class="settings-title">
+        <div class="brand-mark">c</div>
+        <div>
+          <h1>circle viewer settings</h1>
+          <p>Network, identity provider, and appearance.</p>
+        </div>
+      </div>
+      <button id="resetButton" class="small-button neutral" type="button">Reset</button>
+    </header>
+
+    <section class="settings-cards">
+      <button id="networkCard" class="setting-card" type="button">
+        <span class="setting-icon">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 12.55a11 11 0 0 1 14.08 0"></path>
+            <path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path>
+            <path d="M12 20h.01"></path>
+          </svg>
+        </span>
+        <span class="setting-copy">
+          <strong>RPC Network</strong>
+          <small id="networkSummary">Loading</small>
+        </span>
+      </button>
+
+      <button id="providerCard" class="setting-card" type="button">
+        <span class="setting-icon">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3 4 7v6c0 5 3.4 7.5 8 8 4.6-.5 8-3 8-8V7l-8-4Z"></path>
+            <path d="M9 12h6"></path>
+            <path d="M12 9v6"></path>
+          </svg>
+        </span>
+        <span class="setting-copy">
+          <strong>Identity Provider</strong>
+          <small id="providerSummary">Loading</small>
+        </span>
+      </button>
+
+      <button id="appearanceCard" class="setting-card" type="button">
+        <span class="setting-icon">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3a6 6 0 0 0 9 7.5A9 9 0 1 1 12 3Z"></path>
+          </svg>
+        </span>
+        <span class="setting-copy">
+          <strong>Appearance</strong>
+          <small id="themeSummary">Dark theme</small>
+        </span>
+      </button>
+    </section>
+
+    <div id="saveStatus" class="status-line"></div>
+  </main>
+
+  <dialog id="settingsModal" class="settings-modal">
+    <div class="modal-shell">
+      <header class="modal-header">
+        <div>
+          <h2 id="modalTitle">Settings</h2>
+          <p id="modalSubtitle"></p>
+        </div>
+        <button id="modalCloseButton" class="icon-button" type="button" aria-label="Close">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M18 6 6 18"></path>
+            <path d="m6 6 12 12"></path>
+          </svg>
+        </button>
+      </header>
+      <div id="modalBody" class="modal-body"></div>
+    </div>
+  </dialog>
+
+  <script type="module" src="src/options.js"></script>
+</body>
+</html>

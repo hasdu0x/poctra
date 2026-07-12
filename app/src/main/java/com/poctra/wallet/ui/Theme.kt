@@ -28,6 +28,7 @@ var BorderLine by mutableStateOf(Color(0xFFDDE4DF))
 var ErrorRed by mutableStateOf(Color(0xFFD34F4F))
 var Warning by mutableStateOf(Color(0xFFB7791F))
 var InfoBlue by mutableStateOf(Color(0xFF3F7FE8))
+var PrivacyPrimary by mutableStateOf(Color(0xFF0000DB))
 var PrimaryContent by mutableStateOf(Color(0xFF07110D))
 
 object Space {
@@ -186,6 +187,7 @@ fun PoctraTheme(
         ErrorRed = palette.error
         Warning = palette.warning
         InfoBlue = palette.info
+        PrivacyPrimary = if (darkTheme) Color(0xFF7373FF) else Color(0xFF0000DB)
         PrimaryContent = primaryContent
     }
 

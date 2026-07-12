@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -213,6 +214,7 @@ fun PoctraTextField(
     password: Boolean = false,
     leadingContent: (@Composable () -> Unit)? = null,
     trailingContent: (@Composable () -> Unit)? = null,
+    focusColor: Color = SurfaceRaised,
 ) {
     OutlinedTextField(
         value = value,
@@ -236,17 +238,17 @@ fun PoctraTextField(
             unfocusedTextColor = TextTertiary,
             focusedContainerColor = SurfaceStrong,
             unfocusedContainerColor = SurfaceStrong,
-            focusedBorderColor = SurfaceRaised,
+            focusedBorderColor = focusColor,
             unfocusedBorderColor = BorderLine,
-            focusedLabelColor = SurfaceRaised,
+            focusedLabelColor = focusColor,
             unfocusedLabelColor = TextSecondary,
-            cursorColor = SurfaceRaised,
+            cursorColor = focusColor,
             errorBorderColor = ErrorRed,
             errorLabelColor = ErrorRed,
             errorSupportingTextColor = ErrorRed,
-            focusedLeadingIconColor = SurfaceRaised,
+            focusedLeadingIconColor = focusColor,
             unfocusedLeadingIconColor = TextSecondary,
-            focusedTrailingIconColor = SurfaceRaised,
+            focusedTrailingIconColor = focusColor,
             unfocusedTrailingIconColor = TextSecondary,
         ),
     )
@@ -329,31 +331,30 @@ fun StateBanner(
     solid: Boolean = false,
 ) {
     val color = if (isError) ErrorRed else InfoBlue
-    Row(
-        modifier = modifier
+    val containerModifier = if (solid) {
+        modifier
             .clip(RoundedCornerShape(Radius.sm))
-            .background(if (solid) SurfaceStrong else color.copy(alpha = if (compact) 0.10f else 0.12f))
-            .border(1.dp, color.copy(alpha = if (compact) 0.28f else 0.36f), RoundedCornerShape(Radius.sm))
-            .padding(horizontal = if (compact) Space.x5 else Space.x6, vertical = if (compact) Space.x3 else Space.x5),
-        verticalAlignment = Alignment.CenterVertically,
+            .background(SurfaceStrong)
+            .border(1.dp, color.copy(alpha = 0.42f), RoundedCornerShape(Radius.sm))
+            .padding(horizontal = Space.x5, vertical = Space.x3)
+    } else {
+        modifier.padding(vertical = if (compact) Space.x2 else Space.x3)
+    }
+    Row(
+        modifier = containerModifier,
+        verticalAlignment = Alignment.Top,
     ) {
-        Box(
+        GlyphIcon(
+            glyph = Glyph.Info,
             modifier = Modifier
-                .size(if (compact) 22.dp else 28.dp)
-                .clip(RoundedCornerShape(Radius.md))
-                .background(color.copy(alpha = 0.14f)),
-            contentAlignment = Alignment.Center,
-        ) {
-            GlyphIcon(
-                glyph = Glyph.Info,
-                modifier = Modifier.size(if (compact) 14.dp else 16.dp),
-                color = color,
-            )
-        }
-        Spacer(Modifier.width(if (compact) Space.x4 else Space.x5))
+                .offset(y = (-1).dp)
+                .size(if (compact) 13.dp else 15.dp),
+            color = color,
+        )
+        Spacer(Modifier.width(if (compact) Space.x3 else Space.x4))
         Text(
             text = text,
-            color = if (isError) ErrorRed else TextTertiary,
+            color = color,
             style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.bodySmall,
             fontWeight = FontWeight.SemiBold,
             maxLines = if (compact) 2 else 3,
@@ -793,13 +794,13 @@ private fun DAppMetaChip(text: String, onClick: (() -> Unit)? = null) {
 }
 
 fun shortAddress(address: String): String {
-    if (address.length <= 16) return address
-    return "${address.take(8)}...${address.takeLast(4)}"
+    if (address.length <= 19) return address
+    return "${address.take(8)}...${address.takeLast(8)}"
 }
 
 fun headerShortAddress(address: String): String {
-    if (address.length <= 24) return address
-    return "${address.take(10)}...${address.takeLast(7)}"
+    if (address.length <= 25) return address
+    return "${address.take(11)}...${address.takeLast(11)}"
 }
 
 private fun formatDate(timestamp: Long): String {

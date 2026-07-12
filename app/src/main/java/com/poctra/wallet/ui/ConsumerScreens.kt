@@ -69,8 +69,6 @@ fun SecurityCenterScreen(controller: PoctraController) {
         glyph = Glyph.Fingerprint,
         onBack = controller::closeSettingsDetail,
     ) {
-        SecurityScoreCard(controller.securityRisks)
-        Spacer(Modifier.height(Space.x7))
         Column(verticalArrangement = Arrangement.spacedBy(Space.x5)) {
             controller.securityRisks.forEach { risk ->
                 ConsumerRiskRow(risk)
@@ -82,74 +80,29 @@ fun SecurityCenterScreen(controller: PoctraController) {
 }
 
 @Composable
-private fun SecurityScoreCard(risks: List<ConsumerRiskItem>) {
-    val highest = risks.maxByOrNull { it.level.ordinal }?.level ?: ConsumerRiskLevel.Safe
-    val score = when (highest) {
-        ConsumerRiskLevel.Safe -> "Good"
-        ConsumerRiskLevel.Notice -> "Review"
-        ConsumerRiskLevel.Warning -> "Caution"
-        ConsumerRiskLevel.Critical -> "Action"
-    }
-    val detail = when (highest) {
-        ConsumerRiskLevel.Safe -> "No major issues found."
-        ConsumerRiskLevel.Notice -> "A few items deserve attention."
-        ConsumerRiskLevel.Warning -> "Review warnings before high-value actions."
-        ConsumerRiskLevel.Critical -> "Fix critical protection items first."
-    }
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(Radius.md),
-        colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, riskColor(highest).copy(alpha = 0.55f)),
-    ) {
-        Row(
-            modifier = Modifier.padding(Space.x7),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(48.dp)
-                    .clip(RoundedCornerShape(Radius.md))
-                    .background(riskColor(highest).copy(alpha = 0.18f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                GlyphIcon(if (highest.ordinal >= ConsumerRiskLevel.Warning.ordinal) Glyph.Info else Glyph.Check, modifier = Modifier.size(24.dp), color = riskColor(highest))
-            }
-            Spacer(Modifier.width(Space.x6))
-            Column(Modifier.weight(1f)) {
-                Text(score, color = TextTertiary, style = MaterialTheme.typography.titleLarge)
-                Text(detail, color = TextSecondary, style = MaterialTheme.typography.labelSmall)
-            }
-        }
-    }
-}
-
-@Composable
 fun ConsumerRiskRow(risk: ConsumerRiskItem) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(Radius.md),
-        colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = Space.x3),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            modifier = Modifier.padding(Space.x6),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(36.dp)
-                    .clip(RoundedCornerShape(Radius.sm))
-                    .background(riskColor(risk.level).copy(alpha = 0.16f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                GlyphIcon(if (risk.level == ConsumerRiskLevel.Safe) Glyph.Check else Glyph.Info, modifier = Modifier.size(18.dp), color = riskColor(risk.level))
-            }
-            Spacer(Modifier.width(Space.x5))
-            Column(Modifier.weight(1f)) {
-                Text(risk.title, color = TextTertiary, fontWeight = FontWeight.SemiBold)
-                Text(risk.description, color = TextSecondary, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            }
+        GlyphIcon(
+            if (risk.level == ConsumerRiskLevel.Safe) Glyph.Check else Glyph.Info,
+            modifier = Modifier.size(15.dp),
+            color = riskColor(risk.level),
+        )
+        Spacer(Modifier.width(Space.x4))
+        Column(Modifier.weight(1f)) {
+            Text(risk.title, color = TextTertiary, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(Space.x1))
+            Text(
+                risk.description,
+                color = TextSecondary,
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
@@ -157,14 +110,14 @@ fun ConsumerRiskRow(risk: ConsumerRiskItem) {
 @Composable
 private fun SecurityCenterActionGrid(controller: PoctraController) {
     Row(horizontalArrangement = Arrangement.spacedBy(Space.x5)) {
-        MiniActionCard(
+        SecurityActionCard(
             title = "Backup",
             subtitle = "Keys",
             glyph = Glyph.Eye,
             modifier = Modifier.weight(1f),
             onClick = controller::openBackupSettings,
         )
-        MiniActionCard(
+        SecurityActionCard(
             title = "dApps",
             subtitle = "${controller.dApps.size}",
             glyph = Glyph.Explore,
@@ -174,14 +127,14 @@ private fun SecurityCenterActionGrid(controller: PoctraController) {
     }
     Spacer(Modifier.height(Space.x5))
     Row(horizontalArrangement = Arrangement.spacedBy(Space.x5)) {
-        MiniActionCard(
+        SecurityActionCard(
             title = "Contacts",
             subtitle = "${controller.addressBookContacts.size}",
             glyph = Glyph.AddressBook,
             modifier = Modifier.weight(1f),
             onClick = controller::openAddressBook,
         )
-        MiniActionCard(
+        SecurityActionCard(
             title = "Network",
             subtitle = controller.activeRpcNetwork?.networkType ?: "RPC",
             glyph = Glyph.Wifi,
@@ -192,7 +145,7 @@ private fun SecurityCenterActionGrid(controller: PoctraController) {
 }
 
 @Composable
-private fun MiniActionCard(
+private fun SecurityActionCard(
     title: String,
     subtitle: String,
     glyph: Glyph,
@@ -200,33 +153,40 @@ private fun MiniActionCard(
     onClick: () -> Unit,
 ) {
     Card(
-        modifier = modifier
-            .height(76.dp)
-            .clickable(onClick = onClick),
+        modifier = modifier.clickable(onClick = onClick),
         shape = RoundedCornerShape(Radius.md),
-        colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
+        colors = CardDefaults.cardColors(containerColor = SurfaceRaised.copy(alpha = 0.055f)),
+        border = BorderStroke(1.dp, SurfaceRaised.copy(alpha = 0.28f)),
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(Space.x5),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(34.dp)
-                    .clip(RoundedCornerShape(Radius.sm))
-                    .background(SurfaceMuted),
-                contentAlignment = Alignment.Center,
-            ) {
-                GlyphIcon(glyph, modifier = Modifier.size(17.dp), color = TextTertiary)
+        Column(Modifier.padding(Space.x6)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .background(SurfaceRaised.copy(alpha = 0.14f), RoundedCornerShape(Radius.md)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    GlyphIcon(glyph, Modifier.size(19.dp), SurfaceRaised)
+                }
+                Spacer(Modifier.weight(1f))
+                GlyphIcon(Glyph.Go, Modifier.size(14.dp), SurfaceRaised)
             }
-            Spacer(Modifier.width(Space.x4))
-            Column(Modifier.weight(1f)) {
-                Text(title, color = TextTertiary, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                Text(subtitle, color = TextSecondary, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
+            Spacer(Modifier.height(Space.x5))
+            Text(
+                title,
+                color = TextTertiary,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(Space.x2))
+            Text(
+                subtitle,
+                color = TextSecondary,
+                style = MaterialTheme.typography.labelSmall,
+                minLines = 1,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

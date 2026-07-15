@@ -1,8 +1,6 @@
-package com.poctra.wallet.ui
+﻿package com.poctra.wallet.ui
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
@@ -156,7 +154,6 @@ private fun SecurityActionCard(
         modifier = modifier.clickable(onClick = onClick),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceRaised.copy(alpha = 0.055f)),
-        border = BorderStroke(1.dp, SurfaceRaised.copy(alpha = 0.28f)),
     ) {
         Column(Modifier.padding(Space.x6)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -236,8 +233,7 @@ private fun HeaderRefreshAction(
             .width(50.dp)
             .height(44.dp)
             .clip(RoundedCornerShape(Radius.sm))
-            .background(if (enabled) SurfaceStrong else SurfaceMuted)
-            .border(1.dp, BorderLine, RoundedCornerShape(Radius.sm))
+            .background(if (enabled) SurfaceMuted.copy(alpha = 0.78f) else SurfaceMuted.copy(alpha = 0.48f))
             .clickable(enabled = enabled, onClick = onClick)
             .padding(vertical = Space.x2),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -271,7 +267,6 @@ private fun PortfolioPieCard(holdings: List<PortfolioHolding>) {
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(Space.x7), horizontalAlignment = Alignment.CenterHorizontally) {
             if (slices.isEmpty()) {
@@ -521,7 +516,6 @@ private fun UnifiedActivityRow(item: UnifiedActivityItem, onClick: (() -> Unit)?
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(Space.x6)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -591,7 +585,6 @@ fun PaymentRequestScreen(controller: PoctraController) {
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(Radius.md),
             colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-            border = BorderStroke(1.dp, BorderLine),
         ) {
             Column(Modifier.padding(Space.x7)) {
                 DetailLine("Receiver", current.label)
@@ -679,7 +672,6 @@ private fun PortfolioHoldingRow(holding: PortfolioHolding, onClick: () -> Unit) 
             .clickable(onClick = onClick),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Row(
             modifier = Modifier.padding(Space.x6),
@@ -730,7 +722,6 @@ fun PortfolioAssetHistoryScreen(controller: PoctraController) {
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(Radius.md),
             colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-            border = BorderStroke(1.dp, BorderLine),
         ) {
             Row(
                 modifier = Modifier.padding(Space.x6),
@@ -854,7 +845,6 @@ private fun ApprovalReviewRow(item: ApprovalReviewItem, busy: Boolean, onRevoke:
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, riskColor(item.level).copy(alpha = 0.45f)),
     ) {
         Column(Modifier.padding(horizontal = Space.x5, vertical = Space.x4)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -902,7 +892,6 @@ private fun CompactRevokeAction(
         modifier = Modifier
             .clip(RoundedCornerShape(Radius.sm))
             .background(ErrorRed.copy(alpha = if (enabled) 0.12f else 0.06f))
-            .border(1.dp, ErrorRed.copy(alpha = if (enabled) 0.42f else 0.18f), RoundedCornerShape(Radius.sm))
             .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = Space.x3, vertical = Space.x2),
         verticalAlignment = Alignment.CenterVertically,
@@ -940,12 +929,7 @@ private fun CompactDetailLine(label: String, value: String) {
 
 @Composable
 private fun CompactDetailSeparator() {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(1.dp)
-            .background(BorderLine.copy(alpha = 0.72f)),
-    )
+    Spacer(Modifier.height(Space.x2))
 }
 
 @Composable
@@ -1015,7 +999,6 @@ private fun DomainGuardRuleRow(rule: DomainGuardRule, onRemove: () -> Unit) {
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, if (rule.trusted) SurfaceRaised.copy(alpha = 0.45f) else ErrorRed.copy(alpha = 0.45f)),
     ) {
         Row(
             modifier = Modifier.padding(Space.x6),
@@ -1111,7 +1094,6 @@ private fun FundingProviderCard(provider: FundingProvider, controller: PoctraCon
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(Space.x6)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1184,7 +1166,6 @@ fun OctraProfileScreen(controller: PoctraController) {
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(Radius.md),
             colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-            border = BorderStroke(1.dp, SurfaceRaised.copy(alpha = 0.38f)),
         ) {
             Column(
                 modifier = Modifier
@@ -1248,7 +1229,6 @@ fun OctraProfileScreen(controller: PoctraController) {
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(Radius.md),
             colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-            border = BorderStroke(1.dp, BorderLine),
         ) {
             Column(Modifier.padding(Space.x6)) {
                 Text("Wallet Details", color = TextTertiary, fontWeight = FontWeight.SemiBold)
@@ -1277,7 +1257,6 @@ private fun ProfileBadge(text: String, accent: Color) {
         modifier = Modifier
             .clip(RoundedCornerShape(Radius.sm))
             .background(accent.copy(alpha = 0.14f))
-            .border(1.dp, accent.copy(alpha = 0.34f), RoundedCornerShape(Radius.sm))
             .padding(horizontal = Space.x4, vertical = Space.x2),
         color = accent,
         style = MaterialTheme.typography.labelSmall,
@@ -1301,7 +1280,6 @@ private fun ProfileAddressCard(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(Space.x6)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1332,7 +1310,6 @@ private fun ProfileAddressCard(
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(Radius.sm))
                     .background(SurfaceBase)
-                    .border(1.dp, BorderLine.copy(alpha = 0.72f), RoundedCornerShape(Radius.sm))
                     .padding(horizontal = Space.x5, vertical = Space.x4),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -1368,7 +1345,6 @@ private fun ProfileFact(label: String, value: String, modifier: Modifier = Modif
         modifier = modifier
             .clip(RoundedCornerShape(Radius.sm))
             .background(SurfaceBase)
-            .border(1.dp, BorderLine.copy(alpha = 0.72f), RoundedCornerShape(Radius.sm))
             .padding(Space.x5),
     ) {
         Text(label, color = TextSecondary, style = MaterialTheme.typography.labelSmall)

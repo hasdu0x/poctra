@@ -1,12 +1,10 @@
-package com.poctra.wallet.ui
+﻿package com.poctra.wallet.ui
 
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -82,7 +80,7 @@ fun PoctraButton(
     val shape = RoundedCornerShape(Radius.md)
     val visualCompact = !fullHeight && (compact || variant != ButtonVariant.Primary)
     val buttonHeight = if (visualCompact) 44.dp else 56.dp
-    val keyEdgeHeight = if (visualCompact) 1.dp else 2.dp
+    val keyEdgeHeight = 0.dp
     val contentIconSize = if (visualCompact) 16.dp else 18.dp
     val contentGap = if (visualCompact) Space.x3 else Space.x4
     val interactionSource = remember { MutableInteractionSource() }
@@ -130,8 +128,8 @@ fun PoctraButton(
 
     val edgeColor = when (variant) {
         ButtonVariant.Primary -> Color(0xFF047857)
-        ButtonVariant.Ghost -> BorderLine.copy(alpha = 0.85f)
-        ButtonVariant.Danger -> ErrorRed.copy(alpha = 0.55f)
+        ButtonVariant.Ghost -> SurfaceMuted
+        ButtonVariant.Danger -> ErrorRed.copy(alpha = 0.10f)
     }
     Box(
         modifier = modifier
@@ -169,9 +167,9 @@ fun PoctraButton(
                     .fillMaxWidth()
                     .height(buttonHeight - keyEdgeHeight),
                 shape = shape,
-                border = BorderStroke(1.dp, BorderLine.copy(alpha = if (enabled) 1f else 0.45f)),
+                border = null,
                 colors = ButtonDefaults.outlinedButtonColors(
-                    containerColor = SurfaceStrong,
+                    containerColor = SurfaceMuted,
                     contentColor = TextTertiary,
                     disabledContentColor = TextTertiary.copy(alpha = 0.35f),
                 ),
@@ -186,9 +184,9 @@ fun PoctraButton(
                     .fillMaxWidth()
                     .height(buttonHeight - keyEdgeHeight),
                 shape = shape,
-                border = BorderStroke(1.dp, ErrorRed.copy(alpha = if (enabled) 0.7f else 0.25f)),
+                border = null,
                 colors = ButtonDefaults.outlinedButtonColors(
-                    containerColor = SurfaceStrong,
+                    containerColor = ErrorRed.copy(alpha = 0.10f),
                     contentColor = ErrorRed,
                     disabledContentColor = ErrorRed.copy(alpha = 0.35f),
                 ),
@@ -216,10 +214,23 @@ fun PoctraTextField(
     trailingContent: (@Composable () -> Unit)? = null,
     focusColor: Color = SurfaceRaised,
 ) {
+    val shape = RoundedCornerShape(Radius.md)
+    var focused by remember { mutableStateOf(false) }
+    val focusScale by animateFloatAsState(
+        targetValue = if (focused) 0.988f else 1f,
+        animationSpec = tween(150, easing = FastOutSlowInEasing),
+        label = "poctraFieldFocusScale",
+    )
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .onFocusChanged { focused = it.isFocused }
+            .graphicsLayer {
+                scaleX = focusScale
+                scaleY = focusScale
+            },
         label = { Text(label, style = MaterialTheme.typography.labelMedium) },
         placeholder = placeholder?.let {
             { Text(it, color = TextSecondary.copy(alpha = 0.78f), style = MaterialTheme.typography.bodyMedium) }
@@ -232,18 +243,18 @@ fun PoctraTextField(
         trailingIcon = trailingContent,
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
         visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
-        shape = RoundedCornerShape(Radius.md),
+        shape = shape,
         colors = OutlinedTextFieldDefaults.colors(
             focusedTextColor = TextTertiary,
             unfocusedTextColor = TextTertiary,
             focusedContainerColor = SurfaceStrong,
             unfocusedContainerColor = SurfaceStrong,
-            focusedBorderColor = focusColor,
-            unfocusedBorderColor = BorderLine,
+            focusedBorderColor = focusColor.copy(alpha = 0.62f),
+            unfocusedBorderColor = BorderLine.copy(alpha = 0.42f),
             focusedLabelColor = focusColor,
             unfocusedLabelColor = TextSecondary,
             cursorColor = focusColor,
-            errorBorderColor = ErrorRed,
+            errorBorderColor = ErrorRed.copy(alpha = 0.68f),
             errorLabelColor = ErrorRed,
             errorSupportingTextColor = ErrorRed,
             focusedLeadingIconColor = focusColor,
@@ -335,7 +346,6 @@ fun StateBanner(
         modifier
             .clip(RoundedCornerShape(Radius.sm))
             .background(SurfaceStrong)
-            .border(1.dp, color.copy(alpha = 0.42f), RoundedCornerShape(Radius.sm))
             .padding(horizontal = Space.x5, vertical = Space.x3)
     } else {
         modifier.padding(vertical = if (compact) Space.x2 else Space.x3)
@@ -377,12 +387,7 @@ fun SecurityOptionCard(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.md))
-            .background(SurfaceStrong)
-            .border(
-                width = if (focused) 2.dp else 1.dp,
-                color = if (focused) SurfaceRaised else BorderLine.copy(alpha = if (enabled) 1f else 0.55f),
-                shape = RoundedCornerShape(Radius.md),
-            )
+            .background(if (focused) SurfaceRaised.copy(alpha = 0.10f) else if (enabled) SurfaceStrong else SurfaceMuted)
             .clickable(enabled = enabled, onClick = onClick)
             .onFocusChanged { focused = it.isFocused }
             .padding(Space.x7),
@@ -435,8 +440,7 @@ fun IconCircleButton(
                 scaleY = scale
             }
             .clip(RoundedCornerShape(Radius.md))
-            .background(if (enabled) SurfaceStrong else SurfaceMuted)
-            .border(1.dp, BorderLine.copy(alpha = 0.82f), RoundedCornerShape(Radius.md)),
+            .background(if (enabled) SurfaceMuted.copy(alpha = 0.82f) else SurfaceMuted.copy(alpha = 0.48f)),
     ) {
         GlyphIcon(
             glyph = glyph,
@@ -460,12 +464,6 @@ fun InlineListAction(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center,
     ) {
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .height(1.dp)
-                .background(BorderLine.copy(alpha = 0.62f)),
-        )
         Row(
             modifier = Modifier
                 .padding(horizontal = Space.x3)
@@ -497,12 +495,6 @@ fun InlineListAction(
                 maxLines = 1,
             )
         }
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .height(1.dp)
-                .background(BorderLine.copy(alpha = 0.62f)),
-        )
     }
 }
 
@@ -523,7 +515,6 @@ fun NetworkBadge(text: String, state: String? = null, modifier: Modifier = Modif
         modifier = modifier
             .clip(RoundedCornerShape(Radius.md))
             .background(borderColor.copy(alpha = 0.10f))
-            .border(1.dp, borderColor.copy(alpha = 0.30f), RoundedCornerShape(Radius.md))
             .padding(horizontal = Space.x6, vertical = Space.x3),
         color = borderColor,
         style = MaterialTheme.typography.labelSmall,
@@ -537,7 +528,6 @@ fun TokenRow(token: TokenBalance, modifier: Modifier = Modifier) {
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.sm),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Row(
             modifier = Modifier.padding(Space.x7),
@@ -591,7 +581,6 @@ fun OctraTokenRow(
             .clickable(onClick = onSend),
         shape = RoundedCornerShape(Radius.sm),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Row(
             modifier = Modifier.padding(Space.x7),
@@ -641,7 +630,6 @@ fun DAppRow(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(
             modifier = Modifier.padding(Space.x7),
@@ -681,7 +669,6 @@ fun DAppRow(
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(Radius.sm))
                     .background(SurfaceBase)
-                    .border(1.dp, BorderLine, RoundedCornerShape(Radius.sm))
                     .padding(horizontal = Space.x5, vertical = Space.x4),
                 color = TextSecondary,
                 style = MaterialTheme.typography.bodyMedium,
@@ -730,7 +717,6 @@ private fun DAppRevokeAction(onClick: () -> Unit) {
         modifier = Modifier
             .clip(RoundedCornerShape(Radius.sm))
             .background(ErrorRed.copy(alpha = 0.12f))
-            .border(1.dp, ErrorRed.copy(alpha = 0.42f), RoundedCornerShape(Radius.sm))
             .clickable(onClick = onClick)
             .padding(horizontal = Space.x3, vertical = Space.x2),
         verticalAlignment = Alignment.CenterVertically,
@@ -754,7 +740,6 @@ private fun DAppRiskLabel(text: String) {
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.sm))
             .background(Warning.copy(alpha = 0.14f))
-            .border(1.dp, Warning.copy(alpha = 0.45f), RoundedCornerShape(Radius.sm))
             .padding(horizontal = Space.x4, vertical = Space.x3),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -771,11 +756,6 @@ private fun DAppMetaChip(text: String, onClick: (() -> Unit)? = null) {
         modifier = Modifier
             .clip(RoundedCornerShape(Radius.sm))
             .background(if (onClick != null) SurfaceRaised.copy(alpha = 0.14f) else SurfaceMuted)
-            .border(
-                1.dp,
-                if (onClick != null) SurfaceRaised.copy(alpha = 0.45f) else BorderLine,
-                RoundedCornerShape(Radius.sm),
-            )
             .then(
                 if (onClick != null) {
                     Modifier

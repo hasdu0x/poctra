@@ -81,11 +81,12 @@ enum class TradeChartTimeframe(
     val apiFrame: String,
     val aggregate: Int,
     val limit: Int,
+    val clientBucketSeconds: Long? = null,
 ) {
     H1("1H", "hour", 1, 32),
     H4("4H", "hour", 4, 32),
     D1("1D", "day", 1, 32),
-    W1("1W", "day", 7, 24),
+    W1("1W", "day", 1, 168, 7 * 24 * 60 * 60L),
 }
 
 data class TradeCandle(
@@ -322,7 +323,7 @@ class TradeRepository {
             ?.optJSONObject("attributes")
             ?.optJSONArray("ohlcv_list")
             ?: JSONArray()
-        buildList {
+        val candles = buildList {
             for (index in 0 until list.length()) {
                 val row = list.optJSONArray(index) ?: continue
                 if (row.length() < 5) continue
@@ -339,6 +340,7 @@ class TradeRepository {
         }
             .filter { it.open > 0.0 && it.high > 0.0 && it.low > 0.0 && it.close > 0.0 }
             .sortedBy { it.timestamp }
+        aggregateTradeCandles(candles, timeframe)
             .also { require(it.isNotEmpty()) { "wOCT chart data unavailable." } }
     }
 
@@ -948,6 +950,29 @@ class TradeRepository {
         private val SwapGasLimit = BigInteger.valueOf(450_000L)
         private val MaxUint256Word = "f".repeat(64)
     }
+}
+
+internal fun aggregateTradeCandles(
+    candles: List<TradeCandle>,
+    timeframe: TradeChartTimeframe,
+): List<TradeCandle> {
+    val bucketSeconds = timeframe.clientBucketSeconds ?: return candles
+    return candles
+        .sortedBy { it.timestamp }
+        .groupBy { it.timestamp / bucketSeconds }
+        .values
+        .mapNotNull { bucket ->
+            val ordered = bucket.sortedBy { it.timestamp }
+            val first = ordered.firstOrNull() ?: return@mapNotNull null
+            val last = ordered.last()
+            TradeCandle(
+                timestamp = first.timestamp,
+                open = first.open,
+                high = ordered.maxOf { it.high },
+                low = ordered.minOf { it.low },
+                close = last.close,
+            )
+        }
 }
 
 private data class TradePool(

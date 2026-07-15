@@ -1,0 +1,5680 @@
+import { useState, useEffect, useRef } from 'react';
+import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger, SheetDescription } from '@/components/ui/sheet';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
+import { Avatar } from '@/components/ui/avatar';
+import { Badge } from '@/components/ui/badge';
+import { ScrollArea, ScrollAreaContent } from '@/components/ui/scroll-area';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+
+import {
+  Send,
+  History,
+  Lock,
+  Copy,
+  Gift,
+  Globe,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  Plus,
+  Trash2,
+  Wifi,
+  WifiOff,
+  Menu,
+  RotateCcw,
+  Eye,
+  EyeOff,
+  Key,
+  Unlock,
+  QrCode,
+  ExternalLink,
+  ArrowUpRight,
+  ArrowDownLeft,
+  Check,
+  Wallet as WalletIcon,
+  BookUser,
+  Layers,
+  FileText,
+  Coins,
+  X,
+  RefreshCw,
+  Loader2,
+  AlertCircle,
+  Image,
+} from 'lucide-react';
+import { ExtensionStorageManager } from '../utils/extensionStorage';
+import { MultiSend } from './MultiSend';
+import { SendTransaction } from './SendTransaction';
+import { PrivateTransfer } from './PrivateTransfer';
+import { ClaimTransfers } from './ClaimTransfers';
+import { FileMultiSend } from './FileMultiSend';
+import { UnifiedHistory } from './UnifiedHistory';
+import { ModeToggle } from './ModeToggle';
+import { resetModeSwitchReminder } from './ModeSwitchConfirmDialog';
+import { ThemeToggle } from './ThemeToggle';
+import { TransactionReviewDialog } from './TransactionReviewDialog';
+import { AddWalletPopup } from './AddWalletPopup';
+import { RPCProviderManager } from './RPCProviderManager';
+import { ConnectedDAppsManager } from './ConnectedDAppsManager';
+import { ExportPrivateKeys } from './ExportPrivateKeys';
+import { ReceiveDialog } from './ReceiveDialog';
+import { EncryptBalanceDialog } from './EncryptBalanceDialog';
+import { DecryptBalanceDialog } from './DecryptBalanceDialog';
+import { AddressBook } from './AddressBook';
+import { DraggableWalletList } from './DraggableWalletList';
+import { WalletDisplayName } from './WalletLabelEditor';
+import { BalancePieChart } from './BalancePieChart';
+import { OctraAssets } from './OctraAssets';
+import { PoctraDashboardShell, type PoctraSection } from './PoctraDashboardShell';
+import { PoctraPopupDashboard } from './PoctraPopupDashboard';
+import { Wallet, TransactionDetails, EncryptedBalanceResponse, PendingTransaction } from '../types/wallet';
+
+type TxDetails = TransactionDetails | PendingTransaction;
+
+function isTransactionDetails(tx: TxDetails): tx is TransactionDetails {
+  return 'tx_hash' in tx;
+}
+
+function getTxHash(tx: TxDetails): string {
+  return isTransactionDetails(tx) ? tx.tx_hash : tx.hash;
+}
+
+function getTxStatus(tx: TxDetails): string {
+  return isTransactionDetails(tx) ? tx.status : (tx.stage_status || 'pending');
+}
+
+function getTxTimestamp(tx: TxDetails): number {
+  return isTransactionDetails(tx) ? tx.timestamp : tx.timestamp;
+}
+
+function getTxFrom(tx: TxDetails): string {
+  return isTransactionDetails(tx) ? tx.from : tx.from;
+}
+
+function getTxTo(tx: TxDetails): string {
+  return isTransactionDetails(tx) ? tx.to : tx.to;
+}
+
+function getTxAmount(tx: TxDetails): string {
+  return isTransactionDetails(tx) ? tx.amount : String(tx.amount);
+}
+
+function getTxOu(tx: TxDetails): string {
+  return isTransactionDetails(tx) ? tx.ou : tx.ou;
+}
+
+function getTxNonce(tx: TxDetails): number {
+  return isTransactionDetails(tx) ? tx.nonce : tx.nonce;
+}
+
+function getTxMessage(tx: TxDetails): string | null {
+  return isTransactionDetails(tx) ? tx.message : tx.message ?? null;
+}
+import { WalletManager } from '../utils/walletManager';
+import { fetchBalance, getTransactionHistory, fetchEncryptedBalance, fetchTransactionDetails, fetchPendingTransactionByHash, getPendingPrivateTransfers, apiCache, TxCountPoller, invalidateCacheForNetworkSwitch } from '../utils/api';
+import { cacheService } from '../services/cacheService';
+import { getEVMWalletData, EVMWalletData, deriveEvmFromOctraKey } from '../utils/evmDerive';
+import {
+  getEVMBalance, DEFAULT_EVM_NETWORKS, EVMNetwork, getActiveEVMNetwork,
+  setActiveEVMNetwork, checkEVMRpcStatus, getEVMRpcUrl, saveEVMProvider,
+  getEVMGasPrice, getRpcDisplayName, sendEVMTransaction, EVMTransaction,
+  calculateUSDValue, getAllNetworks, getNativeTokenPrice,
+  ERC20Token, NFTToken, getCustomTokens, saveCustomToken, getCustomNFTs, saveCustomNFT,
+  getERC20Balance, getERC20TokenInfo, getNFTMetadata, checkNFTOwnership,
+  sendERC20Transaction, sendNFTTransaction, COMMON_TOKENS,
+  saveCustomNetwork, removeCustomNetwork,
+  getAllEVMTransactions,
+  getEvmInfuraKey, saveEvmInfuraKey, getEvmEtherscanKey, saveEvmEtherscanKey,
+} from '../utils/evmRpc';
+
+import { useToast } from '@/hooks/use-toast';
+import { OperationMode, saveOperationMode, loadOperationMode, isPrivateModeAvailable } from '../utils/modeStorage';
+import { verifyPassword } from '../utils/password';
+import { useAddressBook } from '../hooks/useAddressBook';
+import { useOctPrice, formatUsd } from '../hooks/useOctPrice';
+import { addressBook } from '../utils/addressBook';
+import { getTxExplorerUrl, getAddressExplorerUrl, getExplorerName } from '../utils/explorer';
+import { startMinDuration } from '../utils/minLoading';
+
+interface Transaction {
+  hash: string;
+  from: string;
+  to: string;
+  amount: number;
+  timestamp: number;
+  status: 'confirmed' | 'pending' | 'failed';
+  type: 'sent' | 'received';
+  message?: string;
+  op_type?: string;
+}
+
+interface WalletDashboardProps {
+  wallet: Wallet;
+  wallets: Wallet[];
+  onDisconnect: () => void;
+  onSwitchWallet: (wallet: Wallet) => void;
+  onAddWallet: (wallet: Wallet) => void;
+  onRemoveWallet: (wallet: Wallet) => void;
+  onReorderWallets: (wallets: Wallet[]) => void;
+  onExpandedView?: (mode?: 'evm') => void;
+  isPopupMode?: boolean;
+  initialEvmMode?: boolean;
+  onEvmReady?: (enterFn: () => void) => void;
+}
+
+type ActivityType = 'standard' | 'encrypt' | 'decrypt' | 'stealth' | 'claim' | 'contract';
+
+function toActivityType(opType: string | undefined): ActivityType {
+  const valid: ActivityType[] = ['standard', 'encrypt', 'decrypt', 'stealth', 'claim', 'contract'];
+  return valid.includes(opType as ActivityType) ? (opType as ActivityType) : 'standard';
+}
+
+function toActivityFinality(status: string): 'pending' | 'confirmed' | 'rejected' {
+  return status === 'confirmed' ? 'confirmed' : 'pending';
+}
+
+export function WalletDashboard({ 
+  wallet, 
+  wallets, 
+  onDisconnect, 
+  onSwitchWallet, 
+  onAddWallet, 
+  onRemoveWallet,
+  onReorderWallets,
+  onExpandedView,
+  isPopupMode = false,
+  initialEvmMode = false,
+  onEvmReady
+}: WalletDashboardProps) {
+  const [activeTab, setActiveTab] = useState<string>('balance');
+  const [balance, setBalance] = useState<number | null>(null);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [isLoadingBalance, setIsLoadingBalance] = useState(true);
+  const [balanceError, setBalanceError] = useState(false);
+  const [isLoadingEncryptedBalance, setIsLoadingEncryptedBalance] = useState(true);
+  const [isLoadingTransactions, setIsLoadingTransactions] = useState(true);
+  const [isRefreshingOctraHistory, setIsRefreshingOctraHistory] = useState(false);
+  const [nonce, setNonce] = useState(0);
+  const [walletNonces, setWalletNonces] = useState<Record<string, number | null>>({});
+  const [showAddWalletDialog, setShowAddWalletDialog] = useState(false);
+  const [addWalletInitialScreen, setAddWalletInitialScreen] = useState<'menu' | 'create' | 'import'>('menu');
+  const [showRPCManager, setShowRPCManager] = useState(false);
+  const [showDAppsManager, setShowDAppsManager] = useState(false);
+  const [walletToDelete, setWalletToDelete] = useState<Wallet | null>(null);
+  const [showLockConfirm, setShowLockConfirm] = useState(false);
+  const [showMobileMenu, setShowMobileMenu] = useState(false);
+  const [showWalletSelector, setShowWalletSelector] = useState(false);
+  const [showWalletSidebar, setShowWalletSidebar] = useState(true); // Sidebar toggle for expanded mode
+  const [showHistorySidebar, setShowHistorySidebar] = useState(true);
+  const [bothPanelsHidden, setBothPanelsHidden] = useState(false); // Toggle for hiding both panels
+  const [sidebarWidth, setSidebarWidth] = useState(310); // Default 350px
+  const [isResizing, setIsResizing] = useState(false);
+  const MIN_SIDEBAR_WIDTH = 310;
+  const MAX_SIDEBAR_WIDTH = 450;
+  const AUTO_HIDE_THRESHOLD = 200; // Auto hide when dragged below this width
+  
+  // History sidebar state (right side)
+  const [historySidebarWidth, setHistorySidebarWidth] = useState(360);
+  const [isResizingHistory, setIsResizingHistory] = useState(false);
+  const MIN_HISTORY_WIDTH = 360;
+  const MAX_HISTORY_WIDTH = 360;
+  const AUTO_HIDE_HISTORY_THRESHOLD = 200;
+  
+  // Computed sidebar left position for all fixed elements
+  const sidebarLeftOffset = showWalletSidebar ? `${sidebarWidth}px` : '2px';
+  // Computed history sidebar right position
+  const historySidebarRightOffset = showHistorySidebar ? `${historySidebarWidth}px` : '2px';
+  
+  // Toggle both panels function
+  const toggleBothPanels = () => {
+    if (bothPanelsHidden) {
+      // Show both panels
+      setShowWalletSidebar(true);
+      setShowHistorySidebar(true);
+      setBothPanelsHidden(false);
+    } else {
+      // Hide both panels
+      setShowWalletSidebar(false);
+      setShowHistorySidebar(false);
+      setBothPanelsHidden(true);
+    }
+  };
+  
+  // Popup mode fullscreen states
+  const [popupScreen, setPopupScreen] = useState<'main' | 'encrypt' | 'decrypt' | 'send' | 'receive' | 'claim' | 'txDetail' | 'assets'>('main');
+  const [popupBottomTab, setPopupBottomTab] = useState<'activity' | 'assets'>('activity');
+  const [poctraSection, setPoctraSection] = useState<PoctraSection>('overview');
+  const [showReceiveDialog, setShowReceiveDialog] = useState(false);
+  const [selectedTxHash, setSelectedTxHash] = useState<string | null>(null);
+  const [selectedTxDetails, setSelectedTxDetails] = useState<TxDetails | null>(null);
+  const [loadingTxDetails, setLoadingTxDetails] = useState(false);
+  const [isRefreshingData, setIsRefreshingData] = useState(false);
+  const [encryptedBalance, setEncryptedBalance] = useState<EncryptedBalanceResponse | null>(null);
+  const [isDecryptingBalance, setIsDecryptingBalance] = useState(false); // spinner for pie chart
+  const [rpcStatus, setRpcStatus] = useState<'connected' | 'disconnected' | 'checking' | 'connecting'>('checking');
+  const [latestEpoch, setLatestEpoch] = useState<number | null>(null);
+  const [operationMode, setOperationMode] = useState<OperationMode>('public');
+  const [pendingTransfersCount, setPendingTransfersCount] = useState<number>(0);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [resetPassword, setResetPassword] = useState('');
+  const [showResetPassword, setShowResetPassword] = useState(false);
+  const [isVerifyingReset, setIsVerifyingReset] = useState(false);
+  const [showExportKeys, setShowExportKeys] = useState(false);
+  const [showEvmExportKey, setShowEvmExportKey] = useState(false);
+  const [evmExportKeyVisible, setEvmExportKeyVisible] = useState(false);
+  const [evmExportKeyCopied, setEvmExportKeyCopied] = useState(false);
+  const [evmExportKeyHex, setEvmExportKeyHex] = useState('');
+  // Expanded mode send modal states
+  const [expandedSendModal, setExpandedSendModal] = useState<'standard' | 'multi' | 'bulk' | null>(null);
+  const [sendModalAnimating, setSendModalAnimating] = useState(false);
+  const [sendModalClosing, setSendModalClosing] = useState(false);
+  // Expanded mode Octra Assets modal
+  const [expandedAssetsOpen, setExpandedAssetsOpen] = useState(false);
+  const [bulkResetTrigger, setBulkResetTrigger] = useState(0);
+  const [multiResetTrigger, setMultiResetTrigger] = useState(0);
+  const [copiedField, setCopiedField] = useState<string | null>(null);
+  // Expanded mode encrypt/decrypt modal states (for private mode)
+  const [expandedPrivateModal, setExpandedPrivateModal] = useState<'encrypt' | 'decrypt' | null>(null);
+  const [privateModalAnimating, setPrivateModalAnimating] = useState(false);
+  // Claim screen animation states
+  const [claimAnimating, setClaimAnimating] = useState(false);
+  const [claimClosing, setClaimClosing] = useState(false);
+  const [privateModalClosing, setPrivateModalClosing] = useState(false);
+  // Expanded mode transaction details inline screen
+  const [showExpandedTxDetails, setShowExpandedTxDetails] = useState(false);
+  const [txDetailsAnimating, setTxDetailsAnimating] = useState(false);
+  const [txDetailsClosing, setTxDetailsClosing] = useState(false);
+  const [prevHistoryWidth, setPrevHistoryWidth] = useState<number | null>(null);
+  // Address Book state
+  const [showAddressBook, setShowAddressBook] = useState(false);
+  const [addressBookPrefilledAddress, setAddressBookPrefilledAddress] = useState<string>('');
+  // EVM Mode state (integrated mode, not popup)
+  const [evmMode, setEvmMode] = useState(initialEvmMode);
+  const [evmWallets, setEvmWallets] = useState<(EVMWalletData & { balance: string | null; isLoading: boolean })[]>([]);
+  const [selectedEVMWallet, setSelectedEVMWallet] = useState<(EVMWalletData & { balance: string | null; isLoading: boolean }) | null>(null);
+  const [evmNetwork, setEvmNetwork] = useState<EVMNetwork>(getActiveEVMNetwork());
+  const [allEvmNetworks, setAllEvmNetworks] = useState<EVMNetwork[]>(getAllNetworks());
+  const [evmRpcStatus, setEvmRpcStatus] = useState<'connected' | 'disconnected' | 'checking'>('checking');
+  const [evmGasPrice, setEvmGasPrice] = useState<string | null>(null);
+  const [evmTransactions, setEvmTransactions] = useState<EVMTransaction[]>([]);
+  const [isLoadingEvmTxs, setIsLoadingEvmTxs] = useState(false);
+  const [ethPrice, setEthPrice] = useState<number | null>(null);
+  const [showEvmSendDialog, setShowEvmSendDialog] = useState(false);
+  const [showEvmSendReview, setShowEvmSendReview] = useState(false);
+  const [evmSendTo, setEvmSendTo] = useState('');
+  const [evmSendAmount, setEvmSendAmount] = useState('');
+  const [isEvmSending, setIsEvmSending] = useState(false);
+  const [evmSendError, setEvmSendError] = useState<string | null>(null);
+  const [evmTxHash, setEvmTxHash] = useState<string | null>(null);
+  const [showEvmRpcManager, setShowEvmRpcManager] = useState(false);
+  const [evmCustomRpcUrl, setEvmCustomRpcUrl] = useState('');
+  // EVM API key state (Infura + Etherscan — stored in chrome.storage, never in bundle)
+  const [evmInfuraKey, setEvmInfuraKey] = useState('');
+  const [evmEtherscanKey, setEvmEtherscanKey] = useState('');
+  const [evmApiKeysSaved, setEvmApiKeysSaved] = useState(false);
+  // EVM Tokens & NFTs state
+  const [evmTokens, setEvmTokens] = useState<ERC20Token[]>([]);
+  const activeWalletRef = useRef<Wallet | null>(null);
+  const activeFetchIdRef = useRef(0);
+  const optimisticTxDetailsRef = useRef<Map<string, TxDetails>>(new Map());
+  
+              
+  useEffect(() => {
+    activeWalletRef.current = wallet;
+  }, [wallet]);
+
+  const [evmNfts, setEvmNfts] = useState<NFTToken[]>([]);
+  const [isLoadingEvmTokens, setIsLoadingEvmTokens] = useState(false);
+  const [evmActiveTab, setEvmActiveTab] = useState<'tokens' | 'nfts'>('tokens');
+  const [showEvmImportToken, setShowEvmImportToken] = useState(false);
+  const [showEvmImportNFT, setShowEvmImportNFT] = useState(false);
+  const [evmImportTokenAddress, setEvmImportTokenAddress] = useState('');
+  const [evmImportTokenInfo, setEvmImportTokenInfo] = useState<{ name: string; symbol: string; decimals: number } | null>(null);
+  const [isLoadingEvmTokenInfo, setIsLoadingEvmTokenInfo] = useState(false);
+  const [evmImportNFTAddress, setEvmImportNFTAddress] = useState('');
+  const [evmImportNFTTokenId, setEvmImportNFTTokenId] = useState('');
+  const [evmImportNFTInfo, setEvmImportNFTInfo] = useState<{ name: string; symbol: string; imageUrl?: string } | null>(null);
+  const [isLoadingEvmNFTInfo, setIsLoadingEvmNFTInfo] = useState(false);
+  const [evmSendType, setEvmSendType] = useState<'native' | 'token' | 'nft'>('native');
+  const [selectedEvmToken, setSelectedEvmToken] = useState<ERC20Token | null>(null);
+  const [selectedEvmNFT, setSelectedEvmNFT] = useState<NFTToken | null>(null);
+  // Add Network state
+  const [newEvmNetwork, setNewEvmNetwork] = useState({ name: '', rpcUrl: '', chainId: '', symbol: '', explorer: '' });
+  const [isAddingEvmNetwork, setIsAddingEvmNetwork] = useState(false);
+
+  // Scanner/Explorer — dynamic based on active network (mainnet/devnet)
+  const scannerUrl = getTxExplorerUrl;
+  const scannerName = getExplorerName();
+  const scannerAddressUrl = getAddressExplorerUrl;
+  // Track history panel state before hiding for multi/bulk send
+  const [historyPanelWasOpen, setHistoryPanelWasOpen] = useState(false);
+  // Message expansion state for transaction details
+  const [showFullMessage, setShowFullMessage] = useState(false);
+  const { autoLabelWallets, getWalletDisplayName, getContactByAddress } = useAddressBook();
+  const octPrice = useOctPrice();
+  const { toast } = useToast();
+
+  // Handle add to address book from AddressInput
+  const handleAddToAddressBook = (address: string) => {
+    setAddressBookPrefilledAddress(address);
+    setShowAddressBook(true);
+  };
+
+  // Reset prefilled address when dialog closes
+  useEffect(() => {
+    if (!showAddressBook) {
+      setAddressBookPrefilledAddress('');
+    }
+  }, [showAddressBook]);
+
+  // Handle opening send modal with animation
+  const openSendModal = (type: 'standard' | 'multi' | 'bulk') => {
+    setSendModalAnimating(true);
+    setExpandedSendModal(type);
+    // Hide history panel for multi/bulk send, save previous state
+    if (type === 'multi' || type === 'bulk') {
+      setHistoryPanelWasOpen(showHistorySidebar);
+      setShowHistorySidebar(false);
+    }
+    setTimeout(() => setSendModalAnimating(false), 300);
+  };
+
+  // Handle closing send modal with animation
+  const closeSendModal = () => {
+    setSendModalClosing(true);
+    // Restore history panel if it was open before multi/bulk send
+    if (expandedSendModal === 'multi' || expandedSendModal === 'bulk') {
+      if (historyPanelWasOpen) {
+        setShowHistorySidebar(true);
+      }
+    }
+    setTimeout(() => {
+      setExpandedSendModal(null);
+      setSendModalClosing(false);
+    }, 200);
+  };
+
+  // Handle opening claim screen with animation
+  const openClaimScreen = () => {
+    setClaimAnimating(true);
+    setActiveTab('claim');
+    setTimeout(() => setClaimAnimating(false), 300);
+  };
+
+  // Handle closing claim screen with animation
+  const closeClaimScreen = () => {
+    setClaimClosing(true);
+    setTimeout(() => {
+      setActiveTab('balance');
+      setClaimClosing(false);
+    }, 200);
+  };
+
+  // Handle opening private modal (encrypt/decrypt) with animation
+  const openPrivateModal = (type: 'encrypt' | 'decrypt') => {
+    setPrivateModalAnimating(true);
+    setExpandedPrivateModal(type);
+    setTimeout(() => setPrivateModalAnimating(false), 300);
+  };
+
+  // Handle closing private modal with animation
+  const closePrivateModal = () => {
+    setPrivateModalClosing(true);
+    setTimeout(() => {
+      setExpandedPrivateModal(null);
+      setPrivateModalClosing(false);
+    }, 200);
+  };
+
+  // Auto-label wallets on mount and when wallets change
+  useEffect(() => {
+    if (wallets.length > 0) {
+      autoLabelWallets(wallets.map(w => ({ address: w.address, type: w.type })));
+    }
+  }, [wallets, autoLabelWallets]);
+
+  // Handle sidebar resize
+  useEffect(() => {
+    if (!isResizing) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const newWidth = e.clientX;
+      if (newWidth < AUTO_HIDE_THRESHOLD) {
+        // Auto hide when dragged too far left
+        setShowWalletSidebar(false);
+        setSidebarWidth(MIN_SIDEBAR_WIDTH);
+        setIsResizing(false);
+      } else if (newWidth >= MIN_SIDEBAR_WIDTH && newWidth <= MAX_SIDEBAR_WIDTH) {
+        setSidebarWidth(newWidth);
+      }
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, [isResizing]);
+
+  // Handle history sidebar resize (right side)
+  useEffect(() => {
+    if (!isResizingHistory) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const newWidth = window.innerWidth - e.clientX;
+      if (newWidth < AUTO_HIDE_HISTORY_THRESHOLD) {
+        // Auto hide when dragged too far right
+        setShowHistorySidebar(false);
+        setHistorySidebarWidth(MIN_HISTORY_WIDTH);
+        setIsResizingHistory(false);
+      } else if (newWidth >= MIN_HISTORY_WIDTH && newWidth <= MAX_HISTORY_WIDTH) {
+        setHistorySidebarWidth(newWidth);
+      }
+    };
+
+    const handleMouseUp = () => {
+      setIsResizingHistory(false);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, [isResizingHistory]);
+
+  // Determine if private mode is available (encrypted balance > 0 OR pending transfers > 0)
+  const privateEnabled = isPrivateModeAvailable(encryptedBalance?.encrypted || 0, pendingTransfersCount);
+
+  // Handle mode change
+  const handleModeChange = (mode: OperationMode) => {
+    setOperationMode(mode);
+    saveOperationMode(mode);
+    setActiveTab('balance'); // Reset to balance tab when switching modes
+    // Refresh session timeout on user activity
+    WalletManager.refreshSessionTimeout();
+  };
+
+  // Fetch pending transfers count for private mode availability check
+  const [activeNetwork, setActiveNetwork] = useState<string>('mainnet');
+
+  useEffect(() => {
+    // Reset immediately on network change so stale badge clears right away
+    setPendingTransfersCount(0);
+    const fetchPendingCount = async () => {
+      if (!wallet?.address || !wallet?.privateKey) return;
+      try {
+        const pending = await getPendingPrivateTransfers(wallet.address, wallet.privateKey);
+        setPendingTransfersCount(pending.length);
+      } catch (error) {
+        console.error('Failed to fetch pending transfers count:', error);
+        setPendingTransfersCount(0);
+      }
+    };
+    fetchPendingCount();
+  }, [wallet?.address, wallet?.privateKey, activeNetwork]); // re-run on network switch
+
+  // Load operation mode on mount and when encrypted balance or pending transfers change
+  useEffect(() => {
+    const encBalance = encryptedBalance?.encrypted || 0;
+    const savedMode = loadOperationMode(encBalance, pendingTransfersCount);
+    setOperationMode(savedMode);
+  }, [encryptedBalance, pendingTransfersCount]);
+
+  // Close private modal when wallet changes or when conditions are not met
+  useEffect(() => {
+    if (expandedPrivateModal) {
+      // Close decrypt modal if no encrypted balance
+      if (expandedPrivateModal === 'decrypt' && (!encryptedBalance || encryptedBalance.encrypted <= 0)) {
+        setExpandedPrivateModal(null);
+      }
+      // Close encrypt modal if no public balance
+      if (expandedPrivateModal === 'encrypt' && (!balance || balance <= 0.001)) {
+        setExpandedPrivateModal(null);
+      }
+    }
+  }, [wallet?.address, encryptedBalance, balance, expandedPrivateModal]);
+
+  // Check RPC status with shared cache (prevents duplicate fetching between popup/expanded)
+  useEffect(() => {
+    // Import dynamically to avoid circular deps
+    const initRPCStatus = async () => {
+      const { checkRPCStatus, onRPCStatusChange, fetchLatestEpoch, getActiveRPCProvider } = await import('../utils/rpcStatus');
+      
+      // Get initial status (uses cache if available)
+      const status = await checkRPCStatus();
+      setRpcStatus(status.status);
+      setActiveNetwork(status.network);
+      if (status.latestEpoch !== undefined) setLatestEpoch(status.latestEpoch);
+      
+      // Listen for status changes from other contexts (popup <-> expanded)
+      const unsubscribe = onRPCStatusChange((data) => {
+        setRpcStatus(data.status);
+        setActiveNetwork(data.network);
+        if (data.latestEpoch !== undefined) setLatestEpoch(data.latestEpoch);
+      });
+
+      // Poll epoch every 3 seconds (lightweight node_stats call)
+      const epochInterval = setInterval(async () => {
+        const provider = await getActiveRPCProvider();
+        if (!provider) return;
+        const epoch = await fetchLatestEpoch(provider.url);
+        if (epoch !== null) setLatestEpoch(epoch);
+      }, 3000);
+      
+      // Check full RPC status every 3 minutes
+      const interval = setInterval(async () => {
+        const freshStatus = await checkRPCStatus(true);
+        setRpcStatus(freshStatus.status);
+        setActiveNetwork(freshStatus.network);
+        if (freshStatus.latestEpoch !== undefined) setLatestEpoch(freshStatus.latestEpoch);
+      }, 3 * 60 * 1000);
+      
+      // Auto-retry every 7 seconds when disconnected
+      let retryInterval: ReturnType<typeof setInterval> | null = null;
+      
+      const startRetryLoop = () => {
+        if (retryInterval) return; // Already running
+        
+        retryInterval = setInterval(async () => {
+          const freshStatus = await checkRPCStatus(true);
+          setRpcStatus(freshStatus.status);
+          setActiveNetwork(freshStatus.network);
+          if (freshStatus.latestEpoch !== undefined) setLatestEpoch(freshStatus.latestEpoch);
+          
+          if (freshStatus.status === 'connected') {
+            if (retryInterval) {
+              clearInterval(retryInterval);
+              retryInterval = null;
+            }
+          }
+        }, 7000);
+      };
+      
+      const stopRetryLoop = () => {
+        if (retryInterval) {
+          clearInterval(retryInterval);
+          retryInterval = null;
+        }
+      };
+      
+      // Start retry loop if initially disconnected
+      if (status.status === 'disconnected') {
+        startRetryLoop();
+      }
+      
+      // Listen for status changes to start/stop retry loop
+      const unsubscribeRetry = onRPCStatusChange((data) => {
+        if (data.status === 'disconnected') {
+          startRetryLoop();
+        } else if (data.status === 'connected') {
+          stopRetryLoop();
+        }
+      });
+      
+      return () => {
+        unsubscribe();
+        unsubscribeRetry();
+        clearInterval(interval);
+        clearInterval(epochInterval);
+        stopRetryLoop();
+      };
+    };
+    
+    let cleanup: (() => void) | undefined;
+    initRPCStatus().then(fn => { cleanup = fn; });
+    
+    return () => { cleanup?.(); };
+  }, []);
+
+  // Reset display data immediately when wallet changes — clears pie chart and
+  // balance display so stale data from previous wallet doesn't show during transition.
+  useEffect(() => {
+    if (!wallet) {
+      // No wallet — just reset loading flags
+      setIsLoadingBalance(false);
+      setIsLoadingEncryptedBalance(false);
+      setIsLoadingTransactions(false);
+      return;
+    }
+
+    // ── Reset stale-fetch guard immediately ──────────────────────────────────
+    // Bump BEFORE the debounce so any in-flight fetch from the previous wallet
+    // is marked stale right away, not 80ms later.
+    activeFetchIdRef.current += 1;
+    const fetchId = activeFetchIdRef.current;
+
+    // ── Reset display state ──────────────────────────────────────────────────
+    setBalance(null);
+    setEncryptedBalance(null);
+    setNonce(0);
+    setIsDecryptingBalance(false);
+    setIsLoadingBalance(true);
+    setBalanceError(false);
+    setIsLoadingEncryptedBalance(true);
+    setIsLoadingTransactions(true);
+    optimisticTxDetailsRef.current.clear();
+
+    const currentAddress = wallet.address;
+    const currentPrivateKey = wallet.privateKey;
+    const isStale = () =>
+      activeFetchIdRef.current !== fetchId ||
+      activeWalletRef.current?.address !== currentAddress;
+
+    const fetchInitialData = async () => {
+      // STEP 1: Load from cache instantly
+      const cachedData = cacheService.getWalletCacheFast(currentAddress);
+
+      if (cachedData) {
+        setBalance(cachedData.publicBalance);
+        setNonce(cachedData.nonce);
+        setEncryptedBalance({
+          public: cachedData.publicBalance,
+          public_raw: Math.floor(cachedData.publicBalance * 1_000_000),
+          encrypted: cachedData.encryptedBalance.encrypted,
+          encrypted_raw: Math.floor(cachedData.encryptedBalance.encrypted * 1_000_000),
+          cipher: cachedData.encryptedBalance.cipher,
+          total: cachedData.publicBalance + cachedData.encryptedBalance.encrypted,
+        });
+        if (cachedData.recentActivities?.length > 0) {
+          const cachedTxs = cachedData.recentActivities.map((activity) => ({
+            hash: activity.hash,
+            from: activity.from || currentAddress,
+            to: activity.to || '',
+            amount: activity.amount,
+            timestamp: activity.timestamp,
+            status: activity.status,
+            type: activity.direction === 'out' ? 'sent' : 'received',
+            op_type: activity.type,
+          } as Transaction));
+          setTransactions(cachedTxs);
+        }
+      }
+
+      // STEP 2: Reset UI-specific states
+      setShowExpandedTxDetails(false);
+      setSelectedTxHash(null);
+      setSelectedTxDetails(null);
+
+      // If cache is very fresh (< 30s), skip balance + history network fetches entirely.
+      // This covers the popup → expanded view transition where data was just loaded.
+      // Encrypted balance is always re-fetched (stateful, can change after encrypt/decrypt).
+      const FRESH_THRESHOLD_MS = 30_000;
+      const cacheIsFresh = !!cachedData && (Date.now() - cachedData.lastUpdate) < FRESH_THRESHOLD_MS;
+
+      setIsLoadingBalance(!cachedData);
+      // Encrypted balance always shows loading until the fresh fetch completes —
+      // the cached value may be stale (e.g. after encrypt/decrypt tx) and the
+      // PVAC decrypt takes a few seconds. Showing 0 while loading is misleading.
+      setIsLoadingEncryptedBalance(true);
+      setIsLoadingTransactions(!cachedData);
+
+      // STEP 3: Fire fetches — skip balance + history if cache is fresh
+      let latestBalance: { balance: number; nonce: number } | null = null;
+      let latestEncData: EncryptedBalanceResponse | null = null;
+      let latestTxs: Transaction[] | null = null;
+
+      const saveCache = () => {
+        if (!latestBalance || !latestTxs) return;
+        const recentActivities = latestTxs.slice(0, 11).map((tx) => ({
+          hash: tx.hash,
+          type: toActivityType(tx.op_type),
+          direction: tx.type === 'sent' ? 'out' : ('in' as 'in' | 'out'),
+          amount: tx.amount,
+          timestamp: tx.timestamp,
+          from: tx.from,
+          to: tx.to,
+          status: tx.status,
+          finality: toActivityFinality(tx.status),
+        }));
+        cacheService.setWalletCacheFast({
+          address: currentAddress,
+          publicBalance: latestBalance.balance,
+          encryptedBalance: {
+            encrypted: latestEncData?.encrypted || 0,
+            cipher: latestEncData?.cipher || '',
+            public: latestBalance.balance,
+          },
+          nonce: latestBalance.nonce,
+          recentActivities,
+          lastUpdate: Date.now(),
+          version: '1.0.0',
+        });
+      };
+
+      // Fetch 1: Public balance + nonce — skip if cache is fresh
+      const balanceFetch = cacheIsFresh
+        ? Promise.resolve().then(() => {
+            if (isStale()) return;
+            setIsLoadingBalance(false);
+            latestBalance = { balance: cachedData!.publicBalance, nonce: cachedData!.nonce };
+          })
+        : fetchBalance(currentAddress)
+            .then((balanceData) => {
+              if (isStale()) return;
+              setBalance(balanceData.balance);
+              setNonce(balanceData.nonce);
+              setIsLoadingBalance(false);
+              setBalanceError(false);
+              latestBalance = balanceData;
+              saveCache();
+            })
+            .catch((err) => {
+              console.error('Failed to fetch balance:', err);
+              if (!isStale()) {
+                if (cachedData) {
+                  setBalance(cachedData.publicBalance);
+                  setNonce(cachedData.nonce);
+                } else {
+                  setBalance(0);
+                  setNonce(0);
+                  setBalanceError(true);
+                }
+                setIsLoadingBalance(false);
+              }
+            });
+
+      // Fetch 2: Encrypted balance — skip if cache is fresh, otherwise always re-fetch
+      const encFetch = cacheIsFresh
+        ? Promise.resolve().then(() => {
+            if (isStale()) return;
+            // Use value already set from cacheService in step 1
+            setIsLoadingEncryptedBalance(false);
+            if (cachedData) {
+              latestEncData = {
+                public: cachedData.publicBalance,
+                public_raw: Math.floor(cachedData.publicBalance * 1_000_000),
+                encrypted: cachedData.encryptedBalance.encrypted,
+                encrypted_raw: Math.floor(cachedData.encryptedBalance.encrypted * 1_000_000),
+                cipher: cachedData.encryptedBalance.cipher,
+                total: cachedData.publicBalance + cachedData.encryptedBalance.encrypted,
+              };
+            }
+          })
+        : fetchEncryptedBalance(currentAddress, currentPrivateKey)
+            .then((encData) => {
+              if (isStale()) return;
+              if (encData) {
+                setEncryptedBalance(encData);
+                latestEncData = encData;
+              } else {
+                const fallback: EncryptedBalanceResponse = {
+                  public: cachedData?.publicBalance || 0,
+                  public_raw: Math.floor((cachedData?.publicBalance || 0) * 1_000_000),
+                  encrypted: 0,
+                  encrypted_raw: 0,
+                  cipher: cachedData?.encryptedBalance.cipher || '0',
+                  total: cachedData?.publicBalance || 0,
+                };
+                setEncryptedBalance(fallback);
+              }
+              setIsLoadingEncryptedBalance(false);
+              saveCache();
+            })
+            .catch((err) => {
+              console.error('Failed to fetch encrypted balance:', err);
+              if (!isStale()) {
+                if (cachedData) {
+                  setEncryptedBalance({
+                    public: cachedData.publicBalance,
+                    public_raw: Math.floor(cachedData.publicBalance * 1_000_000),
+                    encrypted: cachedData.encryptedBalance.encrypted,
+                    encrypted_raw: Math.floor(cachedData.encryptedBalance.encrypted * 1_000_000),
+                    cipher: cachedData.encryptedBalance.cipher,
+                    total: cachedData.publicBalance + cachedData.encryptedBalance.encrypted,
+                  });
+                }
+                setIsLoadingEncryptedBalance(false);
+              }
+            });
+
+      // Fetch 3: Transaction history — skip if cache is fresh
+      const historyFetch = cacheIsFresh
+        ? Promise.resolve().then(() => {
+            if (isStale()) return;
+            setIsLoadingTransactions(false);
+            if (cachedData?.recentActivities?.length) {
+              latestTxs = cachedData.recentActivities.map((activity) => ({
+                hash: activity.hash,
+                from: activity.from || currentAddress,
+                to: activity.to || '',
+                amount: activity.amount,
+                timestamp: activity.timestamp,
+                status: activity.status,
+                type: activity.direction === 'out' ? 'sent' : 'received',
+                op_type: activity.type,
+              } as Transaction));
+            } else {
+              latestTxs = [];
+            }
+          })
+        : getTransactionHistory(
+            currentAddress,
+            {},
+            false,
+            (progressTxs) => {
+              if (isStale()) return;
+              const withType = progressTxs.map((tx) => ({
+                ...tx,
+                type: tx.from?.toLowerCase() === currentAddress.toLowerCase() ? 'sent' : 'received',
+              } as Transaction));
+              setTransactions(withType);
+              setIsLoadingTransactions(false);
+            },
+          )
+            .then((historyResult) => {
+              if (isStale()) return;
+              if (Array.isArray(historyResult.transactions)) {
+                const transformedTxs = historyResult.transactions.map((tx) => ({
+                  ...tx,
+                  type: tx.from?.toLowerCase() === currentAddress.toLowerCase() ? 'sent' : 'received',
+                } as Transaction));
+                setTransactions(transformedTxs);
+                latestTxs = transformedTxs;
+                transformedTxs
+                  .filter((tx) => tx.status === 'confirmed')
+                  .slice(0, 10)
+                  .forEach((tx) => {
+                    apiCache.getTransactionDetails(tx.hash).then((cached) => {
+                      if (!cached) fetchTransactionDetails(tx.hash).catch(() => {});
+                    });
+                  });
+              } else {
+                if (!cachedData) {
+                  setTransactions([]);
+                  latestTxs = [];
+                }
+              }
+              setIsLoadingTransactions(false);
+              saveCache();
+            })
+            .catch((err) => {
+              console.error('Failed to fetch transaction history:', err);
+              if (!isStale()) {
+                if (!cachedData) setTransactions([]);
+                setIsLoadingTransactions(false);
+              }
+            });
+
+      // Fetch 4: Pending private transfers (background, non-blocking)
+      getPendingPrivateTransfers(currentAddress, currentPrivateKey)
+        .then((pendingTransfers) => {
+          if (isStale()) return;
+          setPendingTransfersCount(pendingTransfers.length);
+        })
+        .catch((err) => {
+          console.error('Failed to fetch pending transfers:', err);
+          if (!isStale()) setPendingTransfersCount(0);
+        });
+
+      // Fetch 5: PVAC pubkey registration (background, non-blocking, once per wallet+network).
+      // Runs silently so encrypt/decrypt/stealth operations are ready immediately
+      // without the 20s registration delay on first use.
+      if (currentPrivateKey && wallet?.publicKey) {
+        const pubKey = wallet.publicKey;
+        import('../utils/ensurePvacRegistered').then(({ ensurePvacRegistered }) => {
+          ensurePvacRegistered(currentAddress, currentPrivateKey, pubKey).catch(() => {
+            // Silent — registration will retry on first actual operation
+          });
+        });
+      }
+
+      await Promise.allSettled([balanceFetch, encFetch, historyFetch]);
+
+      if (!isStale()) {
+        const encBal =
+          (latestEncData as EncryptedBalanceResponse | null)?.encrypted ||
+          cachedData?.encryptedBalance.encrypted ||
+          0;
+        const savedMode = loadOperationMode(encBal, pendingTransfersCount);
+        setOperationMode(savedMode);
+      }
+    };
+
+    // Debounce: prevents piling up fetches when user clicks through wallets quickly.
+    const debounceTimer = setTimeout(fetchInitialData, 80);
+    return () => clearTimeout(debounceTimer);
+  }, [wallet?.address]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ============================================
+  // TX COUNT POLLER — smart sync trigger
+  // ============================================
+  // Every 3s: lightweight octra_account call to get tx_count.
+  // Only triggers a full refresh when tx_count changes — no blind polling.
+  const txCountPollerRef = useRef<TxCountPoller | null>(null);
+
+  useEffect(() => {
+    if (!wallet?.address) return;
+
+    // Create poller once
+    if (!txCountPollerRef.current) {
+      txCountPollerRef.current = new TxCountPoller();
+    }
+
+    txCountPollerRef.current.start(wallet.address, () => {
+      // tx_count changed — invalidate cache and re-fetch
+      apiCache.invalidateBalance(wallet.address);
+      apiCache.invalidateHistory(wallet.address);
+      refreshWalletData();
+    });
+
+    return () => {
+      txCountPollerRef.current?.stop();
+    };
+  }, [wallet?.address, activeNetwork]); // restart when wallet or network changes
+
+  // Function to refresh all wallet data
+  const refreshWalletData = async () => {
+    if (!wallet) return;
+    
+    setIsRefreshingData(true);
+    setBalanceError(false);
+
+    // Keep the spinner visible for at least a beat so users see the refresh
+    // happened, even when every fetch hits a warm cache.
+    const done = startMinDuration();
+
+    const addr = wallet.address;
+    const pk = wallet.privateKey;
+
+    try {
+      // Run balance + history in parallel — these are fast.
+      // Force-refresh ALL three calls (balance / history / encrypted) so the
+      // refresh button truly bypasses the cache. Without this, repeated taps
+      // re-show the same numbers from apiCache and the user thinks the
+      // refresh is broken.
+      const [balanceData] = await Promise.all([
+        fetchBalance(addr, true).then(data => {
+          setBalance(data.balance);
+          setNonce(data.nonce);
+          setBalanceError(false);
+          return data;
+        }).catch(err => {
+          console.error('Balance fetch failed:', err);
+          setBalanceError(true);
+          toast({ title: "Balance Error", description: "Could not load balance. Check your connection.", variant: "destructive" });
+          return null;
+        }),
+
+        getTransactionHistory(addr, {}, true, (progressTxs) => {
+          const withType = progressTxs.map(tx => ({
+            ...tx,
+            type: tx.from?.toLowerCase() === addr.toLowerCase() ? 'sent' : 'received'
+          } as Transaction));
+          setTransactions(withType);
+        }).then(result => {
+          if (Array.isArray(result.transactions) && result.transactions.length > 0) {
+            const txs = result.transactions.map(tx => ({
+              ...tx,
+              type: tx.from?.toLowerCase() === addr.toLowerCase() ? 'sent' : 'received'
+            } as Transaction));
+            setTransactions(txs);
+          }
+        }).catch(err => console.error('History fetch failed:', err)),
+      ]);
+
+      // Encrypted balance runs independently (can be slow due to PVAC).
+      // Pass forceRefresh=true so the refresh button actually re-decrypts
+      // the cipher instead of returning the in-memory cache.
+      setIsLoadingEncryptedBalance(true);
+      fetchEncryptedBalance(addr, pk, true).then(encData => {
+        if (encData) {
+          setEncryptedBalance(encData);
+        } else if (balanceData) {
+          setEncryptedBalance({
+            public: balanceData.balance,
+            public_raw: Math.floor(balanceData.balance * 1_000_000),
+            encrypted: 0,
+            encrypted_raw: 0,
+            cipher: '0',
+            total: balanceData.balance,
+          });
+        }
+        setIsLoadingEncryptedBalance(false);
+      }).catch(err => {
+        console.error('Enc balance fetch failed:', err);
+        setIsLoadingEncryptedBalance(false);
+      });
+
+    } catch (error) {
+      console.error('Failed to refresh wallet data:', error);
+      toast({ title: "Refresh Failed", description: "Failed to refresh data.", variant: "destructive" });
+    } finally {
+      await done();
+      setIsRefreshingData(false);
+    }
+  };
+
+  const handleRPCChange = async () => {
+    // Close the RPC manager dialog
+    setShowRPCManager(false);
+
+    // Invalidate the API-level cache (network-keyed) so next fetch goes to new RPC
+    // But keep the fast wallet cache so UI shows data instantly while syncing
+    await invalidateCacheForNetworkSwitch();
+
+    // Force fresh RPC status check — updates activeNetwork + rpcStatus in footer
+    setRpcStatus('checking');
+    try {
+      const { checkRPCStatus } = await import('../utils/rpcStatus');
+      const freshStatus = await checkRPCStatus(true);
+      setRpcStatus(freshStatus.status);
+      setActiveNetwork(freshStatus.network);
+      if (freshStatus.latestEpoch !== undefined) setLatestEpoch(freshStatus.latestEpoch);
+    } catch {
+      setRpcStatus('disconnected');
+    }
+
+    // Background-refresh wallet data with new RPC (shows syncing indicator)
+    refreshWalletData();
+  };
+
+  const copyToClipboard = async (text: string, fieldId: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedField(fieldId);
+      setTimeout(() => setCopiedField(null), 2000);
+    } catch {
+      toast({
+        title: "Error",
+        description: "Copy failed",
+        variant: "destructive",
+      });
+    }
+  };
+
+  // ============================================
+  // EVM MODE FUNCTIONS
+  // ============================================
+
+  // Initialize EVM wallets when entering EVM mode
+  const initializeEvmMode = async () => {
+    const derived = wallets.map((w) => {
+      // Only derive the EVM address — private key is NOT stored in state.
+      // Use the address-only derivation path via the existing evmAddressMap
+      // or compute the address (not the private key) from the wallet.
+      const evmData = getEVMWalletData(w.address, w.privateKey, w.type);
+      // Strip the private key from what we store in component state
+      return {
+        octraAddress: evmData.octraAddress,
+        evmAddress: evmData.evmAddress,
+        privateKeyHex: '', // Intentionally empty — derived on-demand only
+        type: evmData.type,
+        balance: null as string | null,
+        isLoading: false,
+      };
+    });
+    setEvmWallets(derived);
+    setAllEvmNetworks(getAllNetworks());
+    
+    const activeEVM = derived.find((e) => e.octraAddress === wallet.address);
+    setSelectedEVMWallet(activeEVM || derived[0] || null);
+    
+    // Check RPC status
+    setEvmRpcStatus('checking');
+    try {
+      const isConnected = await checkEVMRpcStatus(evmNetwork.id);
+      setEvmRpcStatus(isConnected ? 'connected' : 'disconnected');
+      if (isConnected) {
+        const price = await getEVMGasPrice(evmNetwork.id);
+        setEvmGasPrice(price);
+      }
+    } catch {
+      setEvmRpcStatus('disconnected');
+    }
+    
+    // Fetch native token price
+    getNativeTokenPrice(evmNetwork.symbol).then(setEthPrice);
+  };
+
+  // Enter EVM mode
+  const enterEvmMode = async () => {
+    setEvmMode(true);
+    await initializeEvmMode();
+  };
+
+  // Expose enterEvmMode to parent via callback
+  useEffect(() => {
+    onEvmReady?.(enterEvmMode);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Check chrome.storage.local directly for pendingEvmMode on mount
+  // This is the most reliable approach — no prop chain, no timing issues
+  useEffect(() => {
+    if (typeof chrome !== 'undefined' && chrome.storage && !isPopupMode) {
+      chrome.storage.local.get('pendingEvmMode', (result) => {
+        if (result['pendingEvmMode'] === 'true') {
+          chrome.storage.local.remove('pendingEvmMode');
+          enterEvmMode();
+        }
+      });
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Listen for external EVM network changes (from dApp switchChain via background)
+  useEffect(() => {
+    if (!evmMode) return;
+
+    const handleStorageEvent = (e: StorageEvent) => {
+      if (e.key === 'active_evm_network' && e.newValue) {
+        const all = getAllNetworks();
+        const net = all.find(n => n.id === e.newValue);
+        if (net) {
+          setEvmNetwork(net);
+          if (selectedEVMWallet) setSelectedEVMWallet({ ...selectedEVMWallet, balance: null, isLoading: false });
+        }
+      }
+    };
+
+    // Listen for same-tab synthetic events from useBackgroundSyncResponder
+    const handleSyncMessage = (msg: Record<string, unknown>) => {
+      if (msg?.type === 'SYNC_EVM_NETWORK' && msg.activeEvmNetwork) {
+        const all = getAllNetworks();
+        const net = all.find(n => n.id === (msg.activeEvmNetwork as string));
+        if (net) {
+          setEvmNetwork(net);
+          if (selectedEVMWallet) setSelectedEVMWallet(prev => prev ? { ...prev, balance: null, isLoading: false } : null);
+        }
+      }
+    };
+
+    window.addEventListener('storage', handleStorageEvent);
+    chrome.runtime?.onMessage?.addListener(handleSyncMessage as Parameters<typeof chrome.runtime.onMessage.addListener>[0]);
+
+    return () => {
+      window.removeEventListener('storage', handleStorageEvent);
+      chrome.runtime?.onMessage?.removeListener(handleSyncMessage as Parameters<typeof chrome.runtime.onMessage.removeListener>[0]);
+    };
+  }, [evmMode, selectedEVMWallet]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Exit EVM mode
+  const exitEvmMode = () => {
+    setEvmMode(false);
+    setEvmWallets([]);
+    setSelectedEVMWallet(null);
+    setEvmTransactions([]);
+    setEvmTokens([]);
+    setEvmNfts([]);
+  };
+
+  // Fetch EVM wallet balance
+  const fetchEvmBalance = async () => {
+    if (!selectedEVMWallet || evmRpcStatus !== 'connected') return;
+    
+    setEvmWallets((prev) => prev.map((w) => 
+      w.evmAddress === selectedEVMWallet.evmAddress ? { ...w, isLoading: true } : w
+    ));
+    setSelectedEVMWallet((prev) => (prev ? { ...prev, isLoading: true } : null));
+    
+    try {
+      const balance = await getEVMBalance(selectedEVMWallet.evmAddress, evmNetwork.id);
+      setEvmWallets((prev) => prev.map((w) => 
+        w.evmAddress === selectedEVMWallet.evmAddress ? { ...w, balance, isLoading: false } : w
+      ));
+      setSelectedEVMWallet((prev) => (prev ? { ...prev, balance, isLoading: false } : null));
+    } catch {
+      setEvmWallets((prev) => prev.map((w) => 
+        w.evmAddress === selectedEVMWallet.evmAddress ? { ...w, balance: '0.000000', isLoading: false } : w
+      ));
+      setSelectedEVMWallet((prev) => (prev ? { ...prev, balance: '0.000000', isLoading: false } : null));
+    }
+  };
+
+  // Fetch EVM tokens
+  const fetchEvmTokens = async () => {
+    if (!selectedEVMWallet || evmRpcStatus !== 'connected') return;
+    setIsLoadingEvmTokens(true);
+    try {
+      const chainId = evmNetwork.chainId;
+      const commonTokens = COMMON_TOKENS[chainId] || [];
+      const customTokens = getCustomTokens(chainId);
+
+      // Deduplicate: custom tokens take priority over common tokens with same address
+      const customAddresses = new Set(customTokens.map(t => t.address.toLowerCase()));
+      const filteredCommon = commonTokens
+        .filter(t => !customAddresses.has(t.address.toLowerCase()))
+        .map(t => ({ ...t, chainId }));
+      const allTokenAddresses = [...filteredCommon, ...customTokens];
+      
+      const tokenBalances = await Promise.all(
+        allTokenAddresses.map(async (token) => {
+          try {
+            const balance = await getERC20Balance(token.address, selectedEVMWallet.evmAddress, token.decimals, evmNetwork.id);
+            return { ...token, balance, isLoading: false };
+          } catch { return { ...token, balance: '0.000000', isLoading: false }; }
+        })
+      );
+      setEvmTokens(tokenBalances.filter(t => parseFloat(t.balance) > 0 || customTokens.some(ct => ct.address.toLowerCase() === t.address.toLowerCase())));
+    } catch { setEvmTokens([]); } finally { setIsLoadingEvmTokens(false); }
+  };
+
+  // Fetch EVM NFTs
+  const fetchEvmNfts = async () => {
+    if (!selectedEVMWallet) return;
+    const customNFTs = getCustomNFTs(evmNetwork.chainId);
+    const verifiedNFTs = await Promise.all(
+      customNFTs.map(async (nft) => {
+        const isOwner = await checkNFTOwnership(nft.contractAddress, nft.tokenId, selectedEVMWallet.evmAddress, evmNetwork.id);
+        return isOwner ? nft : null;
+      })
+    );
+    setEvmNfts(verifiedNFTs.filter((n): n is NFTToken => n !== null));
+  };
+
+  // Fetch EVM transactions (including ERC20 token transfers for imported tokens)
+  const fetchEvmTransactions = async () => {
+    if (!selectedEVMWallet) return;
+    setIsLoadingEvmTxs(true);
+    try {
+      // Get custom token addresses for the current chain
+      const customTokenAddresses = getCustomTokens(evmNetwork.chainId).map(t => t.address);
+      // Fetch all transactions including ERC20 transfers
+      const txs = await getAllEVMTransactions(selectedEVMWallet.evmAddress, customTokenAddresses, evmNetwork.id);
+      // Limit to last 20 recent transactions
+      setEvmTransactions(txs.slice(0, 20));
+    } catch (error) {
+      console.error('Failed to fetch EVM transactions:', error);
+      setEvmTransactions([]);
+    } finally {
+      setIsLoadingEvmTxs(false);
+    }
+  };
+
+  // Handle EVM wallet selection
+  const handleSelectEvmWallet = (evmWallet: typeof selectedEVMWallet) => {
+    if (!evmWallet) return;
+    setSelectedEVMWallet(evmWallet);
+    setEvmTransactions([]);
+    setEvmTokens([]);
+    setEvmNfts([]);
+    const octraWallet = wallets.find((w) => w.address === evmWallet.octraAddress);
+    if (octraWallet) onSwitchWallet(octraWallet);
+  };
+
+  // Handle EVM network change
+  const handleEvmNetworkChange = (networkId: string) => {
+    const network = allEvmNetworks.find((n) => n.id === networkId);
+    if (network) {
+      setEvmNetwork(network);
+      setActiveEVMNetwork(networkId);
+      setEvmWallets((prev) => prev.map((w) => ({ ...w, balance: null, isLoading: false })));
+      if (selectedEVMWallet) setSelectedEVMWallet({ ...selectedEVMWallet, balance: null, isLoading: false });
+      setEvmTokens([]);
+      setEvmNfts([]);
+      // Fetch new price for the network's native token
+      getNativeTokenPrice(network.symbol).then(setEthPrice);
+    }
+  };
+
+  // Handle EVM send transaction (native, token, or NFT)
+  const handleEvmSendTransaction = async () => {
+    if (!selectedEVMWallet || !evmSendTo) {
+      setEvmSendError('Please fill all fields');
+      return;
+    }
+    setEvmSendError(null);
+    setShowEvmSendReview(false);
+    setIsEvmSending(true);
+    setEvmTxHash(null);
+    try {
+      // Derive EVM private key on-demand from the Octra wallet key in session.
+      // The key only exists in this local scope and is garbage-collected after.
+      const octraWallet = wallets.find(w => w.address === selectedEVMWallet.octraAddress);
+      if (!octraWallet?.privateKey) throw new Error('Wallet key not available — session may have expired');
+      const { privateKeyHex: pkHex } = deriveEvmFromOctraKey(octraWallet.privateKey);
+
+      let hash: string;
+      if (evmSendType === 'native') {
+        if (!evmSendAmount) { setEvmSendError('Please enter amount'); setIsEvmSending(false); return; }
+        hash = await sendEVMTransaction(pkHex, evmSendTo, evmSendAmount, evmNetwork.id);
+      } else if (evmSendType === 'token' && selectedEvmToken) {
+        if (!evmSendAmount) { setEvmSendError('Please enter amount'); setIsEvmSending(false); return; }
+        // Convert amount to smallest units using token decimals
+        const amountInSmallestUnits = (parseFloat(evmSendAmount) * Math.pow(10, selectedEvmToken.decimals)).toString();
+        hash = await sendERC20Transaction(pkHex, selectedEvmToken.address, evmSendTo, amountInSmallestUnits, evmNetwork.id);
+      } else if (evmSendType === 'nft' && selectedEvmNFT) {
+        hash = await sendNFTTransaction(pkHex, selectedEvmNFT.contractAddress, evmSendTo, selectedEvmNFT.tokenId, evmNetwork.id);
+      } else {
+        setEvmSendError('Invalid send type');
+        setIsEvmSending(false);
+        return;
+      }
+      setEvmTxHash(hash);
+      toast({ title: 'Success!', description: 'Transaction sent successfully' });
+      setEvmSendTo('');
+      setEvmSendAmount('');
+      await fetchEvmBalance();
+      await fetchEvmTokens();
+      await fetchEvmNfts();
+      await fetchEvmTransactions();
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Transaction failed';
+      setEvmSendError(msg);
+      toast({ title: 'Error', description: msg, variant: 'destructive' });
+    } finally {
+      setIsEvmSending(false);
+    }
+  };
+
+  const handleEvmSendReview = () => {
+    if (!selectedEVMWallet || !evmSendTo || (evmSendType !== 'nft' && !evmSendAmount)) {
+      setEvmSendError('Please fill all required fields');
+      return;
+    }
+    setEvmSendError(null);
+    setShowEvmSendReview(true);
+  };
+
+  // Open EVM send dialog
+  const openEvmSendDialog = (type: 'native' | 'token' | 'nft', token?: ERC20Token, nft?: NFTToken) => {
+    setEvmSendType(type);
+    setSelectedEvmToken(token || null);
+    setSelectedEvmNFT(nft || null);
+    setEvmSendTo('');
+    setEvmSendAmount('');
+    setEvmSendError(null);
+    setEvmTxHash(null);
+    setShowEvmSendReview(false);
+    setShowEvmSendDialog(true);
+  };
+
+  // Import EVM token
+  const handleEvmLookupToken = async () => {
+    if (!evmImportTokenAddress || !evmImportTokenAddress.startsWith('0x')) {
+      toast({ title: 'Error', description: 'Please enter a valid contract address', variant: 'destructive' }); return;
+    }
+    setIsLoadingEvmTokenInfo(true); setEvmImportTokenInfo(null);
+    try {
+      const info = await getERC20TokenInfo(evmImportTokenAddress, evmNetwork.id);
+      if (info) setEvmImportTokenInfo(info);
+      else toast({ title: 'Error', description: 'Could not fetch token info', variant: 'destructive' });
+    } catch (error) { toast({ title: 'Error', description: error instanceof Error ? error.message : 'Failed to fetch token info', variant: 'destructive' }); }
+    finally { setIsLoadingEvmTokenInfo(false); }
+  };
+
+  const handleEvmImportToken = async () => {
+    if (!evmImportTokenInfo || !selectedEVMWallet) return;
+    try {
+      const balance = await getERC20Balance(evmImportTokenAddress, selectedEVMWallet.evmAddress, evmImportTokenInfo.decimals, evmNetwork.id);
+      const token: ERC20Token = { address: evmImportTokenAddress, name: evmImportTokenInfo.name, symbol: evmImportTokenInfo.symbol, decimals: evmImportTokenInfo.decimals, balance, isLoading: false, chainId: evmNetwork.chainId };
+      saveCustomToken(token); await fetchEvmTokens();
+      // Also refresh transactions to include the new token's history
+      await fetchEvmTransactions();
+      setShowEvmImportToken(false); setEvmImportTokenAddress(''); setEvmImportTokenInfo(null);
+      toast({ title: 'Success', description: `${evmImportTokenInfo.symbol} imported successfully` });
+    } catch (error) { toast({ title: 'Error', description: error instanceof Error ? error.message : 'Failed to import token', variant: 'destructive' }); }
+  };
+
+  // Import EVM NFT
+  const handleEvmLookupNFT = async () => {
+    if (!evmImportNFTAddress || !evmImportNFTAddress.startsWith('0x') || !evmImportNFTTokenId) {
+      toast({ title: 'Error', description: 'Please enter contract address and token ID', variant: 'destructive' }); return;
+    }
+    if (!selectedEVMWallet) return;
+    setIsLoadingEvmNFTInfo(true); setEvmImportNFTInfo(null);
+    try {
+      const isOwner = await checkNFTOwnership(evmImportNFTAddress, evmImportNFTTokenId, selectedEVMWallet.evmAddress, evmNetwork.id);
+      if (!isOwner) { toast({ title: 'Error', description: 'You do not own this NFT', variant: 'destructive' }); setIsLoadingEvmNFTInfo(false); return; }
+      const metadata = await getNFTMetadata(evmImportNFTAddress, evmImportNFTTokenId, evmNetwork.id);
+      if (metadata) setEvmImportNFTInfo({ name: metadata.name, symbol: metadata.symbol, imageUrl: metadata.imageUrl });
+      else setEvmImportNFTInfo({ name: 'Unknown NFT', symbol: 'NFT' });
+    } catch (error) { toast({ title: 'Error', description: error instanceof Error ? error.message : 'Failed to fetch NFT info', variant: 'destructive' }); }
+    finally { setIsLoadingEvmNFTInfo(false); }
+  };
+
+  const handleEvmImportNFT = () => {
+    if (!evmImportNFTInfo) return;
+    const nft: NFTToken = { contractAddress: evmImportNFTAddress, tokenId: evmImportNFTTokenId, name: evmImportNFTInfo.name, symbol: evmImportNFTInfo.symbol, imageUrl: evmImportNFTInfo.imageUrl, chainId: evmNetwork.chainId };
+    saveCustomNFT(nft); fetchEvmNfts();
+    setShowEvmImportNFT(false); setEvmImportNFTAddress(''); setEvmImportNFTTokenId(''); setEvmImportNFTInfo(null);
+    toast({ title: 'Success', description: 'NFT imported successfully' });
+  };
+
+  // Add custom EVM network
+  const handleAddEvmNetwork = async () => {
+    if (!newEvmNetwork.name || !newEvmNetwork.rpcUrl || !newEvmNetwork.chainId || !newEvmNetwork.symbol) {
+      toast({ title: 'Error', description: 'Please fill all required fields', variant: 'destructive' }); return;
+    }
+    setIsAddingEvmNetwork(true);
+    try {
+      const network: EVMNetwork = {
+        id: `custom-${newEvmNetwork.chainId}`, name: newEvmNetwork.name, chainId: parseInt(newEvmNetwork.chainId),
+        rpcUrl: newEvmNetwork.rpcUrl, symbol: newEvmNetwork.symbol, explorer: newEvmNetwork.explorer || '',
+        isTestnet: false, isCustom: true,
+      };
+      saveCustomNetwork(network); setAllEvmNetworks(getAllNetworks());
+      setNewEvmNetwork({ name: '', rpcUrl: '', chainId: '', symbol: '', explorer: '' });
+      toast({ title: 'Success', description: 'Network added successfully' });
+    } catch (error) { toast({ title: 'Error', description: error instanceof Error ? error.message : 'Failed to add network', variant: 'destructive' }); }
+    finally { setIsAddingEvmNetwork(false); }
+  };
+
+  // Remove custom EVM network
+  const handleRemoveEvmNetwork = (networkId: string) => {
+    removeCustomNetwork(networkId); setAllEvmNetworks(getAllNetworks());
+    if (evmNetwork.id === networkId) { setEvmNetwork(DEFAULT_EVM_NETWORKS[0]); setActiveEVMNetwork(DEFAULT_EVM_NETWORKS[0].id); }
+    toast({ title: 'Removed', description: 'Network removed' });
+  };
+
+  // Save custom EVM RPC
+  const handleSaveEvmCustomRpc = () => {
+    if (evmCustomRpcUrl.trim()) {
+      saveEVMProvider(evmNetwork.id, evmCustomRpcUrl.trim());
+      setShowEvmRpcManager(false);
+      setEvmCustomRpcUrl('');
+      // Re-check RPC status
+      initializeEvmMode();
+      toast({ title: 'Saved', description: 'Custom RPC URL saved' });
+    }
+  };
+
+  // Load saved API keys when RPC manager opens
+  useEffect(() => {
+    if (showEvmRpcManager) {
+      setEvmInfuraKey(getEvmInfuraKey());
+      setEvmEtherscanKey(getEvmEtherscanKey());
+      setEvmApiKeysSaved(false);
+    }
+  }, [showEvmRpcManager]);
+
+  // Save Infura + Etherscan API keys
+  const handleSaveEvmApiKeys = () => {
+    saveEvmInfuraKey(evmInfuraKey);
+    saveEvmEtherscanKey(evmEtherscanKey);
+    setEvmApiKeysSaved(true);
+    // Re-initialize EVM mode so new RPC URLs are picked up
+    initializeEvmMode();
+    toast({ title: 'API Keys Saved', description: 'Infura and Etherscan keys saved to wallet settings.' });
+  };
+
+  // Effect: Fetch EVM data when wallet changes in EVM mode
+  useEffect(() => {
+    if (!evmMode || !selectedEVMWallet) return;
+    if (evmRpcStatus === 'connected') {
+      fetchEvmBalance();
+      fetchEvmTokens();
+    }
+    fetchEvmNfts();
+    fetchEvmTransactions();
+  }, [evmMode, selectedEVMWallet?.evmAddress, evmNetwork.id]);
+
+  // Effect: Fetch balance when RPC becomes connected
+  useEffect(() => {
+    if (!evmMode || !selectedEVMWallet) return;
+    if (evmRpcStatus === 'connected' && selectedEVMWallet.balance === null) {
+      fetchEvmBalance();
+      fetchEvmTokens();
+    }
+  }, [evmRpcStatus]);
+
+  // ============================================
+  // END EVM MODE FUNCTIONS
+  // ============================================
+
+  const handleDisconnect = async () => {
+    try {
+      // Use WalletManager to properly lock wallets (this will handle encryption)
+      await WalletManager.lockWallets();
+      
+      // Trigger storage events for cross-tab synchronization
+      setTimeout(() => {
+        window.dispatchEvent(new StorageEvent('storage', {
+          key: 'isWalletLocked',
+          oldValue: 'false',
+          newValue: 'true',
+          storageArea: localStorage
+        }));
+      }, 50);
+      
+      // Call the parent's disconnect handler to update UI state
+      onDisconnect();
+      setShowLockConfirm(false);
+    } catch (error) {
+      console.error('Failed to lock wallets:', error);
+      toast({
+        title: "Lock Failed",
+        description: "Failed to lock wallets properly",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleResetAll = async () => {
+    if (!resetPassword) {
+      toast({
+        title: "Password Required",
+        description: "Please enter your wallet password to confirm reset",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setIsVerifyingReset(true);
+
+    try {
+      // Verify password first
+      const hashedPassword = localStorage.getItem('walletPasswordHash');
+      const salt = localStorage.getItem('walletPasswordSalt');
+
+      if (!hashedPassword || !salt) {
+        toast({
+          title: "No Password Set",
+          description: "No wallet password found",
+          variant: "destructive",
+        });
+        setIsVerifyingReset(false);
+        return;
+      }
+
+      const isValid = await verifyPassword(resetPassword, hashedPassword, salt);
+
+      if (!isValid) {
+        toast({
+          title: "Invalid Password",
+          description: "The password you entered is incorrect",
+          variant: "destructive",
+        });
+        setIsVerifyingReset(false);
+        return;
+      }
+
+      // Password verified, proceed with reset
+      // Clear all wallet-related data from ExtensionStorageManager
+      await Promise.all([
+        ExtensionStorageManager.remove('wallets'),
+        ExtensionStorageManager.remove('encryptedWallets'),
+        ExtensionStorageManager.remove('activeWalletId'),
+        ExtensionStorageManager.remove('walletPasswordHash'),
+        ExtensionStorageManager.remove('walletPasswordSalt'),
+        ExtensionStorageManager.remove('isWalletLocked'),
+        ExtensionStorageManager.remove('connectedDApps'),
+      ]);
+
+      // Clear localStorage
+      localStorage.removeItem('wallets');
+      localStorage.removeItem('encryptedWallets');
+      localStorage.removeItem('activeWalletId');
+      localStorage.removeItem('walletPasswordHash');
+      localStorage.removeItem('walletPasswordSalt');
+      localStorage.removeItem('isWalletLocked');
+      localStorage.removeItem('connectedDApps');
+      localStorage.removeItem('walletOperationMode');
+      localStorage.removeItem('walletRateLimitState');
+      localStorage.removeItem('walletCapabilities');
+
+      // Clear address book data
+      await addressBook.clearAll();
+
+      // Reset mode switch reminder preference
+      resetModeSwitchReminder();
+
+      // Clear API cache from chrome.storage
+      if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+        try {
+          await chrome.storage.local.remove('octwa_api_cache');
+        } catch (e) {
+          console.error('Failed to clear API cache:', e);
+        }
+      }
+
+      // Clear session password
+      WalletManager.clearSessionPassword();
+
+      // Reset state
+      setShowResetConfirm(false);
+      setResetPassword('');
+      setShowResetPassword(false);
+
+      toast({
+        title: "Reset Complete",
+        description: "All wallet data has been cleared. Reloading...",
+      });
+
+      // If in popup mode, open expanded view for welcome screen
+      if (isPopupMode) {
+        setTimeout(() => {
+          // Open expanded view
+          if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getURL) {
+            chrome.tabs.create({
+              url: chrome.runtime.getURL('index.html')
+            });
+            // Close popup
+            window.close();
+          } else {
+            window.location.reload();
+          }
+        }, 1000);
+      } else {
+        // Reload the page to reset state
+        setTimeout(() => {
+          window.location.reload();
+        }, 1000);
+      }
+    } catch (error) {
+      console.error('Failed to reset wallet:', error);
+      toast({
+        title: "Reset Failed",
+        description: "Failed to reset wallet data",
+        variant: "destructive",
+      });
+    } finally {
+      setIsVerifyingReset(false);
+    }
+  };
+
+  const handleRemoveWallet = async () => {
+    if (!walletToDelete) return;
+    
+    if (wallets.length === 1) {
+      toast({
+        title: "Cannot Remove",
+        description: "You cannot remove the last wallet. Use disconnect instead.",
+        variant: "destructive",
+      });
+      setWalletToDelete(null);
+      return;
+    }
+    
+    const addressToDelete = walletToDelete.address;
+    
+    // Remove wallet label from address book
+    try {
+      await addressBook.removeWalletLabel(addressToDelete);
+    } catch (error) {
+      console.error('Failed to remove wallet label from address book:', error);
+    }
+    
+    // Remove from encrypted wallets FIRST before calling onRemoveWallet
+    // This ensures the wallet is removed from all storage locations
+    try {
+      // Remove from localStorage
+      const localEncryptedWallets: Array<{ address: string }> = JSON.parse(localStorage.getItem('encryptedWallets') || '[]');
+      const updatedLocalEncrypted = localEncryptedWallets.filter(
+        (w) => w.address !== addressToDelete
+      );
+      localStorage.setItem('encryptedWallets', JSON.stringify(updatedLocalEncrypted));
+      
+      // Remove from chrome.storage using Promise
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        await new Promise<void>((resolve) => {
+          chrome.storage.local.get(['encryptedWallets'], (result) => {
+            if (result.encryptedWallets) {
+              try {
+                const chromeEncryptedWallets: Array<{ address: string }> = typeof result.encryptedWallets === 'string'
+                  ? JSON.parse(result.encryptedWallets)
+                  : result.encryptedWallets;
+                const updatedChromeEncrypted = chromeEncryptedWallets.filter(
+                  (w) => w.address !== addressToDelete
+                );
+                chrome.storage.local.set({ 
+                  encryptedWallets: JSON.stringify(updatedChromeEncrypted) 
+                }, () => {
+                  resolve();
+                });
+              } catch (e) {
+                console.error('Failed to parse chrome encryptedWallets:', e);
+                resolve();
+              }
+            } else {
+              resolve();
+            }
+          });
+        });
+      }
+    } catch (error) {
+      console.error('Failed to remove from encryptedWallets:', error);
+    }
+    
+    // Calculate remaining wallets after removal
+    const remainingWallets = wallets.filter(w => w.address !== addressToDelete);
+    
+    // If we're removing the active wallet, we need to switch to another wallet first
+    if (addressToDelete === wallet.address && remainingWallets.length > 0) {
+      // Find the best replacement wallet (first in the list)
+      const newActiveWallet = remainingWallets[0];
+      
+      // Switch to the new wallet first
+      onSwitchWallet(newActiveWallet);
+      
+      // Small delay to ensure state is updated before removing
+      setTimeout(() => {
+        onRemoveWallet(walletToDelete);
+      }, 100);
+    } else {
+      // If we're not removing the active wallet, just remove it normally
+      onRemoveWallet(walletToDelete);
+    }
+    
+    // Show success message and clear the deletion state
+    setTimeout(() => {
+      toast({
+        title: "Wallet Removed",
+        description: "Wallet has been removed successfully",
+      });
+      setWalletToDelete(null);
+    }, 150);
+  };
+
+  const handleImportSuccess = (newWallet: Wallet) => {
+    // Check if wallet already exists in current wallets state (source of truth)
+    const walletExists = wallets.some((w: Wallet) => w.address === newWallet.address);
+    if (walletExists) {
+      toast({
+        title: "Wallet Exists",
+        description: "This wallet is already in your wallet list",
+        variant: "destructive",
+      });
+      return;
+    }
+    
+    // Add wallet through parent handler (which handles storage properly)
+    onAddWallet(newWallet);
+    setShowAddWalletDialog(false);
+    
+    toast({
+      title: "Wallet Added",
+      description: "New wallet has been added successfully",
+    });
+  };
+
+  const handleBalanceUpdate = async (newBalance: number) => {
+    setBalance(newBalance);
+    // Also refresh nonce when balance is updated
+    try {
+      const balanceData = await fetchBalance(wallet.address);
+      setNonce(balanceData.nonce);
+    } catch (error) {
+      console.error('Failed to refresh nonce:', error);
+    }
+  };
+
+  const handleNonceUpdate = (newNonce: number) => {
+    setNonce(newNonce);
+  };
+
+  const handleTransactionsUpdate = (newTransactions: Transaction[]) => {
+    setTransactions(newTransactions);
+  };
+
+  /**
+   * Immediately write fresh balance + encrypted balance into the fast cache
+   * (localStorage). Called right after encrypt/decrypt/claim/stealth-send
+   * completes so the cache reflects the new state before the delayed
+   * silentRefreshAfterTx fires.
+   */
+  const updateCacheAfterTx = (
+    freshPublic: number,
+    freshEnc: import('../types/wallet').EncryptedBalanceResponse | null,
+    freshNonce: number,
+  ) => {
+    const existing = cacheService.getWalletCacheFast(wallet.address);
+    cacheService.setWalletCacheFast({
+      address: wallet.address,
+      publicBalance: freshPublic,
+      encryptedBalance: {
+        encrypted: freshEnc?.encrypted ?? existing?.encryptedBalance.encrypted ?? 0,
+        cipher:    freshEnc?.cipher    ?? existing?.encryptedBalance.cipher    ?? '',
+        public:    freshPublic,
+      },
+      nonce: freshNonce,
+      recentActivities: existing?.recentActivities ?? [],
+      lastUpdate: Date.now(),
+      version: '1.0.0',
+    });
+  };
+
+  /**
+   * Called by PrivateTransfer and ClaimTransfers when they have a fresh
+   * encrypted balance from the node. Updates React state AND the fast cache
+   * immediately — no waiting for silentRefreshAfterTx.
+   */
+  const handleEncryptedBalanceUpdate = (freshEnc: EncryptedBalanceResponse | null) => {
+    if (!freshEnc) return;
+    setEncryptedBalance(freshEnc);
+    // Update cache with the fresh encrypted balance, keeping current public balance
+    const existing = cacheService.getWalletCacheFast(wallet.address);
+    cacheService.setWalletCacheFast({
+      address: wallet.address,
+      publicBalance: existing?.publicBalance ?? balance ?? 0,
+      encryptedBalance: {
+        encrypted: freshEnc.encrypted,
+        cipher:    freshEnc.cipher ?? '',
+        public:    existing?.publicBalance ?? balance ?? 0,
+      },
+      nonce: existing?.nonce ?? nonce,
+      recentActivities: existing?.recentActivities ?? [],
+      lastUpdate: Date.now(),
+      version: '1.0.0',
+    });
+  };
+
+  // Refresh Octra history - updates history first, then other data in background
+  const refreshOctraHistory = async () => {
+    if (!wallet || isRefreshingOctraHistory) return;
+    
+    setIsRefreshingOctraHistory(true);
+    const done = startMinDuration();
+    
+    try {
+      // 1. Fetch transaction history FIRST (priority)
+      const result = await getTransactionHistory(wallet.address, {}, true); // force refresh
+      
+      if (Array.isArray(result.transactions)) {
+        const transformedTxs = result.transactions.map((tx) => ({
+          ...tx,
+          type: tx.from?.toLowerCase() === wallet.address.toLowerCase() ? 'sent' : 'received'
+        } as Transaction));
+        setTransactions(transformedTxs);
+      }
+      
+      // 2. Update other data in background (don't await)
+      Promise.all([
+        // Refresh balance
+        fetchBalance(wallet.address, true).then(balanceData => {
+          setBalance(balanceData.balance);
+          setNonce(balanceData.nonce);
+        }).catch(console.error),
+        
+        // Refresh encrypted balance if in private mode
+        operationMode === 'private' && wallet.privateKey
+          ? fetchEncryptedBalance(wallet.address, wallet.privateKey, true).then(setEncryptedBalance).catch(console.error)
+          : Promise.resolve(),
+        
+        // Refresh pending transfers count
+        wallet.privateKey
+          ? getPendingPrivateTransfers(wallet.address, wallet.privateKey, true).then(transfers => {
+              setPendingTransfersCount(transfers.length);
+            }).catch(console.error)
+          : Promise.resolve(),
+      ]);
+      
+    } catch (error) {
+      console.error('Failed to refresh Octra history:', error);
+      toast({
+        title: "Error",
+        description: "Failed to refresh history",
+        variant: "destructive",
+      });
+    } finally {
+      await done();
+      setIsRefreshingOctraHistory(false);
+    }
+  };
+
+  // ─── Optimistic UI update helpers ───────────────────────────────────────────
+
+  const applyOptimisticTx = (newTx: Transaction) => {
+    setTransactions(prev => {
+      const filtered = prev.filter(t => t.hash !== newTx.hash);
+      return [newTx, ...filtered].slice(0, 20);
+    });
+  };
+
+  // Silent background refresh after tx — updates state and cache, upgrades pending→confirmed.
+  // Fires twice: once shortly after tx accepted (to show pending), once later after confirmation.
+  const silentRefreshAfterTx = (delayMs = 3000) => {
+    const doRefresh = async () => {
+      try {
+        const [balanceData, historyResult, freshEncrypted] = await Promise.all([
+          fetchBalance(wallet.address),
+          getTransactionHistory(wallet.address, {}, true), // force refresh to get latest op_types
+          fetchEncryptedBalance(wallet.address, wallet.privateKey).catch(() => null),
+        ]);
+        setBalance(balanceData.balance);
+        setNonce(balanceData.nonce);
+        if (freshEncrypted) setEncryptedBalance(freshEncrypted);
+        if (Array.isArray(historyResult.transactions)) {
+          const txs = historyResult.transactions.map(tx => ({
+            ...tx,
+            type: tx.from?.toLowerCase() === wallet.address.toLowerCase() ? 'sent' : 'received'
+          } as Transaction));
+          setTransactions(prev => {
+            const nodeHashes = new Set(txs.map(t => t.hash));
+            // Keep optimistic entries that are either:
+            //   a) not yet seen by the node (not in nodeHashes), OR
+            //   b) already marked confirmed optimistically — never downgrade to pending
+            const stillPending = prev.filter(t =>
+              t.status === 'pending' && !nodeHashes.has(t.hash)
+            );
+            const optimisticallyConfirmed = prev.filter(t =>
+              t.status === 'confirmed' && nodeHashes.has(t.hash)
+            );
+            // Merge: node txs take precedence, but preserve confirmed status
+            // for any tx the node still reports as pending (race condition window)
+            const confirmedHashes = new Set(optimisticallyConfirmed.map(t => t.hash));
+            const merged = txs.map(t =>
+              confirmedHashes.has(t.hash) && t.status === 'pending'
+                ? { ...t, status: 'confirmed' as const }
+                : t
+            );
+            return [...stillPending, ...merged].slice(0, 20);
+          });
+
+          // Remove confirmed txs from optimistic cache so detail view fetches fresh data from node.
+          // Also update selectedTxDetails immediately if the currently-viewed tx just got confirmed —
+          // this syncs the detail badge with the list badge without any delay.
+          txs.forEach(tx => {
+            if (tx.status === 'confirmed') {
+              optimisticTxDetailsRef.current.delete(tx.hash);
+
+              // If this tx is currently open in the detail view and still shows pending,
+              // update it immediately so the badge flips at the same time as the list.
+              setSelectedTxDetails(prev => {
+                if (!prev) return prev;
+                const prevHash = getTxHash(prev);
+                if (prevHash === tx.hash && getTxStatus(prev) === 'pending') {
+                  // Fetch fresh details from node in background and update when ready
+                  fetchTransactionDetails(tx.hash)
+                    .then(details => setSelectedTxDetails(details))
+                    .catch(() => {
+                      // Fallback: just flip the status flag on the existing entry
+                      if (isTransactionDetails(prev)) {
+                        setSelectedTxDetails({ ...prev, status: 'confirmed' });
+                      }
+                    });
+                  // Return optimistic confirmed state immediately for instant badge flip
+                  if (isTransactionDetails(prev)) {
+                    return { ...prev, status: 'confirmed' };
+                  }
+                }
+                return prev;
+              });
+            }
+          });
+          const recentActivities = txs.slice(0, 11).map(tx => ({
+            hash: tx.hash,
+            type: toActivityType(tx.op_type),
+            direction: tx.type === 'sent' ? 'out' : 'in' as 'in' | 'out',
+            amount: tx.amount,
+            timestamp: tx.timestamp,
+            from: tx.from,
+            to: tx.to,
+            status: tx.status,
+            finality: toActivityFinality(tx.status),
+          }));
+          cacheService.setWalletCacheFast({
+            address: wallet.address,
+            publicBalance: balanceData.balance,
+            encryptedBalance: {
+              encrypted: freshEncrypted?.encrypted ?? encryptedBalance?.encrypted ?? 0,
+              cipher:    freshEncrypted?.cipher    ?? encryptedBalance?.cipher    ?? '',
+              public: balanceData.balance,
+            },
+            nonce: balanceData.nonce,
+            recentActivities,
+            lastUpdate: Date.now(),
+            version: '1.0.0',
+          });
+        }
+      } catch (err) {
+        console.warn('[silentRefresh] failed:', err);
+      }
+    };
+
+    // First refresh: shortly after tx accepted (shows pending state)
+    setTimeout(doRefresh, delayMs);
+    // Second refresh: after node confirms (typically 5-10s after accepted)
+    setTimeout(doRefresh, delayMs + 8000);
+  };
+
+  const handleTransactionSuccess = (newTx?: {
+    hash: string; from: string; to: string; amount: number;
+    status: 'confirmed' | 'pending' | 'failed'; finality?: string;
+    op_type?: string;
+    ou?: string | number;
+    /** Fresh balance from node — passed by SendTransaction/MultiSend after their post-tx fetch. */
+    freshBalance?: number;
+    freshNonce?: number;
+  }) => {
+    WalletManager.refreshSessionTimeout();
+
+    // If the caller already fetched a fresh balance, update the cache immediately.
+    // This covers standard/multi/bulk send where SendTransaction already called
+    // fetchBalance and passed the result via onBalanceUpdate.
+    if (newTx?.freshBalance !== undefined) {
+      const existing = cacheService.getWalletCacheFast(wallet.address);
+      cacheService.setWalletCacheFast({
+        address: wallet.address,
+        publicBalance: newTx.freshBalance,
+        encryptedBalance: {
+          encrypted: existing?.encryptedBalance.encrypted ?? encryptedBalance?.encrypted ?? 0,
+          cipher:    existing?.encryptedBalance.cipher    ?? encryptedBalance?.cipher    ?? '',
+          public:    newTx.freshBalance,
+        },
+        nonce: newTx.freshNonce ?? existing?.nonce ?? nonce,
+        recentActivities: existing?.recentActivities ?? [],
+        lastUpdate: Date.now(),
+        version: '1.0.0',
+      });
+    }
+
+    // Optimistic: prepend tx to history list immediately
+    if (newTx) {
+      const txEntry: Transaction = {
+        ...newTx,
+        type: newTx.from?.toLowerCase() === wallet.address.toLowerCase() ? 'sent' : 'received',
+        timestamp: Date.now() / 1000,
+        message: undefined,
+        op_type: newTx.op_type || 'standard',
+      };
+      applyOptimisticTx(txEntry);
+
+      // Cache the tx details so clicking it doesn't need a node fetch
+      if (newTx.hash && newTx.hash !== 'pending') {
+        const optimisticEntry: TransactionDetails = {
+          tx_hash: newTx.hash,
+          status: newTx.status || 'pending',
+          epoch: null,
+          from: newTx.from,
+          to: newTx.to,
+          amount: newTx.amount.toFixed(8),
+          amount_raw: String(Math.floor(newTx.amount * 1_000_000)),
+          nonce: nonce,
+          ou: newTx.ou !== undefined ? String(newTx.ou) : '0',
+          timestamp: Date.now() / 1000,
+          op_type: newTx.op_type || 'standard',
+          message: null,
+          parsed_tx: {
+            from: newTx.from,
+            to: newTx.to,
+            amount: newTx.amount.toFixed(8),
+            amount_raw: String(Math.floor(newTx.amount * 1_000_000)),
+            nonce: nonce,
+            ou: newTx.ou !== undefined ? String(newTx.ou) : '0',
+            timestamp: Date.now() / 1000,
+            message: null,
+            op_type: newTx.op_type || 'standard',
+          },
+        };
+        optimisticTxDetailsRef.current.set(newTx.hash, optimisticEntry);
+      }
+    }
+
+    // Background verify + silent update
+    silentRefreshAfterTx(3000);
+  };
+
+  const truncateAddress = (address: string) => {
+    return `${address.slice(0, 8)}...${address.slice(-5)}`;
+  };
+
+  // Helper to truncate long messages
+  const truncateMessage = (message: string, maxLength: number = 250) => {
+    if (message.length <= maxLength) return message;
+    return `${message.slice(0, 30)}...${message.slice(-30)}`;
+  };
+
+  // Handler for viewing transaction details
+  const handleViewTxDetails = async (txHash: string, isPending: boolean = false) => {
+    setSelectedTxHash(txHash);
+    setLoadingTxDetails(true);
+    setShowFullMessage(false); // Reset message expansion state
+    
+    // For popup mode, use fullscreen; for expanded mode, use inline screen
+    if (isPopupMode) {
+      setPopupScreen('txDetail');
+    } else {
+      // Add animation when opening
+      setTxDetailsAnimating(true);
+      setShowExpandedTxDetails(true);
+      // Expand sidebar to MAX_HISTORY_WIDTH for better details view
+      if (historySidebarWidth < MAX_HISTORY_WIDTH) {
+        setPrevHistoryWidth(historySidebarWidth);
+        setHistorySidebarWidth(MAX_HISTORY_WIDTH);
+      }
+      setTimeout(() => setTxDetailsAnimating(false), 300);
+    }
+    
+    try {
+      // Check optimistic cache first (for recently submitted txs that are still pending).
+      // Confirmed txs are removed from this cache by silentRefreshAfterTx, so if an entry
+      // exists here it is still pending and safe to show immediately.
+      const optimistic = optimisticTxDetailsRef.current.get(txHash);
+      if (optimistic) {
+        setSelectedTxDetails(optimistic);
+        setLoadingTxDetails(false);
+        return;
+      }
+
+      if (isPending) {
+        const pendingTx = await fetchPendingTransactionByHash(txHash);
+        if (pendingTx) {
+          setSelectedTxDetails(pendingTx);
+        } else {
+          try {
+            const details = await fetchTransactionDetails(txHash);
+            setSelectedTxDetails(details);
+          } catch {
+            setSelectedTxDetails(null);
+            toast({ title: "Not Found", description: "Transaction not found. It may still be processing.", variant: "destructive" });
+          }
+        }
+      } else {
+        const details = await fetchTransactionDetails(txHash);
+        setSelectedTxDetails(details);
+      }
+    } catch (error) {
+      console.error('Failed to fetch transaction details:', error);
+      toast({ title: "Error", description: "Failed to fetch transaction details", variant: "destructive" });
+      setSelectedTxDetails(null);
+    } finally {
+      setLoadingTxDetails(false);
+    }
+  };
+
+  // Close expanded transaction details with animation
+  const closeExpandedTxDetails = () => {
+    setTxDetailsClosing(true);
+    // Restore previous sidebar width if it was expanded
+    if (prevHistoryWidth !== null) {
+      setHistorySidebarWidth(prevHistoryWidth);
+      setPrevHistoryWidth(null);
+    }
+    setTimeout(() => {
+      setShowExpandedTxDetails(false);
+      setSelectedTxHash(null);
+      setSelectedTxDetails(null);
+      setTxDetailsClosing(false);
+    }, 200);
+  };
+
+  return (
+    <div className="poctra-wallet-shell h-screen overflow-hidden transition-all duration-300">
+
+      {isPopupMode ? (
+        <PoctraPopupDashboard
+          section={poctraSection}
+          onNavigate={(section) => {
+            setPoctraSection(section);
+            if (section === 'assets' || section === 'evm') {
+              if (operationMode !== 'public') {
+                setOperationMode('public');
+                saveOperationMode('public');
+              }
+              if (!evmMode) void enterEvmMode();
+              return;
+            }
+            if (evmMode) exitEvmMode();
+            if (section === 'privacy') {
+              setOperationMode('private');
+              saveOperationMode('private');
+            } else if (operationMode !== 'public') {
+              setOperationMode('public');
+              saveOperationMode('public');
+            }
+          }}
+          walletLabel={getWalletDisplayName(wallet.address)}
+          walletAddress={wallet.address}
+          networkLabel={activeNetwork === 'devnet' ? 'Devnet' : 'Mainnet'}
+          networkState={rpcStatus === 'connected' ? 'connected' : rpcStatus === 'disconnected' ? 'disconnected' : 'checking'}
+          balance={balance}
+          balanceLoading={isLoadingBalance}
+          balanceError={balanceError}
+          balanceFiat={octPrice !== null ? formatUsd((balance || 0) * octPrice) : undefined}
+          encryptedBalance={encryptedBalance?.encrypted || 0}
+          encryptedBalanceLoading={isLoadingEncryptedBalance}
+          privacyEnabled={privateEnabled}
+          pendingTransfers={pendingTransfersCount}
+          transactions={transactions}
+          transactionsLoading={isLoadingTransactions}
+          refreshing={isRefreshingData || isRefreshingOctraHistory}
+          octraAssets={
+            <OctraAssets
+              wallet={wallet}
+              nonce={nonce}
+              onBack={() => setPoctraSection('assets')}
+              onTransactionSuccess={handleTransactionSuccess}
+              onNonceUpdate={handleNonceUpdate}
+              inline
+              mobileStyle
+            />
+          }
+          evmAddress={selectedEVMWallet?.evmAddress}
+          evmBalance={selectedEVMWallet?.balance}
+          evmBalanceFiat={ethPrice !== null && selectedEVMWallet?.balance ? (calculateUSDValue(selectedEVMWallet.balance, ethPrice) ?? undefined) : undefined}
+          evmNetwork={evmNetwork.name}
+          evmSymbol={evmNetwork.symbol}
+          evmConnected={evmRpcStatus === 'connected'}
+          evmLoading={isLoadingEvmTokens || isLoadingEvmTxs || selectedEVMWallet?.isLoading === true}
+          evmTokens={evmTokens}
+          evmNfts={evmNfts}
+          evmTransactions={evmTransactions}
+          themeControl={<ThemeToggle isPopupMode />}
+          resolveAddressLabel={(address) => {
+            const contact = getContactByAddress(address);
+            return contact?.domain || contact?.label;
+          }}
+          onWalletClick={() => setShowWalletSelector(true)}
+          onNetworkClick={() => setShowRPCManager(true)}
+          onSettingsClick={() => setPoctraSection('settings')}
+          onRefresh={refreshWalletData}
+          onRefreshEvm={() => {
+            void Promise.all([fetchEvmBalance(), fetchEvmTokens(), fetchEvmNfts(), fetchEvmTransactions()]);
+          }}
+          onSend={() => setPopupScreen('send')}
+          onReceive={() => setPopupScreen('receive')}
+          onEncrypt={() => setPopupScreen('encrypt')}
+          onDecrypt={() => setPopupScreen('decrypt')}
+          onPrivateSend={() => setPopupScreen('send')}
+          onClaim={() => setPopupScreen('claim')}
+          onSelectTransaction={handleViewTxDetails}
+          onOpenExplorer={() => window.open(scannerAddressUrl(wallet.address), '_blank', 'noopener,noreferrer')}
+          onOpenEvm={() => setPoctraSection('evm')}
+          onOpenEvmNetwork={() => setShowEvmRpcManager(true)}
+          onSendEvm={() => openEvmSendDialog('native')}
+          onCopyEvmAddress={() => selectedEVMWallet && copyToClipboard(selectedEVMWallet.evmAddress, 'evmReceive')}
+          onSendToken={(token) => openEvmSendDialog('token', token)}
+          onSendNft={(nft) => openEvmSendDialog('nft', undefined, nft)}
+          onOpenEvmTransaction={(hash) => window.open(`${evmNetwork.explorer.replace(/\/$/, '')}/tx/${hash}`, '_blank', 'noopener,noreferrer')}
+          onAddErc20={() => setShowEvmImportToken(true)}
+          onAddNft={() => setShowEvmImportNFT(true)}
+          onOpenRpc={() => setShowRPCManager(true)}
+          onOpenDApps={() => setShowDAppsManager(true)}
+          onOpenAddressBook={() => setShowAddressBook(true)}
+          onOpenExport={() => setShowExportKeys(true)}
+          onOpenExpanded={() => onExpandedView?.()}
+          onLock={() => setShowLockConfirm(true)}
+          onReset={() => setShowResetConfirm(true)}
+        />
+      ) : (
+      <PoctraDashboardShell
+        compact={isPopupMode}
+        section={poctraSection}
+        onSectionChange={(section) => {
+          if (section === 'evm') {
+            enterEvmMode();
+          } else if (evmMode) {
+            exitEvmMode();
+          }
+          if (section === 'privacy' && operationMode !== 'private') {
+            handleModeChange('private');
+          }
+          setPoctraSection(section);
+        }}
+        walletLabel={getWalletDisplayName(wallet.address)}
+        address={truncateAddress(wallet.address)}
+        networkLabel={evmMode ? evmNetwork.name : activeNetwork === 'devnet' ? 'Devnet' : 'Mainnet'}
+        connected={evmMode ? evmRpcStatus === 'connected' : rpcStatus === 'connected'}
+        refreshing={isRefreshingData || (evmMode && (isLoadingEvmTokens || isLoadingEvmTxs))}
+        onWalletClick={() => setShowWalletSelector(true)}
+        onRefresh={() => {
+          if (evmMode) {
+            fetchEvmBalance();
+            fetchEvmTokens();
+            fetchEvmTransactions();
+          } else {
+            refreshWalletData();
+          }
+        }}
+      >
+        {poctraSection === 'overview' && (
+          <div className="poctra-view poctra-overview-view">
+            <section className={`poctra-balance-stage ${operationMode === 'private' ? 'is-private' : ''}`}>
+              <div className="poctra-view-heading">
+                <div>
+                  <span className="poctra-eyebrow">{operationMode === 'private' ? 'Encrypted balance' : 'Public balance'}</span>
+                  <h2>{operationMode === 'private' ? 'Privacy account' : 'Octra account'}</h2>
+                </div>
+                <div className="poctra-mode-switch" role="group" aria-label="Balance mode">
+                  <button type="button" className={operationMode === 'public' ? 'is-active' : ''} onClick={() => handleModeChange('public')}>Public</button>
+                  <button type="button" className={operationMode === 'private' ? 'is-active is-private' : ''} onClick={() => handleModeChange('private')} disabled={!privateEnabled}>Private</button>
+                </div>
+              </div>
+
+              <div className="poctra-balance-value">
+                {(operationMode === 'private' ? isLoadingEncryptedBalance : isLoadingBalance) ? (
+                  <Loader2 className="animate-spin" aria-label="Loading balance" />
+                ) : balanceError && operationMode === 'public' ? (
+                  <button type="button" className="poctra-inline-error" onClick={refreshWalletData}>
+                    <AlertCircle /> Balance unavailable. Retry
+                  </button>
+                ) : (
+                  <>
+                    <strong>{operationMode === 'private' ? (encryptedBalance?.encrypted || 0).toFixed(8) : (balance || 0).toFixed(8)}</strong>
+                    <span>OCT</span>
+                  </>
+                )}
+              </div>
+              {octPrice !== null && (
+                <p className="poctra-balance-fiat">{formatUsd((operationMode === 'private' ? (encryptedBalance?.encrypted || 0) : (balance || 0)) * octPrice)}</p>
+              )}
+
+              <div className="poctra-primary-actions">
+                {operationMode === 'public' ? (
+                  <>
+                    <button type="button" onClick={() => isPopupMode ? setPopupScreen('send') : openSendModal('standard')}><span><Send /></span><b>Send</b><small>Transfer OCT</small></button>
+                    <button type="button" onClick={() => isPopupMode ? setPopupScreen('receive') : setShowReceiveDialog(true)}><span><QrCode /></span><b>Receive</b><small>Share address</small></button>
+                    <button type="button" className="is-private" onClick={() => isPopupMode ? setPopupScreen('encrypt') : openPrivateModal('encrypt')}><span><Lock /></span><b>Encrypt</b><small>Move to privacy</small></button>
+                  </>
+                ) : (
+                  <>
+                    <button type="button" className="is-private" onClick={() => isPopupMode ? setPopupScreen('send') : openSendModal('standard')}><span><Send /></span><b>Send</b><small>Private transfer</small></button>
+                    <button type="button" onClick={() => isPopupMode ? setPopupScreen('decrypt') : openPrivateModal('decrypt')}><span><Unlock /></span><b>Decrypt</b><small>Return public</small></button>
+                    <button type="button" className="is-private" onClick={() => isPopupMode ? setPopupScreen('claim') : openClaimScreen()}><span><Gift /></span><b>Claim</b><small>{pendingTransfersCount > 0 ? `${pendingTransfersCount} available` : 'Private outputs'}</small></button>
+                  </>
+                )}
+              </div>
+            </section>
+
+            {!isPopupMode && operationMode === 'public' && (
+              <div className="poctra-secondary-actions">
+                <button type="button" onClick={() => openSendModal('multi')}><Layers /><span><b>Multi Send</b><small>Several recipients</small></span><ChevronRight /></button>
+                <button type="button" onClick={() => openSendModal('bulk')}><FileText /><span><b>Bulk Send</b><small>Import a transfer file</small></span><ChevronRight /></button>
+              </div>
+            )}
+
+            <section className="poctra-content-section poctra-overview-activity">
+              <div className="poctra-section-heading">
+                <div><span className="poctra-eyebrow">Latest</span><h3>Recent activity</h3></div>
+                <button type="button" onClick={() => setPoctraSection('activity')}>View all <ChevronRight /></button>
+              </div>
+              <UnifiedHistory
+                wallet={wallet}
+                transactions={transactions}
+                onTransactionsUpdate={handleTransactionsUpdate}
+                isLoading={isLoadingTransactions}
+                isPopupMode={isPopupMode}
+                hideBorder
+                operationMode={operationMode}
+                isCompact
+                onViewTxDetails={handleViewTxDetails}
+              />
+            </section>
+          </div>
+        )}
+
+        {poctraSection === 'assets' && (
+          <div className="poctra-view">
+            <div className="poctra-page-title"><div><span className="poctra-eyebrow">Portfolio</span><h2>Assets</h2><p>Octra and EVM holdings in one place.</p></div></div>
+            <div className="poctra-asset-switcher">
+              <button type="button" className={!evmMode ? 'is-active' : ''} onClick={() => evmMode && exitEvmMode()}>Octra</button>
+              <button type="button" className={evmMode ? 'is-active' : ''} onClick={() => enterEvmMode()}>EVM</button>
+            </div>
+            {!evmMode ? (
+              <OctraAssets wallet={wallet} nonce={nonce} onBack={() => setPoctraSection('overview')} onTransactionSuccess={handleTransactionSuccess} onNonceUpdate={handleNonceUpdate} inline />
+            ) : (
+              <div className="poctra-evm-assets">
+                <div className="poctra-evm-balance">
+                  <span>{evmNetwork.name}</span>
+                  <strong>{selectedEVMWallet?.balance ?? '0'} {evmNetwork.symbol}</strong>
+                  {ethPrice !== null && selectedEVMWallet?.balance && <small>{calculateUSDValue(selectedEVMWallet.balance, ethPrice)}</small>}
+                </div>
+                <div className="poctra-token-list">
+                  {evmTokens.map((token) => (
+                    <button key={`${token.address}-${token.chainId}`} type="button" onClick={() => openEvmSendDialog('token', token)}>
+                      <span className="poctra-token-symbol">{token.symbol.slice(0, 2)}</span>
+                      <span><b>{token.symbol}</b><small>{token.name}</small></span>
+                      <strong>{token.balance}</strong>
+                      <ChevronRight />
+                    </button>
+                  ))}
+                  {evmTokens.length === 0 && <p className="poctra-empty-state">No ERC20 assets on this network.</p>}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {poctraSection === 'activity' && (
+          <div className="poctra-view poctra-activity-view">
+            <div className="poctra-page-title poctra-page-title-actions">
+              <div><span className="poctra-eyebrow">Ledger</span><h2>Activity</h2><p>Transactions for the active wallet and network.</p></div>
+              <div>
+                <button type="button" className="poctra-compact-action" onClick={refreshOctraHistory} disabled={isRefreshingOctraHistory}><RefreshCw className={isRefreshingOctraHistory ? 'animate-spin' : ''} /> Refresh</button>
+                <a className="poctra-compact-action" href={scannerAddressUrl(wallet.address)} target="_blank" rel="noopener noreferrer"><ExternalLink /> Explorer</a>
+              </div>
+            </div>
+            <UnifiedHistory wallet={wallet} transactions={transactions} onTransactionsUpdate={handleTransactionsUpdate} isLoading={isLoadingTransactions} isPopupMode={isPopupMode} hideBorder operationMode={operationMode} isCompact={false} onViewTxDetails={handleViewTxDetails} />
+          </div>
+        )}
+
+        {poctraSection === 'privacy' && (
+          <div className="poctra-view poctra-privacy-view">
+            <div className="poctra-page-title"><div><span className="poctra-eyebrow">Private account</span><h2>Privacy</h2><p>Encrypted balance and private transaction tools.</p></div></div>
+            <div className="poctra-privacy-balance">
+              <EyeOff />
+              <span><small>Encrypted balance</small><strong>{isLoadingEncryptedBalance ? 'Syncing...' : `${(encryptedBalance?.encrypted || 0).toFixed(8)} OCT`}</strong></span>
+              <button type="button" onClick={refreshWalletData}><RefreshCw className={isRefreshingData ? 'animate-spin' : ''} /></button>
+            </div>
+            <div className="poctra-privacy-grid">
+              <button type="button" onClick={() => isPopupMode ? setPopupScreen('encrypt') : openPrivateModal('encrypt')}><Lock /><span><b>Encrypt</b><small>Shield public OCT</small></span><ChevronRight /></button>
+              <button type="button" onClick={() => isPopupMode ? setPopupScreen('decrypt') : openPrivateModal('decrypt')}><Unlock /><span><b>Decrypt</b><small>Return to public balance</small></span><ChevronRight /></button>
+              <button type="button" onClick={() => isPopupMode ? setPopupScreen('send') : openSendModal('standard')}><Send /><span><b>Private send</b><small>Transfer encrypted OCT</small></span><ChevronRight /></button>
+              <button type="button" onClick={() => isPopupMode ? setPopupScreen('claim') : openClaimScreen()}><Gift /><span><b>Claim</b><small>{pendingTransfersCount > 0 ? `${pendingTransfersCount} outputs ready` : 'Scan private outputs'}</small></span><ChevronRight /></button>
+            </div>
+          </div>
+        )}
+
+        {poctraSection === 'evm' && (
+          <div className="poctra-view poctra-evm-view">
+            <div className="poctra-page-title poctra-page-title-actions">
+              <div><span className="poctra-eyebrow">Derived account</span><h2>EVM Account</h2><p>{selectedEVMWallet?.evmAddress ? `${selectedEVMWallet.evmAddress.slice(0, 12)}...${selectedEVMWallet.evmAddress.slice(-10)}` : 'Loading account...'}</p></div>
+              <button type="button" className="poctra-compact-action" onClick={() => setShowEvmRpcManager(true)}><Wifi /> {evmNetwork.name}</button>
+            </div>
+            <div className="poctra-evm-hero">
+              <span>Total balance</span>
+              <strong>{selectedEVMWallet?.balance ?? '0'} {evmNetwork.symbol}</strong>
+              {ethPrice !== null && selectedEVMWallet?.balance && <small>{calculateUSDValue(selectedEVMWallet.balance, ethPrice)}</small>}
+              <div><button type="button" onClick={() => openEvmSendDialog('native')}><Send /> Send</button><button type="button" onClick={() => selectedEVMWallet && copyToClipboard(selectedEVMWallet.evmAddress, 'evmReceive')}><Copy /> Copy address</button></div>
+            </div>
+            <div className="poctra-section-heading"><div><span className="poctra-eyebrow">Network assets</span><h3>Tokens and collectibles</h3></div><div><button type="button" onClick={() => setShowEvmImportToken(true)}>+ ERC20</button><button type="button" onClick={() => setShowEvmImportNFT(true)}>+ NFT</button></div></div>
+            <div className="poctra-token-list">
+              {evmTokens.map((token) => <button key={`${token.address}-${token.chainId}`} type="button" onClick={() => openEvmSendDialog('token', token)}><span className="poctra-token-symbol">{token.symbol.slice(0, 2)}</span><span><b>{token.symbol}</b><small>{token.name}</small></span><strong>{token.balance}</strong><ChevronRight /></button>)}
+              {evmNfts.map((nft) => <button key={`${nft.contractAddress}-${nft.tokenId}`} type="button" onClick={() => openEvmSendDialog('nft', undefined, nft)}><span className="poctra-token-symbol"><Image /></span><span><b>{nft.name}</b><small>#{nft.tokenId}</small></span><ChevronRight /></button>)}
+            </div>
+          </div>
+        )}
+
+        {poctraSection === 'settings' && (
+          <div className="poctra-view poctra-settings-view">
+            <div className="poctra-page-title"><div><span className="poctra-eyebrow">Wallet</span><h2>Settings</h2><p>Manage networks, connections, contacts, and security.</p></div></div>
+            <div className="poctra-settings-list">
+              <button type="button" onClick={() => setShowRPCManager(true)}><span><Wifi /></span><span><b>RPC Provider</b><small>Network and endpoint management</small></span><ChevronRight /></button>
+              <button type="button" onClick={() => setShowDAppsManager(true)}><span><Globe /></span><span><b>Connected dApps</b><small>Review active permissions</small></span><ChevronRight /></button>
+              <button type="button" onClick={() => setShowAddressBook(true)}><span><BookUser /></span><span><b>Address Book</b><small>Saved recipients and labels</small></span><ChevronRight /></button>
+              <button type="button" onClick={() => setShowExportKeys(true)}><span><Key /></span><span><b>Export Keys</b><small>Reveal sensitive wallet material</small></span><ChevronRight /></button>
+              <div className="poctra-settings-theme"><span><Eye /></span><span><b>Appearance</b><small>Light or dark wallet theme</small></span><ThemeToggle isPopupMode={isPopupMode} /></div>
+              <button type="button" onClick={() => setShowLockConfirm(true)}><span><Lock /></span><span><b>Lock Wallet</b><small>Require password to continue</small></span><ChevronRight /></button>
+              <button type="button" className="is-danger" onClick={() => setShowResetConfirm(true)}><span><RotateCcw /></span><span><b>Reset Wallet</b><small>Remove local wallet data</small></span><ChevronRight /></button>
+            </div>
+          </div>
+        )}
+      </PoctraDashboardShell>
+      )}
+
+      <Sheet open={showWalletSelector} onOpenChange={setShowWalletSelector}>
+        <SheetContent side="left" className="poctra-wallet-sheet w-[320px] flex flex-col px-0">
+          <SheetHeader className="poctra-wallet-sheet-header"><SheetTitle>Wallets</SheetTitle><SheetDescription>Switch, rename, or reorder accounts.</SheetDescription></SheetHeader>
+          <div className="flex-1 min-h-0 mt-3"><ScrollArea className="h-full"><ScrollAreaContent><DraggableWalletList wallets={wallets} activeWallet={wallet} nonce={nonce} walletNonces={walletNonces} setWalletNonces={setWalletNonces} onSwitchWallet={(next) => { onSwitchWallet(next); setShowWalletSelector(false); }} onCopyAddress={copyToClipboard} onDeleteWallet={setWalletToDelete} onReorderWallets={onReorderWallets} copiedField={copiedField} isPopupMode={isPopupMode} isPrivateMode={operationMode === 'private'} /></ScrollAreaContent></ScrollArea></div>
+          <div className="poctra-wallet-sheet-footer">
+            <Button onClick={() => { setAddWalletInitialScreen('create'); setShowWalletSelector(false); setShowAddWalletDialog(true); }}><Plus /> Create Wallet</Button>
+            <Button variant="secondary" onClick={() => { setAddWalletInitialScreen('import'); setShowWalletSelector(false); setShowAddWalletDialog(true); }}><Download /> Import Wallet</Button>
+          </div>
+        </SheetContent>
+      </Sheet>
+
+      <div className="octwa-legacy-runtime">
+
+
+      {/* ============================================ */}
+      {/* POPUP MODE - NEW FULLSCREEN UI */}
+      {/* ============================================ */}
+      {isPopupMode && popupScreen !== 'main' && (
+        <div className="poctra-runtime-layer fixed inset-[1px] z-[100] bg-background flex flex-col">
+          {/* Fullscreen Encrypt */}
+          {popupScreen === 'encrypt' && (
+            <div className="poctra-mobile-flow">
+              <div className="poctra-mobile-flow-header">
+                <Button variant="ghost" size="icon" onClick={() => setPopupScreen('main')} className="poctra-mobile-back">
+                  <ChevronLeft />
+                </Button>
+                <div><h2>Encrypt OCT</h2><p>Move OCT into encrypted balance</p></div>
+              </div>
+              <div className="poctra-mobile-flow-content">
+                <div className="w-full max-w-sm">
+                  <EncryptBalanceDialog
+                    open={true}
+                    onOpenChange={(open) => {
+                      if (!open) setPopupScreen('main');
+                    }}
+                    wallet={wallet}
+                    publicBalance={balance || 0}
+                    onBalanceUpdate={setBalance}
+                    onEncryptedBalanceUpdate={setEncryptedBalance}
+                    onSuccess={(freshPublic, freshEnc, freshNonce) => {
+                      updateCacheAfterTx(freshPublic, freshEnc, freshNonce);
+                      silentRefreshAfterTx(3000);
+                    }}
+                    isPopupMode={true}
+                    isInline={true}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Fullscreen Decrypt */}
+          {popupScreen === 'decrypt' && (
+            <div className="poctra-mobile-flow">
+              <div className="poctra-mobile-flow-header">
+                <Button variant="ghost" size="icon" onClick={() => setPopupScreen('main')} className="poctra-mobile-back">
+                  <ChevronLeft />
+                </Button>
+                <div><h2>Decrypt OCT</h2><p>Return OCT to public balance</p></div>
+              </div>
+              <div className="poctra-mobile-flow-content">
+                <div className="w-full max-w-sm">
+                  <DecryptBalanceDialog
+                    open={true}
+                    onOpenChange={(open) => {
+                      if (!open) setPopupScreen('main');
+                    }}
+                    wallet={wallet}
+                    encryptedBalance={encryptedBalance?.encrypted || 0}
+                    currentCipher={encryptedBalance?.cipher}
+                    onBalanceUpdate={setBalance}
+                    onEncryptedBalanceUpdate={setEncryptedBalance}
+                    onSuccess={(freshPublic, freshEnc, freshNonce) => {
+                      updateCacheAfterTx(freshPublic, freshEnc, freshNonce);
+                      silentRefreshAfterTx(3000);
+                    }}
+                    isPopupMode={true}
+                    isInline={true}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Fullscreen Send */}
+          {popupScreen === 'send' && (
+            <div className="poctra-mobile-flow">
+              <div className="poctra-mobile-flow-header">
+                <Button variant="ghost" size="icon" onClick={() => setPopupScreen('main')} className="poctra-mobile-back">
+                  <ChevronLeft />
+                </Button>
+                <div>
+                  <h2>
+                    {operationMode === 'private' ? 'Private Transfer' : 'Send OCT'}
+                  </h2>
+                  <p>{operationMode === 'private' ? 'Send from encrypted balance' : 'Transfer OCT to another account'}</p>
+                </div>
+              </div>
+              <div className="poctra-mobile-flow-content">
+                <div className="w-full max-w-sm">
+                  {operationMode === 'public' ? (
+                    <SendTransaction
+                      wallet={wallet}
+                      balance={balance}
+                      nonce={nonce}
+                      onBalanceUpdate={handleBalanceUpdate}
+                      onNonceUpdate={handleNonceUpdate}
+                      onTransactionSuccess={handleTransactionSuccess}
+                      isCompact={true}
+                      onAddToAddressBook={handleAddToAddressBook}
+                    />
+                  ) : (
+                    <PrivateTransfer
+                      wallet={wallet}
+                      balance={balance}
+                      nonce={nonce}
+                      encryptedBalance={encryptedBalance}
+                      onBalanceUpdate={handleBalanceUpdate}
+                      onNonceUpdate={handleNonceUpdate}
+                      onTransactionSuccess={handleTransactionSuccess}
+                      onEncryptedBalanceUpdate={handleEncryptedBalanceUpdate}
+                      isCompact={true}
+                      onAddToAddressBook={handleAddToAddressBook}
+                    />
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Fullscreen Receive */}
+          {popupScreen === 'receive' && (
+            <ReceiveDialog
+              wallet={wallet}
+              open={true}
+              onOpenChange={() => setPopupScreen('main')}
+              isPopupMode={true}
+              isFullscreen={true}
+              onBack={() => setPopupScreen('main')}
+              currentMode={operationMode}
+            />
+          )}
+
+          {/* Fullscreen Octra Assets */}
+          {popupScreen === 'assets' && (
+            <div className="poctra-mobile-flow">
+              <OctraAssets
+                wallet={wallet}
+                nonce={nonce}
+                onBack={() => setPopupScreen('main')}
+                onTransactionSuccess={handleTransactionSuccess}
+                onNonceUpdate={handleNonceUpdate}
+              />
+            </div>
+          )}
+
+          {/* Fullscreen Claim */}
+          {popupScreen === 'claim' && (
+            <div className="poctra-mobile-flow">
+              <div className="poctra-mobile-flow-header">
+                <Button variant="ghost" size="icon" onClick={() => setPopupScreen('main')} className="poctra-mobile-back">
+                  <ChevronLeft />
+                </Button>
+                <div><h2>Claim Transfers</h2><p>Claim available private outputs</p></div>
+              </div>
+              <div className="poctra-mobile-flow-content">
+                <ClaimTransfers
+                  wallet={wallet}
+                  onTransactionSuccess={handleTransactionSuccess}
+                  onEncryptedBalanceUpdate={handleEncryptedBalanceUpdate}
+                  onPendingCountChange={setPendingTransfersCount}
+                  isPopupMode={true}
+                  hideBorder={true}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Fullscreen Transaction Detail */}
+          {popupScreen === 'txDetail' && (
+            <div className="poctra-mobile-flow">
+              <div className="poctra-mobile-flow-header">
+                <Button variant="ghost" size="icon" onClick={() => setPopupScreen('main')} className="poctra-mobile-back">
+                  <ChevronLeft />
+                </Button>
+                <div><h2>Transaction Details</h2><p>On-chain transaction record</p></div>
+              </div>
+              <div className="poctra-mobile-flow-content">
+                {loadingTxDetails ? (
+                  <div className="poctra-mobile-loader">
+                    <Loader2 />
+                  </div>
+                ) : selectedTxDetails ? (
+                  <>
+                  <div className="poctra-tx-detail">
+                    {/* Status */}
+                    <div className="py-2 flex items-center justify-between">
+                      <span className="text-[10px] text-muted-foreground">Status</span>
+                      {getTxStatus(selectedTxDetails) === 'pending' ? (
+                        <Badge variant="secondary" className="text-[10px] bg-yellow-500/20 text-yellow-600 h-5">
+                          {getTxStatus(selectedTxDetails)}
+                        </Badge>
+                      ) : (
+                        <div className="flex items-center gap-1.5">
+                          <Badge variant="secondary" className="text-[10px] bg-[#3B567F]/20 text-[#3B567F] h-5">
+                            confirmed
+                          </Badge>
+                          {}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Time */}
+                    {getTxTimestamp(selectedTxDetails) > 0 && (
+                      <div className="py-2 flex items-center justify-between">
+                        <span className="text-[10px] text-muted-foreground">Time (UTC)</span>
+                        <span className="text-xs">
+                          {new Date(getTxTimestamp(selectedTxDetails) * 1000).toLocaleString('en-US', { timeZone: 'UTC', hour12: false })}
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Hash */}
+                    <div className="py-2">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[10px] text-muted-foreground">Hash</span>
+                        <Button 
+                          variant="ghost" 
+                          size="sm" 
+                          className="h-5 w-5 p-0" 
+                          onClick={() => copyToClipboard(getTxHash(selectedTxDetails), 'txHash')}
+                        >
+                          {copiedField === 'txHash' ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
+                        </Button>
+                      </div>
+                      <p className="font-mono text-[10px] break-all">
+                        {getTxHash(selectedTxDetails)}
+                      </p>
+                    </div>
+
+                    {/* From - full address */}
+                    {getTxFrom(selectedTxDetails) && (
+                      <div className="py-2">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-[10px] text-muted-foreground">From</span>
+                          <Button 
+                            variant="ghost" 
+                            size="sm" 
+                            className="h-5 w-5 p-0" 
+                            onClick={() => copyToClipboard(getTxFrom(selectedTxDetails), 'txFrom')}
+                          >
+                            {copiedField === 'txFrom' ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
+                          </Button>
+                        </div>
+                        <p className="font-mono text-xs break-all">
+                          {getTxFrom(selectedTxDetails)}
+                        </p>
+                      </div>
+                    )}
+
+                    {/* To - full address */}
+                    {getTxTo(selectedTxDetails) && (
+                      <div className="py-2">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-[10px] text-muted-foreground">To</span>
+                          <Button 
+                            variant="ghost" 
+                            size="sm" 
+                            className="h-5 w-5 p-0" 
+                            onClick={() => copyToClipboard(getTxTo(selectedTxDetails), 'txTo')}
+                          >
+                            {copiedField === 'txTo' ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
+                          </Button>
+                        </div>
+                        <p className="font-mono text-xs break-all">
+                          {getTxTo(selectedTxDetails)}
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Amount, OU (Gas), Nonce - 3 columns: left, center, right */}
+                    <div className="grid grid-cols-3 gap-0 py-2">
+                      {getTxAmount(selectedTxDetails) && (
+                        <div className="text-left">
+                          <span className="text-[10px] text-muted-foreground">Amount</span>
+                          <p className="font-mono text-xs mt-0.5">
+                            {getTxAmount(selectedTxDetails)} OCT
+                          </p>
+                        </div>
+                      )}
+                      {getTxOu(selectedTxDetails) && (() => {
+                        const ouValue = getTxOu(selectedTxDetails);
+                        const ouNum = parseInt(ouValue) || 0;
+                        const feeOct = (ouNum / 1_000_000).toFixed(6);
+                        return (
+                          <div className="text-center">
+                            <span className="text-[10px] text-muted-foreground">OU (Gas)</span>
+                            <p className="font-mono text-[10px] mt-0.5">{ouValue}</p>
+                            <p className="text-[9px] text-muted-foreground">≈ {feeOct} OCT</p>
+                          </div>
+                        );
+                      })()}
+                      {getTxNonce(selectedTxDetails) !== undefined && (
+                        <div className="text-right">
+                          <span className="text-[10px] text-muted-foreground">Nonce</span>
+                          <p className="font-mono text-xs mt-0.5">
+                            {getTxNonce(selectedTxDetails)}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Message */}
+                    {getTxMessage(selectedTxDetails) && (() => {
+                      const message = getTxMessage(selectedTxDetails)!;
+                      const isLongMessage = message.length > 100;
+                      const truncatedMsg = isLongMessage ? `${message.slice(0, 30)}...${message.slice(-30)}` : message;
+                      return (
+                        <div className="py-2">
+                          <span className="text-[10px] text-muted-foreground">Message</span>
+                          <p className="text-[10px] mt-0.5 break-all">
+                            {isLongMessage && !showFullMessage ? truncatedMsg : message}
+                          </p>
+                          {isLongMessage && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => setShowFullMessage(!showFullMessage)}
+                              className="h-5 px-1 text-[9px] text-muted-foreground hover:text-foreground mt-1"
+                            >
+                              {showFullMessage ? 'Show less' : 'Show all'}
+                            </Button>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+
+                  {/* View on Explorer - outside divide container */}
+                  <div className="poctra-tx-explorer-action">
+                    <Button
+                      variant="ghost"
+                      className="w-full h-10"
+                      asChild
+                    >
+                      <a 
+                        href={`${scannerUrl(selectedTxHash ?? "")}`} 
+                        target="_blank" 
+                        rel="noopener noreferrer"
+                      >
+                        <ExternalLink className="h-4 w-4 mr-2" />
+                        View on {scannerName}
+                      </a>
+                    </Button>
+                  </div>
+                </>
+                ) : (
+                  <div className="text-center py-12 text-muted-foreground">
+                    <p className="text-sm">No transaction data available</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Header - Fixed position for expanded mode */}
+      <header className={`octra-header w-full ${isPopupMode ? 'sticky top-0' : 'fixed top-0 left-0 right-0'} z-50`}>
+        <div className={`w-full ${isPopupMode ? 'px-3' : 'px-2'}`}>
+          <div className={`flex items-center justify-between ${isPopupMode ? 'py-1' : 'py-2'}`}>
+            <div className="flex items-center space-x-4">
+              <div className={`flex ${isPopupMode ? 'items-center space-x-2' : 'items-center space-x-3'}`}>
+                <Avatar className={`${isPopupMode ? 'h-6 w-6' : 'h-10 w-10'} flex-shrink-0`}>
+                  <svg
+                    viewBox="0 0 50 50"
+                    fill="none"
+                    xmlns="http://www.w3.org/2000/svg"
+                    className={`h-full w-full ${evmMode ? '' : operationMode === 'private' ? 'text-[#00E5C0]' : 'text-[#3B567F]'}`}
+                    style={evmMode ? { filter: 'sepia(1) saturate(2) hue-rotate(-5deg) brightness(1.1)' } : undefined}
+                    role="img"
+                    aria-label="OctWa Logo"
+                  >
+                    <circle
+                      cx="25"
+                      cy="25"
+                      r="21"
+                      stroke={evmMode ? '#3B567F' : 'currentColor'}
+                      strokeWidth="8"
+                      fill="none"
+                    />
+                    <circle cx="25" cy="25" r="9" fill={evmMode ? '#3B567F' : 'currentColor'} />
+                  </svg>
+                </Avatar>
+                <div className={`flex flex-col ${!isPopupMode && showWalletSidebar ? 'justify-center' : ''}`}>
+                  <div className="flex items-center gap-2">
+                    <h1 className={`${isPopupMode ? 'text-sm' : 'text-xl'} font-semibold text-foreground`}>
+                      {__APP_TITLE__}
+                    </h1>
+                    {/* EVM Mode Badge */}
+                    {!isPopupMode && evmMode && (
+                      <Badge className="text-xs px-2 py-0.5 border-transparent bg-orange-600 text-white hover:bg-orange-600 dark:bg-orange-500 dark:hover:bg-orange-500">
+                        EVM Mode
+                      </Badge>
+                    )}
+                    {/* Mode Badge - Only show when inline modal is open, except for decrypt (has corner badge) */}
+                    {!isPopupMode && !evmMode && (expandedSendModal || expandedPrivateModal === 'encrypt') && (
+                        <Badge 
+                        className={`text-xs px-2 py-0.5 pointer-events-none ${
+                          operationMode === 'private' 
+                              ? 'bg-[#00E5C0] text-white' 
+                            : 'bg-foreground/10 text-foreground border border-foreground/20'
+                        }`}
+                      >
+                        {operationMode === 'private' ? 'Private' : 'Public'}
+                      </Badge>
+                    )}
+                  </div>
+                  {/* Address row - with transition for height */}
+                  <div className={`overflow-hidden transition-all duration-300 ${
+                    isPopupMode || !showWalletSidebar ? 'max-h-8 opacity-100 mt-0.5' : 'max-h-0 opacity-0'
+                  }`}>
+                    <div className="flex items-center space-x-2">
+                      {/* Wallet Selector - Sheet for popup mode, Dropdown for expanded */}
+                      {isPopupMode ? (
+                        <>
+                          <Sheet open={false} onOpenChange={() => undefined}>
+                            <SheetTrigger asChild>
+                              <Button variant="ghost" className="h-auto p-0 hover:bg-transparent">
+                                <div className="flex items-center space-x-1">
+                                  <p className={`text-xs font-medium ${operationMode === 'private' ? 'text-[#00E5C0]' : 'text-[#3B567F]'}`}>
+                                    {truncateAddress(wallet.address)}
+                                  </p>
+                                  <ChevronDown className="h-2.5 w-2.5 text-muted-foreground" />
+                                </div>
+                              </Button>
+                            </SheetTrigger>
+                            <SheetContent side="left" className="w-80 flex flex-col pb-14 px-0">
+                              <SheetHeader className="px-4">
+                                <SheetTitle className="text-sm flex items-center gap-2">
+                                  <WalletIcon className="h-4 w-4" />
+                                  Wallets ({wallets.length})
+                                </SheetTitle>
+                                <SheetDescription className="sr-only">Choose a wallet from your list</SheetDescription>
+                              </SheetHeader>
+                              <div className="flex-1 mt-3 overflow-hidden">
+                                <ScrollArea className="h-full max-h-[calc(100vh-200px)]" stabilizeGutter>
+                                  <ScrollAreaContent>
+                              <DraggableWalletList
+                                      wallets={wallets}
+                                      activeWallet={wallet}
+                                      nonce={nonce}
+                                      walletNonces={walletNonces}
+                                      setWalletNonces={setWalletNonces}
+                                      onSwitchWallet={onSwitchWallet}
+                                      onCopyAddress={copyToClipboard}
+                                      onDeleteWallet={setWalletToDelete}
+                                      onReorderWallets={onReorderWallets}
+                                      copiedField={copiedField}
+                                      isPopupMode={true}
+                                      isPrivateMode={operationMode === 'private'}
+                                      closeSelector={() => setShowWalletSelector(false)}
+                                    />
+                                  </ScrollAreaContent>
+                            </ScrollArea>
+                            </div>
+                            {/* Dashed separator */}
+                            <div className="border-t border-dashed border-border mx-4 mt-3" />
+                            <div className="mt-3 flex-shrink-0 px-4">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => {
+                                  setShowAddWalletDialog(true);
+                                  setShowWalletSelector(false);
+                                }}
+                                className="w-full justify-center gap-1.5 text-xs"
+                              >
+                                <Plus className="h-3 w-3" />
+                                Add Wallet
+                              </Button>
+                            </div>
+                          </SheetContent>
+                        </Sheet>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="group h-5 w-5 p-0 hover:bg-transparent"
+                            onClick={() => copyToClipboard(wallet.address, 'headerAddress')}
+                          >
+                            {copiedField === 'headerAddress' ? (
+                              <Check className="h-3 w-3 text-green-500" />
+                            ) : (
+                              <Copy className="h-3 w-3 text-muted-foreground hover:text-foreground transition group-hover:drop-shadow-[0_0_6px_currentColor]" />
+                            )}
+                          </Button>
+                        </>
+                      ) : (
+                        /* Expanded mode - show label + address only when wallet sidebar is hidden */
+                        <>
+                          <p className={`text-sm font-medium whitespace-nowrap ${evmMode ? 'text-orange-600 dark:text-orange-400' : operationMode === 'private' ? 'text-[#00E5C0]' : 'text-[#3B567F]'}`}>
+                            {evmMode && selectedEVMWallet 
+                              ? `${getWalletDisplayName(selectedEVMWallet.octraAddress)} - ${selectedEVMWallet.evmAddress.slice(0, 10)}...${selectedEVMWallet.evmAddress.slice(-6)}`
+                              : `${getWalletDisplayName(wallet.address)} - ${truncateAddress(wallet.address)}`
+                            }
+                          </p>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => copyToClipboard(evmMode && selectedEVMWallet ? selectedEVMWallet.evmAddress : wallet.address, 'headerAddress')}
+                            className="group h-6 w-6 p-0 flex-shrink-0 hover:bg-transparent"
+                          >
+                            {copiedField === 'headerAddress' ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3 transition group-hover:drop-shadow-[0_0_6px_currentColor]" />}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setShowReceiveDialog(true)}
+                            className="group h-6 w-6 p-0 flex-shrink-0 hover:bg-transparent"
+                            title="Show QR Code"
+                          >
+                            <QrCode className="h-3 w-3 transition group-hover:drop-shadow-[0_0_6px_currentColor]" />
+                          </Button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+              {/* Hide badges in popup mode to save space - Nonce moved to sidebar */}
+            </div>
+
+            <div className={`flex items-center ${isPopupMode ? 'space-x-1' : 'space-x-2'}`}>
+              {isPopupMode ? (
+                // Popup mode - Compact layout
+                <>
+                  <ThemeToggle isPopupMode={true} />
+                  {/* Mobile Hamburger Menu with expanded functionality */}
+                  <Sheet open={showMobileMenu} onOpenChange={setShowMobileMenu}>
+                    <SheetTrigger asChild>
+                      <Button variant="ghost" size="sm" className="group h-7 w-7 p-0 hover:bg-transparent">
+                        <Menu className="h-3.5 w-3.5 transition group-hover:drop-shadow-[0_0_6px_currentColor]" />
+                      </Button>
+                    </SheetTrigger>
+                    <SheetContent side="right" className="w-72 pb-14 flex flex-col">
+                      <SheetHeader className="mt-2">
+                        <SheetTitle className="text-sm">Wallet Menu</SheetTitle>
+                        <SheetDescription className="sr-only">Wallet settings and actions</SheetDescription>
+                      </SheetHeader>
+                      <div className="flex-1 flex flex-col justify-center space-y-3">
+                        {/* Expand View Button */}
+                        {typeof chrome !== 'undefined' && chrome.tabs && (
+                          <div className="space-y-1">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => {
+                                chrome.tabs.create({
+                                  url: chrome.runtime.getURL('index.html')
+                                });
+                                setShowMobileMenu(false);
+                              }}
+                              className="group w-full justify-start gap-1.5 text-xs h-10 hover:bg-transparent"
+                            >
+                              <svg className="h-3.5 w-3.5 transition group-hover:drop-shadow-[0_0_6px_currentColor]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                              </svg>
+                              <span className="transition group-hover:drop-shadow-[0_0_6px_currentColor]">Expand View</span>
+                            </Button>
+                            <p className="text-[10px] text-muted-foreground pl-7">Access More Feature</p>
+                          </div>
+                        )}
+
+                        {/* EVM Assets */}
+                        {typeof chrome !== 'undefined' && chrome.tabs && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => {
+                              onExpandedView?.('evm');
+                              setShowMobileMenu(false);
+                            }}
+                            className="group w-full justify-start gap-1.5 text-xs h-10 text-orange-600 dark:text-orange-400 hover:text-orange-600 dark:hover:text-orange-300 hover:bg-transparent"
+                          >
+                            <Coins className="h-3.5 w-3.5 transition group-hover:drop-shadow-[0_0_6px_currentColor]" />
+                            <span className="transition group-hover:drop-shadow-[0_0_6px_currentColor]">EVM Assets</span>
+                          </Button>
+                        )}
+
+                        {/* RPC Provider */}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            setShowRPCManager(true);
+                            setShowMobileMenu(false);
+                          }}
+                          className="group w-full justify-start gap-1.5 text-xs h-10 hover:bg-transparent"
+                        >
+                          <Wifi className="h-3.5 w-3.5 transition group-hover:drop-shadow-[0_0_6px_currentColor]" />
+                          <span className="transition group-hover:drop-shadow-[0_0_6px_currentColor]">RPC Provider</span>
+                        </Button>
+
+                        {/* Connected dApps */}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            setShowDAppsManager(true);
+                            setShowMobileMenu(false);
+                          }}
+                          className="group w-full justify-start gap-1.5 text-xs h-10 hover:bg-transparent"
+                        >
+                          <Globe className="h-3.5 w-3.5 transition group-hover:drop-shadow-[0_0_6px_currentColor]" />
+                          <span className="transition group-hover:drop-shadow-[0_0_6px_currentColor]">Connected dApps</span>
+                        </Button>
+
+                        {/* Address Book */}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            setShowAddressBook(true);
+                            setShowMobileMenu(false);
+                          }}
+                          className="group w-full justify-start gap-1.5 text-xs h-10 hover:bg-transparent"
+                        >
+                          <BookUser className="h-3.5 w-3.5 transition group-hover:drop-shadow-[0_0_6px_currentColor]" />
+                          <span className="transition group-hover:drop-shadow-[0_0_6px_currentColor]">Address Book</span>
+                        </Button>
+
+                        {/* Export Private Keys */}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            setShowExportKeys(true);
+                            setShowMobileMenu(false);
+                          }}
+                          className="group w-full justify-start gap-1.5 text-xs h-10 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300 hover:bg-transparent"
+                        >
+                          <Key className="h-3.5 w-3.5 transition group-hover:drop-shadow-[0_0_6px_currentColor]" />
+                          <span className="transition group-hover:drop-shadow-[0_0_6px_currentColor]">Export Keys</span>
+                        </Button>
+
+                        {/* Lock Wallet */}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            setShowLockConfirm(true);
+                            setShowMobileMenu(false);
+                          }}
+                          className="group w-full justify-start gap-1.5 text-xs h-10 text-orange-600 hover:text-orange-700 dark:text-orange-400 dark:hover:text-orange-300 hover:bg-transparent"
+                        >
+                          <Lock className="h-3.5 w-3.5 transition group-hover:drop-shadow-[0_0_6px_currentColor]" />
+                          <span className="transition group-hover:drop-shadow-[0_0_6px_currentColor]">Lock Wallet</span>
+                        </Button>
+
+                        {/* Reset All */}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            setShowResetConfirm(true);
+                            setShowMobileMenu(false);
+                          }}
+                          className="group w-full justify-start gap-1.5 text-xs h-10 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300 hover:bg-transparent"
+                        >
+                          <RotateCcw className="h-3.5 w-3.5 transition group-hover:drop-shadow-[0_0_6px_currentColor]" />
+                          <span className="transition group-hover:drop-shadow-[0_0_6px_currentColor]">Reset All</span>
+                        </Button>
+                      </div>
+                    </SheetContent>
+                  </Sheet>
+                </>
+              ) : (
+                // Expanded mode - Full layout
+                <>
+                  {/* EVM Mode Header Controls */}
+                  {evmMode ? (
+                    <>
+                      <ThemeToggle isPopupMode={false} className="h-9 w-9 hover:bg-transparent" />
+                      <div className="flex items-center gap-2">
+                        <select
+                          value={evmNetwork.id}
+                          onChange={(e) => handleEvmNetworkChange(e.target.value)}
+                          className="h-9 px-3 pr-8 text-xs bg-background rounded-md text-orange-600 dark:text-orange-400 focus:outline-none focus:ring-2 focus:ring-orange-500/50 appearance-none bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23f97316%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E')] bg-[length:16px] bg-[right_8px_center] bg-no-repeat hover:bg-orange-500/10"
+                        >
+                          {allEvmNetworks.map((network) => (
+                            <option key={network.id} value={network.id}>
+                              {network.name}
+                            </option>
+                          ))}
+                        </select>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setShowEvmRpcManager(true)}
+                          className="group h-9 text-xs text-orange-600 dark:text-orange-400 hover:bg-transparent"
+                        >
+                          <Wifi className="h-3.5 w-3.5 mr-1.5 transition group-hover:drop-shadow-[0_0_6px_currentColor]" />
+                          <span className="transition group-hover:drop-shadow-[0_0_6px_currentColor]">Network</span>
+                        </Button>
+                      </div>
+                      {/* Dashed separator */}
+                      <div className="h-5 border-l border-dashed border-border mx-1" />
+                      {/* Export EVM Key */}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => { setEvmExportKeyVisible(false); setShowEvmExportKey(true); }}
+                        className="group h-9 text-xs text-orange-600 dark:text-orange-400 hover:bg-transparent"
+                      >
+                        <Key className="h-3.5 w-3.5 mr-1.5 transition group-hover:drop-shadow-[0_0_6px_currentColor]" />
+                        <span className="transition group-hover:drop-shadow-[0_0_6px_currentColor]">Export Key</span>
+                      </Button>
+                      {/* Dashed separator */}
+                      <div className="h-5 border-l border-dashed border-border mx-1" />
+                      {/* Exit EVM Mode Button - Red color */}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={exitEvmMode}
+                        className="group h-9 px-4 text-red-500 hover:text-red-600 hover:bg-transparent font-medium"
+                      >
+                        <X className="h-4 w-4 mr-2 transition group-hover:drop-shadow-[0_0_6px_currentColor]" />
+                        <span className="transition group-hover:drop-shadow-[0_0_6px_currentColor]">Exit EVM Mode</span>
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <ThemeToggle isPopupMode={false} className="hover:bg-transparent" />
+                      <div className="h-5 border-l border-dashed border-border mx-1" />
+                      {/* Desktop Menu Items - Hidden in EVM mode */}
+                      <div className="hidden lg:flex items-center space-x-2">
+
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setShowRPCManager(true)}
+                          className="group flex items-center gap-2 hover:bg-transparent"
+                        >
+                          <Wifi className="h-4 w-4 transition group-hover:drop-shadow-[0_0_6px_currentColor]" />
+                          <span className="transition group-hover:drop-shadow-[0_0_6px_currentColor]">RPC</span>
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setShowDAppsManager(true)}
+                          className="group flex items-center gap-2 hover:bg-transparent"
+                        >
+                          <Globe className="h-4 w-4 transition group-hover:drop-shadow-[0_0_6px_currentColor]" />
+                          <span className="transition group-hover:drop-shadow-[0_0_6px_currentColor]">dApps</span>
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setShowAddressBook(true)}
+                          className="group flex items-center gap-2 hover:bg-transparent"
+                        >
+                          <BookUser className="h-4 w-4 transition group-hover:drop-shadow-[0_0_6px_currentColor]" />
+                          <span className="transition group-hover:drop-shadow-[0_0_6px_currentColor]">Address Book</span>
+                        </Button>
+                        
+                        {/* Text buttons: Export Private Keys, Lock Wallet, Reset All */}
+                        <Button 
+                          variant="ghost" 
+                          size="sm"
+                          className="group text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300 flex items-center gap-2 hover:bg-transparent"
+                          onClick={() => setShowExportKeys(true)}
+                        >
+                          <Key className="h-4 w-4 transition group-hover:drop-shadow-[0_0_6px_currentColor]" />
+                          <span className="transition group-hover:drop-shadow-[0_0_6px_currentColor]">Export Keys</span>
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="group text-orange-600 hover:text-orange-700 dark:text-orange-400 dark:hover:text-orange-300 flex items-center gap-2 hover:bg-transparent"
+                          onClick={() => setShowLockConfirm(true)}
+                        >
+                          <Lock className="h-4 w-4 transition group-hover:drop-shadow-[0_0_6px_currentColor]" />
+                          <span className="transition group-hover:drop-shadow-[0_0_6px_currentColor]">Lock</span>
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setShowResetConfirm(true)}
+                          className="group text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300 flex items-center gap-2 hover:bg-transparent"
+                        >
+                          <RotateCcw className="h-4 w-4 transition group-hover:drop-shadow-[0_0_6px_currentColor]" />
+                          <span className="transition group-hover:drop-shadow-[0_0_6px_currentColor]">Reset</span>
+                        </Button>
+                      </div>
+
+                      {/* Mobile/Tablet Hamburger Menu */}
+                      <div className="lg:hidden">
+                        <Sheet open={showMobileMenu} onOpenChange={setShowMobileMenu}>
+                          <SheetTrigger asChild>
+                            <Button variant="ghost" size="sm">
+                              <Menu className="h-4 w-4" />
+                            </Button>
+                          </SheetTrigger>
+                          <SheetContent side="right" className="w-80">
+                            <SheetHeader>
+                              <SheetTitle>Additional Menu</SheetTitle>
+                              <SheetDescription className="sr-only">Additional wallet settings and actions</SheetDescription>
+                            </SheetHeader>
+                            <div className="mt-6 space-y-4">
+                              {/* RPC Provider */}
+                              <Button
+                                variant="outline"
+                                onClick={() => {
+                                  setShowRPCManager(true);
+                                  setShowMobileMenu(false);
+                                }}
+                                className="w-full justify-start gap-2"
+                              >
+                                <Wifi className="h-4 w-4" />
+                                RPC Provider
+                          </Button>
+
+                          {/* Connected dApps */}
+                          <Button
+                            variant="outline"
+                            onClick={() => {
+                              setShowDAppsManager(true);
+                              setShowMobileMenu(false);
+                            }}
+                            className="w-full justify-start gap-2"
+                          >
+                            <Globe className="h-4 w-4" />
+                            Connected dApps
+                          </Button>
+
+                          {/* Address Book */}
+                          <Button
+                            variant="outline"
+                            onClick={() => {
+                              setShowAddressBook(true);
+                              setShowMobileMenu(false);
+                            }}
+                            className="w-full justify-start gap-2"
+                          >
+                            <BookUser className="h-4 w-4" />
+                            Address Book
+                          </Button>
+
+                          {/* Export Private Keys */}
+                          <Button
+                            variant="destructive"
+                            onClick={() => {
+                              setShowExportKeys(true);
+                              setShowMobileMenu(false);
+                            }}
+                            className="w-full justify-start gap-2"
+                          >
+                            <Key className="h-4 w-4" />
+                            Export Private Keys
+                          </Button>
+
+                          {/* Lock Wallet */}
+                          <Button
+                            variant="outline"
+                            onClick={() => {
+                              setShowLockConfirm(true);
+                              setShowMobileMenu(false);
+                            }}
+                            className="w-full justify-start gap-2 text-orange-600 hover:text-orange-700 dark:text-orange-400 dark:hover:text-orange-300"
+                          >
+                            <Lock className="h-4 w-4" />
+                            Lock Wallet
+                          </Button>
+
+                          {/* Reset All */}
+                          <Button
+                            variant="outline"
+                            onClick={() => {
+                              setShowResetConfirm(true);
+                              setShowMobileMenu(false);
+                            }}
+                            className="w-full justify-start gap-2 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
+                          >
+                            <RotateCcw className="h-4 w-4" />
+                            Reset All
+                          </Button>
+                        </div>
+                      </SheetContent>
+                    </Sheet>
+                  </div>
+                    </>
+                  )}
+                </>
+              )}
+
+              {/* Dialogs - Keep outside of mobile menu for proper functionality */}
+              {/* Wallet Removal Confirmation Dialog */}
+              <AlertDialog open={!!walletToDelete} onOpenChange={(open) => !open && setWalletToDelete(null)}>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Remove Wallet</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      Are you sure you want to remove wallet{' '}
+                      <span className="font-mono">
+                        {walletToDelete ? truncateAddress(walletToDelete.address) : ''}
+                      </span>
+                      ? This action cannot be undone.
+                      {walletToDelete?.address === wallet.address && (
+                        <div className="mt-2 p-2 bg-yellow-50 dark:bg-yellow-950/50 rounded text-sm">
+                          <strong>Note:</strong> This is your currently active wallet. 
+                          The first remaining wallet will become active.
+                        </div>
+                      )}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel onClick={() => setWalletToDelete(null)}>
+                      Cancel
+                    </AlertDialogCancel>
+                    <AlertDialogAction 
+                      onClick={handleRemoveWallet} 
+                      className="bg-red-600 hover:bg-red-700"
+                    >
+                      Remove Wallet
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+              
+              {/* Add Wallet - Use screen-based navigation for both modes */}
+              <AddWalletPopup
+                key={`${addWalletInitialScreen}-${showAddWalletDialog ? 'open' : 'closed'}`}
+                open={showAddWalletDialog}
+                onOpenChange={setShowAddWalletDialog}
+                onWalletCreated={handleImportSuccess}
+                isPopupMode={isPopupMode}
+                initialScreen={addWalletInitialScreen}
+              />
+
+              <Dialog open={showRPCManager} onOpenChange={setShowRPCManager}>
+                <DialogContent
+                  className={isPopupMode ? "poctra-manager-screen" : "sm:max-w-2xl max-h-[80vh] overflow-y-auto"}
+                  hideCloseButton={isPopupMode}
+                  preventCloseOnOutsideClick
+                  onEscapeKeyDown={(event) => event.preventDefault()}
+                >
+                  <DialogHeader className={isPopupMode ? "poctra-manager-header" : ""}>
+                    {isPopupMode && <Button variant="ghost" size="icon" className="poctra-mobile-back" onClick={() => setShowRPCManager(false)}><ChevronLeft /></Button>}
+                    <div><DialogTitle>RPC Management</DialogTitle>{isPopupMode && <DialogDescription>Choose the active Octra network</DialogDescription>}</div>
+                    {!isPopupMode && (
+                      <DialogDescription>
+                        Manage your RPC providers to connect to different blockchain networks.
+                      </DialogDescription>
+                    )}
+                  </DialogHeader>
+                  <RPCProviderManager 
+                    onClose={() => setShowRPCManager(false)} 
+                    onRPCChange={handleRPCChange}
+                    isPopupMode={isPopupMode}
+                  />
+                </DialogContent>
+              </Dialog>
+              
+              <Dialog open={showDAppsManager} onOpenChange={setShowDAppsManager}>
+                <DialogContent
+                  className={isPopupMode ? "poctra-manager-screen" : "sm:max-w-2xl max-h-[80vh] overflow-y-auto"}
+                  hideCloseButton={isPopupMode}
+                  preventCloseOnOutsideClick
+                  onEscapeKeyDown={(event) => event.preventDefault()}
+                >
+                  <DialogHeader className={isPopupMode ? "poctra-manager-header" : ""}>
+                    {isPopupMode && <Button variant="ghost" size="icon" className="poctra-mobile-back" onClick={() => setShowDAppsManager(false)}><ChevronLeft /></Button>}
+                    <div><DialogTitle>Connected dApps</DialogTitle>{isPopupMode && <DialogDescription>Review wallet permissions</DialogDescription>}</div>
+                    {!isPopupMode && (
+                      <DialogDescription>
+                        View and manage applications that have been granted access to your wallet.
+                      </DialogDescription>
+                    )}
+                  </DialogHeader>
+                  <ConnectedDAppsManager 
+                    wallets={wallets} 
+                    onClose={() => setShowDAppsManager(false)}
+                    isPopupMode={isPopupMode}
+                  />
+                </DialogContent>
+              </Dialog>
+
+              {/* Address Book Dialog */}
+              <Dialog open={showAddressBook} onOpenChange={setShowAddressBook}>
+                <DialogContent
+                  className={isPopupMode ? "poctra-manager-screen" : "sm:max-w-lg max-h-[80vh] overflow-hidden"}
+                  hideCloseButton={isPopupMode}
+                  preventCloseOnOutsideClick
+                  onEscapeKeyDown={(event) => event.preventDefault()}
+                >
+                  <DialogHeader className={isPopupMode ? "poctra-manager-header" : ""}>
+                    {isPopupMode && <Button variant="ghost" size="icon" className="poctra-mobile-back" onClick={() => setShowAddressBook(false)}><ChevronLeft /></Button>}
+                    <div><DialogTitle>Address Book</DialogTitle>
+                    <DialogDescription className={isPopupMode ? "sr-only" : ""}>
+                      Manage your reusable recipients. All data is stored locally and privately.
+                    </DialogDescription>
+                    </div>
+                  </DialogHeader>
+                  <AddressBook 
+                    isPopupMode={isPopupMode}
+                    currentMode={operationMode}
+                    prefilledAddress={addressBookPrefilledAddress}
+                  />
+                </DialogContent>
+              </Dialog>
+
+              {/* Export Private Keys Dialog */}
+              <ExportPrivateKeys 
+                wallet={wallet} 
+                open={showExportKeys} 
+                onOpenChange={setShowExportKeys}
+                isPopupMode={isPopupMode}
+              />
+
+              {/* EVM Export Key Dialog — MetaMask-compatible hex private key */}
+              <Dialog open={showEvmExportKey} onOpenChange={(o) => { setShowEvmExportKey(o); if (!o) { setEvmExportKeyVisible(false); setEvmExportKeyCopied(false); setEvmExportKeyHex(''); } }}>
+                <DialogContent className="max-w-sm">
+                  <DialogHeader>
+                    <DialogTitle className="flex items-center gap-2 text-orange-600 dark:text-orange-400">
+                      <Key className="h-4 w-4" />
+                      Export EVM Private Key
+                    </DialogTitle>
+                    <DialogDescription>
+                      This is your Ethereum-compatible private key. Import it into MetaMask or any EVM wallet.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="space-y-3 py-2">
+                    <div className="p-3 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-md">
+                      <p className="text-xs text-amber-800 dark:text-amber-300 font-medium">⚠️ Keep this key secret. Anyone with this key controls your EVM funds.</p>
+                    </div>
+                    {selectedEVMWallet ? (
+                      <>
+                        <div className="space-y-1">
+                          <p className="text-xs text-muted-foreground">EVM Address</p>
+                          <p className="text-xs font-mono bg-muted px-2 py-1.5 rounded break-all">{selectedEVMWallet.evmAddress}</p>
+                        </div>
+                        <div className="space-y-1">
+                          <p className="text-xs text-muted-foreground">Private Key (hex)</p>
+                          <div className="relative">
+                            <p className="text-xs font-mono bg-muted px-2 py-1.5 rounded break-all pr-16">
+                              {evmExportKeyVisible && evmExportKeyHex
+                                ? `0x${evmExportKeyHex}`
+                                : '•'.repeat(64)}
+                            </p>
+                            <div className="absolute right-1 top-1 flex gap-1">
+                              <Button
+                                variant="ghost" size="sm"
+                                className="h-6 w-6 p-0 hover:bg-transparent"
+                                onClick={() => {
+                                  if (!evmExportKeyVisible) {
+                                    // Derive key on-demand only when user clicks show
+                                    const octraW = wallets.find(w => w.address === selectedEVMWallet!.octraAddress);
+                                    if (octraW?.privateKey) {
+                                      const { privateKeyHex } = deriveEvmFromOctraKey(octraW.privateKey);
+                                      setEvmExportKeyHex(privateKeyHex);
+                                    }
+                                  } else {
+                                    // Clear from memory when hiding
+                                    setEvmExportKeyHex('');
+                                  }
+                                  setEvmExportKeyVisible(v => !v);
+                                }}
+                              >
+                                {evmExportKeyVisible ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+                              </Button>
+                              {evmExportKeyVisible && evmExportKeyHex && (
+                                <Button
+                                  variant="ghost" size="sm"
+                                  className="h-6 w-6 p-0 hover:bg-transparent"
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(`0x${evmExportKeyHex}`)
+                                    setEvmExportKeyCopied(true)
+                                    setTimeout(() => setEvmExportKeyCopied(false), 1500)
+                                  }}
+                                >
+                                  {evmExportKeyCopied
+                                    ? <Check className="h-3 w-3 text-green-500" />
+                                    : <Copy className="h-3 w-3" />}
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                        {!evmExportKeyVisible && (
+                          <Button
+                            variant="outline"
+                            className="w-full border-orange-500/30 text-orange-600 dark:text-orange-400 hover:bg-orange-500/5"
+                            onClick={() => setEvmExportKeyVisible(true)}
+                          >
+                            <Eye className="h-4 w-4 mr-2" />
+                            Reveal Private Key
+                          </Button>
+                        )}
+                      </>
+                    ) : (
+                      <p className="text-xs text-muted-foreground text-center py-4">No EVM wallet selected.</p>
+                    )}
+                  </div>
+                </DialogContent>
+              </Dialog>
+
+              {/* Receive QR Dialog for expanded mode */}
+              {!isPopupMode && (
+                <ReceiveDialog
+                  wallet={wallet}
+                  open={showReceiveDialog}
+                  onOpenChange={setShowReceiveDialog}                  isPopupMode={false}
+                  isFullscreen={false}
+                  customAddress={evmMode && selectedEVMWallet ? selectedEVMWallet.evmAddress : undefined}
+                  customTitle={evmMode ? `Receive ${evmNetwork.symbol}` : undefined}
+                  customInfo={evmMode ? `Share this address to receive ${evmNetwork.symbol} tokens on ${evmNetwork.name}. Only send ${evmNetwork.symbol} to this address.` : undefined}
+                  currentMode={operationMode}
+                />
+              )}
+              
+              <AlertDialog open={showLockConfirm} onOpenChange={setShowLockConfirm}>
+                <AlertDialogContent className={isPopupMode ? "w-[340px] p-4" : ""}>
+                  <AlertDialogHeader className={isPopupMode ? "pb-2" : ""}>
+                    <AlertDialogTitle className={isPopupMode ? "text-sm" : ""}>Lock Wallet</AlertDialogTitle>
+                    <AlertDialogDescription className={isPopupMode ? "text-xs" : ""}>
+                      {isPopupMode 
+                        ? "Lock your wallet? You'll need your password to unlock."
+                        : "Are you sure you want to lock your wallet? You will need to enter your password to unlock it again."
+                      }
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter className={isPopupMode ? "flex-row gap-2 mt-2" : ""}>
+                    <AlertDialogAction onClick={handleDisconnect} className={`bg-orange-600 hover:bg-orange-700 ${isPopupMode ? "h-9 text-xs flex-1" : ""}`}>
+                      Lock Wallet
+                    </AlertDialogAction>
+                    <AlertDialogCancel className={isPopupMode ? "h-9 text-xs flex-1 mt-0" : ""}>Cancel</AlertDialogCancel>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+
+              <AlertDialog
+                open={showResetConfirm}
+                onOpenChange={(open) => {
+                  setShowResetConfirm(open);
+                  if (!open) {
+                    setResetPassword('');
+                    setShowResetPassword(false);
+                  }
+                }}
+              >
+                <AlertDialogContent className={isPopupMode ? "w-[340px] p-4" : ""}>
+                  <AlertDialogHeader className={isPopupMode ? "pb-0" : ""}>
+                    <AlertDialogTitle className={`text-red-500 ${isPopupMode ? "text-sm" : ""}`}>Reset All Wallets</AlertDialogTitle>
+                    <AlertDialogDescription asChild>
+                      <div className={isPopupMode ? "text-xs space-y-2" : ""}>
+                        <span className="font-semibold text-red-500">Warning:</span> {isPopupMode ? "This will delete ALL wallet data:" : "This will permanently delete ALL wallet data including:"}
+                        <ul className={`list-disc list-inside ${isPopupMode ? "mt-1 space-y-0.5 text-[11px]" : "mt-2 space-y-1"}`}>
+                          <li>All imported/generated wallets</li>
+                          <li>Your password protection</li>
+                          <li>Connected dApps</li>
+                          <li>All encrypted data</li>
+                          <li>Address book</li>
+                        </ul>
+                        <p className={`font-semibold ${isPopupMode ? "mt-2 text-[11px]" : "mt-3"}`}>
+                          {isPopupMode ? "Backup your keys before proceeding!" : "Make sure you have backed up your private keys or seed phrases before proceeding!"}
+                        </p>
+
+                        <div className={isPopupMode ? "mt-1 space-y-1" : "mt-4 space-y-2"}>
+                          <Label htmlFor="resetPassword" className={`text-foreground ${isPopupMode ? "text-xs" : ""}`}>Enter password to confirm</Label>
+                          <div className="relative">
+                            <Input
+                              id="resetPassword"
+                              type={showResetPassword ? 'text' : 'password'}
+                              placeholder={isPopupMode ? "Password" : "Enter your wallet password"}
+                              value={resetPassword}
+                              onChange={(e) => setResetPassword(e.target.value)}
+                              onKeyPress={(e) => e.key === 'Enter' && handleResetAll()}
+                              className={`pr-10 ${isPopupMode ? "h-9 text-xs" : ""}`}
+                              disabled={isVerifyingReset}
+                            />
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="absolute right-0 top-0 h-full px-3 py-2 hover:bg-transparent"
+                              onClick={() => setShowResetPassword(!showResetPassword)}
+                              disabled={isVerifyingReset}
+                            >
+                              {showResetPassword ? (
+                                <EyeOff className="h-4 w-4" />
+                              ) : (
+                                <Eye className="h-4 w-4" />
+                              )}
+                            </Button>
+                          </div>
+                        </div>
+
+                        {/* Buttons inside description for popup mode to reduce spacing */}
+                        {isPopupMode && (
+                          <div className="flex gap-2 mt-2">
+                            <Button
+                              onClick={handleResetAll}
+                              disabled={isVerifyingReset || !resetPassword}
+                              className="bg-red-600 hover:bg-red-700 h-9 text-xs flex-1"
+                            >
+                              {isVerifyingReset ? 'Verifying...' : 'Reset All'}
+                            </Button>
+                            <Button
+                              variant="outline"
+                              onClick={() => setShowResetConfirm(false)}
+                              disabled={isVerifyingReset}
+                              className="h-9 text-xs flex-1"
+                            >
+                              Cancel
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  {!isPopupMode && (
+                    <AlertDialogFooter>
+                      <AlertDialogCancel disabled={isVerifyingReset}>Cancel</AlertDialogCancel>
+                      <Button
+                        onClick={handleResetAll}
+                        disabled={isVerifyingReset || !resetPassword}
+                        className="bg-red-600 hover:bg-red-700"
+                      >
+                        {isVerifyingReset ? 'Verifying...' : 'Reset All'}
+                      </Button>
+                    </AlertDialogFooter>
+                  )}
+                </AlertDialogContent>
+              </AlertDialog>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* Sticky Mode Toggle - Only for expanded mode */}
+      {!isPopupMode && (
+        <div 
+          className={`fixed z-40 bg-background/95 backdrop-blur-sm py-3 transition-all ${isResizing || isResizingHistory ? 'duration-0' : 'duration-300'} ease-out`}
+          style={{ 
+            left: sidebarLeftOffset, 
+            right: historySidebarRightOffset,
+            top: showWalletSidebar ? '49px' : '69px'
+          }}
+        >
+          <div className="px-6 py-6 sm:px-8 lg:px-12">
+            {/* Hide ModeToggle when in EVM mode */}
+            {!evmMode && (
+              <ModeToggle
+                currentMode={operationMode}
+                onModeChange={handleModeChange}
+                privateEnabled={privateEnabled}
+                encryptedBalance={encryptedBalance?.encrypted || 0}
+                pendingTransfersCount={pendingTransfersCount}
+                isCompact={false}
+                onRefresh={refreshWalletData}
+                isRefreshing={isRefreshingData}
+              />
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Wallet Sidebar - Only for expanded mode */}
+      {!isPopupMode && (
+        <>
+          <aside 
+            className={`fixed left-0 bottom-0 z-30 bg-background border-r border-border transition-all ${isResizing ? 'duration-0' : 'duration-300'} ${showWalletSidebar ? '' : 'w-0'} overflow-hidden`}
+            style={{ 
+              width: showWalletSidebar ? `${sidebarWidth}px` : '0px',
+              top: showWalletSidebar ? '49px' : '69px'
+            }}
+          >
+            <div className="h-full flex flex-col pt-4 pb-4 pl-2 pr-3" style={{ width: `${sidebarWidth - 8}px` }}>
+              {/* EVM Mode Sidebar Content */}
+              {evmMode ? (
+                <>
+                  <div className="flex items-center justify-between mb-4 mt-2">
+                    <h3 className="font-semibold text-base flex items-center gap-2 text-orange-600 dark:text-orange-400">
+                      <Coins className="h-5 w-5" />
+                      EVM Wallets ({evmWallets.length})
+                    </h3>
+                  </div>
+                  <ScrollArea className="flex-1 -ml-4 -mr-3" stabilizeGutter>
+                    <ScrollAreaContent className="space-y-0">
+                      {evmWallets.map((evmWallet, index) => {
+                        const isActive = selectedEVMWallet?.evmAddress === evmWallet.evmAddress;
+                        return (
+                          <div key={evmWallet.evmAddress}>
+                            {/* Dashed separator between wallets */}
+                            {index > 0 && (
+                              <div className="border-t border-dashed border-border mx-4" />
+                            )}
+                            <div 
+                              className="relative p-4 cursor-pointer transition-all hover:bg-muted/50"
+                              onClick={() => handleSelectEvmWallet(evmWallet)}
+                            >
+                              {/* Active indicator bar - left side */}
+                              <div className={`absolute left-0 top-1/2 -translate-y-1/2 w-1 rounded-r-full bg-orange-500 transition-all duration-200 ${
+                                isActive ? 'h-10 opacity-100' : 'h-0 opacity-0'
+                              }`} />
+                              
+                              <div className="flex items-center justify-between mb-1">
+                                <div className="flex items-center gap-2">
+                                  <Badge variant="secondary" className={`text-[10px] px-1.5 ${isActive ? 'bg-orange-500/20 text-orange-600 dark:text-orange-400' : ''}`}>
+                                    #{index + 1}
+                                  </Badge>
+                                  <span className={`text-xs truncate max-w-[140px] ${isActive ? 'text-orange-600 dark:text-orange-400 font-medium' : 'text-muted-foreground'}`}>
+                                    <WalletDisplayName address={evmWallet.octraAddress} />
+                                  </span>
+                                </div>
+                                <Button 
+                                  variant="ghost" 
+                                  size="sm" 
+                                  className="h-6 w-6 p-0" 
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    copyToClipboard(evmWallet.evmAddress, `evm-${index}`);
+                                  }}
+                                >
+                                  {copiedField === `evm-${index}` ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
+                                </Button>
+                              </div>
+                              <p className={`font-mono text-sm ${isActive ? 'text-orange-600 dark:text-orange-400' : 'text-muted-foreground'}`}>
+                                {evmWallet.evmAddress.slice(0, 10)}...{evmWallet.evmAddress.slice(-8)}
+                              </p>
+                              {/* Wallet type label */}
+                              <div className={`mt-1 text-[10px] ${isActive ? 'text-orange-500/70' : 'text-muted-foreground/70'}`}>
+                                {evmWallet.type === 'generated' ? 'Generated' 
+                                  : evmWallet.type === 'imported-mnemonic' ? 'Imported (Mnemonic)' 
+                                  : evmWallet.type === 'imported-evm-private-key' ? 'Imported (EVM Key)'
+                                  : evmWallet.type === 'imported-private-key' ? 'Imported (Key)' 
+                                  : ''}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </ScrollAreaContent>
+                  </ScrollArea>
+                </>
+              ) : (
+                /* Normal Octra Wallet Sidebar */
+                <>
+                  <div className="flex items-center justify-between mb-4 mt-2">
+                    <h3 className={`font-semibold text-base flex items-center gap-2 ${operationMode === 'private' ? 'text-[#00E5C0]' : ''}`}>
+                      <WalletIcon className="h-5 w-5" />
+                      Wallets ({wallets.length})
+                    </h3>
+                  </div>
+                  <ScrollArea className="flex-1 -ml-4 -mr-3" stabilizeGutter>
+                    <ScrollAreaContent>
+                      <DraggableWalletList
+                        wallets={wallets}
+                        activeWallet={wallet}
+                        nonce={nonce}
+                        walletNonces={walletNonces}
+                        setWalletNonces={setWalletNonces}
+                        onSwitchWallet={onSwitchWallet}
+                        onCopyAddress={copyToClipboard}
+                        onDeleteWallet={setWalletToDelete}
+                        onReorderWallets={onReorderWallets}
+                        copiedField={copiedField}
+                        isPopupMode={false}
+                        isPrivateMode={operationMode === 'private'}
+                      />
+                    </ScrollAreaContent>
+                  </ScrollArea>
+                  <div className="pt-4 mt-auto border-t border-dashed border-x-0 border-b-0 border-border">
+                    <Button
+                      variant="ghost"
+                      onClick={() => setShowAddWalletDialog(true)}
+                      className="w-full h-10 text-sm justify-center gap-2"
+                    >
+                      <Plus className="h-4 w-4" />
+                      Add Wallet
+                    </Button>
+                  </div>
+                </>
+              )}
+            </div>
+            
+            {/* Resize Handle - positioned outside content area */}
+            <div
+              className="absolute top-0 right-0 w-2 h-full cursor-col-resize hover:bg-primary/20 active:bg-primary/40 transition-colors z-10"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                setIsResizing(true);
+              }}
+            />
+          </aside>
+          
+          {/* Sidebar Toggle Button - aligned with sidebar edge */}
+          <button
+            onClick={() => {
+              setShowWalletSidebar(!showWalletSidebar);
+              // Update bothPanelsHidden state
+              if (!showWalletSidebar && showHistorySidebar) setBothPanelsHidden(false);
+              if (showWalletSidebar && !showHistorySidebar) setBothPanelsHidden(true);
+            }}
+            className={`fixed z-[50] h-12 w-4 flex items-center justify-center bg-muted/80 hover:bg-accent border-y border-r border-border transition-all opacity-30 hover:opacity-100 ${isResizing ? 'duration-0' : 'duration-300'}`}
+            style={{
+              left: showWalletSidebar ? `${sidebarWidth}px` : '0px',
+              top: showWalletSidebar ? '57px' : '71px'
+            }}
+          >
+            {showWalletSidebar ? <ChevronLeft className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+          </button>
+        </>
+      )}
+
+      {/* Main Content - Add padding-top for fixed header in expanded mode */}
+      <div 
+        className={isPopupMode ? '' : `transition-[padding-left,padding-right] ${isResizing || isResizingHistory ? 'duration-0' : 'duration-300'} ease-out`}
+        style={!isPopupMode ? { paddingLeft: sidebarLeftOffset, paddingRight: historySidebarRightOffset } : undefined}
+      >
+        <main className={isPopupMode ? 'octra-container pt-0 pb-0 px-3 flex flex-col h-[calc(100vh-50px)] overflow-hidden' : 'pt-[149px] pb-16 px-6 sm:px-8 lg:px-12 sm:pb-20'}>
+        {/* ============================================ */}
+        {/* POPUP MODE - NEW MAIN UI */}
+        {/* ============================================ */}
+        {isPopupMode ? (
+          <div className="flex flex-col flex-1 min-h-0 overflow-hidden pb-10">
+            {/* Sticky Header Section - Mode Toggle, Balance, Action Buttons, Recent Activity Title */}
+            <div className="flex-shrink-0 space-y-2 bg-background">
+              {/* Mode Toggle */}
+              <div className="mt-2">
+                <ModeToggle
+                  currentMode={operationMode}
+                  onModeChange={handleModeChange}
+                  privateEnabled={privateEnabled}
+                  encryptedBalance={encryptedBalance?.encrypted || 0}
+                  pendingTransfersCount={pendingTransfersCount}
+                  isCompact={true}
+                  onRefresh={refreshWalletData}
+                  isRefreshing={isRefreshingData}
+                />
+              </div>
+
+              {/* Balance Display */}
+              <div className="p-2">
+                <div className="text-center">
+                  <p className={`text-xs font-medium ${operationMode === 'private' ? 'text-[#00E5C0]' : 'text-muted-foreground'}`}>
+                    Balance
+                  </p>
+                  {(operationMode === 'private' ? isLoadingEncryptedBalance : isLoadingBalance) ? (
+                    <div className="h-10 flex items-center justify-center">
+                      <div className="w-5 h-5 rounded-full border-2 border-transparent animate-spin" style={{ borderTopColor: '#00E5C0' }} />
+                    </div>
+                  ) : balanceError && operationMode === 'public' ? (
+                    <div className="flex items-center justify-center gap-1.5 text-destructive text-xs py-2">
+                      <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" />
+                      <span>Failed to load</span>
+                      <button
+                        type="button"
+                        onClick={refreshWalletData}
+                        className="underline hover:no-underline ml-0.5"
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex items-center justify-center gap-2">
+                        <span className={`text-2xl font-bold ${operationMode === 'private' ? 'text-[#00E5C0]' : ''}`}>
+                          {operationMode === 'private'
+                            ? (encryptedBalance?.encrypted || 0).toFixed(8)
+                            : (balance || 0).toFixed(8)
+                          }
+                        </span>
+                        <Badge variant="outline" className={`text-base font-bold px-2 py-0.5 border-0 ${operationMode === 'private' ? 'text-[#00E5C0]' : ''}`}>
+                          OCT
+                        </Badge>
+                      </div>
+                      {octPrice !== null && (
+                        <p className="text-[10px] text-muted-foreground mt-0.5">
+                          ≈ {formatUsd((operationMode === 'private' ? (encryptedBalance?.encrypted || 0) : (balance || 0)) * octPrice)}
+                        </p>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div className={`grid ${operationMode === 'private' ? 'grid-cols-4 gap-3' : 'grid-cols-3 gap-2'}`}>
+                {operationMode === 'public' ? (
+                  <>
+                    {/* Encrypt Button */}
+                    <Button
+                      variant="outline"
+                      className="group flex flex-col items-center gap-1.5 h-16 py-2.5 px-2 border-0 rounded-none bg-transparent text-[#00E5C0] hover:bg-transparent hover:text-[#00E5C0]"
+                      onClick={() => setPopupScreen('encrypt')}
+                    >
+                      <Lock className="h-7 w-7 transition-colors group-hover:drop-shadow-[0_0_6px_rgba(0,229,192,0.5)]" />
+                      <span className="text-xs font-medium transition-colors group-hover:drop-shadow-[0_0_6px_rgba(0,229,192,0.5)]">Encrypt</span>
+                    </Button>
+                    {/* Send Button */}
+                    <Button
+                      variant="outline"
+                      className="group flex flex-col items-center gap-1.5 h-16 py-2.5 px-2 border-0 rounded-none bg-transparent hover:bg-transparent hover:text-primary"
+                      onClick={() => setPopupScreen('send')}
+                    >
+                      <Send className="h-7 w-7 transition-colors group-hover:drop-shadow-[0_0_6px_rgba(0,0,0,0.25)]" />
+                      <span className="text-xs font-medium transition-colors group-hover:drop-shadow-[0_0_6px_rgba(0,0,0,0.25)]">Send</span>
+                    </Button>
+                    {/* Receive Button */}
+                    <Button
+                      variant="outline"
+                      className="group flex flex-col items-center gap-1.5 h-16 py-2.5 px-2 border-0 rounded-none bg-transparent hover:bg-transparent hover:text-primary"
+                      onClick={() => setPopupScreen('receive')}
+                    >
+                      <QrCode className="h-7 w-7 transition-colors group-hover:drop-shadow-[0_0_6px_rgba(0,0,0,0.25)]" />
+                      <span className="text-xs font-medium transition-colors group-hover:drop-shadow-[0_0_6px_rgba(0,0,0,0.25)]">Receive</span>
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    {/* Decrypt Button */}
+                    <Button
+                      variant="outline"
+                      className="group flex flex-col items-center gap-1.5 h-16 py-2.5 px-2 border-0 rounded-none bg-transparent text-muted-foreground hover:bg-transparent hover:text-muted-foreground"
+                      onClick={() => setPopupScreen('decrypt')}
+                    >
+                      <Unlock className="h-7 w-7 transition-colors group-hover:drop-shadow-[0_0_10px_rgba(0,0,0,0.45)] dark:group-hover:drop-shadow-[0_0_10px_rgba(255,255,255,0.35)]" />
+                      <span className="text-xs font-medium transition-colors group-hover:drop-shadow-[0_0_10px_rgba(0,0,0,0.45)] dark:group-hover:drop-shadow-[0_0_10px_rgba(255,255,255,0.35)]">Decrypt</span>
+                    </Button>
+                    {/* Send Button */}
+                    <Button
+                      variant="outline"
+                      className="group flex flex-col items-center gap-1.5 h-16 py-2.5 px-2 border-0 rounded-none bg-transparent text-[#00E5C0] hover:bg-transparent hover:text-[#00E5C0]"
+                      onClick={() => setPopupScreen('send')}
+                    >
+                      <Send className="h-7 w-7 transition-colors group-hover:drop-shadow-[0_0_6px_rgba(0,229,192,0.5)]" />
+                      <span className="text-xs font-medium transition-colors group-hover:drop-shadow-[0_0_6px_rgba(0,229,192,0.5)]">Send</span>
+                    </Button>
+                    {/* Receive Button */}
+                    <Button
+                      variant="outline"
+                      className="group flex flex-col items-center gap-1.5 h-16 py-2.5 px-2 border-0 rounded-none bg-transparent text-[#00E5C0] hover:bg-transparent hover:text-[#00E5C0]"
+                      onClick={() => setPopupScreen('receive')}
+                    >
+                      <QrCode className="h-7 w-7 transition-colors group-hover:drop-shadow-[0_0_6px_rgba(0,229,192,0.5)]" />
+                      <span className="text-xs font-medium transition-colors group-hover:drop-shadow-[0_0_6px_rgba(0,229,192,0.5)]">Receive</span>
+                    </Button>
+                    {/* Claim Button */}
+                    <Button
+                      variant="outline"
+                      className="group flex flex-col items-center gap-1.5 h-16 py-2.5 px-2 border-0 rounded-none bg-transparent text-[#00E5C0] hover:bg-transparent hover:text-[#00E5C0]"
+                      onClick={() => setPopupScreen('claim')}
+                    >
+                      <Gift className="h-7 w-7 transition-colors group-hover:drop-shadow-[0_0_6px_rgba(0,229,192,0.5)]" />
+                      <span className="text-xs font-medium transition-colors group-hover:drop-shadow-[0_0_6px_rgba(0,229,192,0.5)]">Claim</span>
+                    </Button>
+                  </>
+                )}
+              </div>
+
+              {/* Recent Activity / Assets Tab Switcher */}
+              <div className="flex items-center justify-between pt-3">
+                <div className="flex items-end">
+                  <button
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => setPopupBottomTab('activity')}
+                    style={{
+                      outline: 'none',
+                      boxShadow: 'none',
+                      borderRadius: 0,
+                      borderTop: 0,
+                      borderLeft: 0,
+                      borderRight: 0,
+                      borderBottom: popupBottomTab === 'activity'
+                        ? operationMode === 'private'
+                          ? '2px solid #00E5C0'
+                          : '2px solid hsl(var(--primary))'
+                        : '2px solid transparent',
+                    }}
+                    className={`no-focus-ring text-sm font-medium px-3 pb-1.5 transition-colors ${
+                      popupBottomTab === 'activity'
+                        ? operationMode === 'private'
+                          ? 'text-[#00E5C0]'
+                          : 'text-foreground'
+                        : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    Activity
+                  </button>
+                  <button
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => setPopupBottomTab('assets')}
+                    style={{
+                      outline: 'none',
+                      boxShadow: 'none',
+                      borderRadius: 0,
+                      borderTop: 0,
+                      borderLeft: 0,
+                      borderRight: 0,
+                      borderBottom: popupBottomTab === 'assets'
+                        ? operationMode === 'private'
+                          ? '2px solid #00E5C0'
+                          : '2px solid hsl(var(--primary))'
+                        : '2px solid transparent',
+                    }}
+                    className={`no-focus-ring text-sm font-medium px-3 pb-1.5 transition-colors ${
+                      popupBottomTab === 'assets'
+                        ? operationMode === 'private'
+                          ? 'text-[#00E5C0]'
+                          : 'text-foreground'
+                        : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    Assets
+                  </button>
+                </div>
+                {popupBottomTab === 'activity' && (
+                  <a
+                    href={`${scannerAddressUrl(wallet.address)}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="p-1 rounded hover:bg-muted transition-colors mr-1 mb-1"
+                    title="View All on Explorer"
+                  >
+                    <ExternalLink className="h-3 w-3 text-muted-foreground" />
+                  </a>
+                )}
+              </div>
+            </div>
+
+            {/* Tab Content */}
+            <div className="flex-1 min-h-0 overflow-hidden">
+              {popupBottomTab === 'activity' ? (
+                <UnifiedHistory
+                  wallet={wallet}
+                  transactions={transactions}
+                  onTransactionsUpdate={handleTransactionsUpdate}
+                  isLoading={isLoadingTransactions}
+                  isPopupMode={true}
+                  hideBorder={true}
+                  operationMode={operationMode}
+                  isCompact={false}
+                  onViewTxDetails={handleViewTxDetails}
+                />
+              ) : (
+                <OctraAssets
+                  wallet={wallet}
+                  nonce={nonce}
+                  onBack={() => setPopupBottomTab('activity')}
+                  onTransactionSuccess={handleTransactionSuccess}
+                  onNonceUpdate={handleNonceUpdate}
+                  inline={true}
+                />
+              )}
+            </div>
+          </div>
+        ) : (
+        /* ============================================ */
+        /* EXPANDED MODE - NEW DASHBOARD UI */
+        /* ============================================ */
+        <div className="flex flex-col h-[calc(100vh-149px)]">
+          {/* Main Content Area */}
+          <div className={`flex-1 flex flex-col items-center justify-start ${evmMode ? 'pt-2' : 'pt-14'} pb-2 overflow-hidden`}>
+            {/* EVM Mode Content */}
+            {evmMode ? (
+              <>
+                {/* EVM Mode Header */}
+                <div className="w-full max-w-lg mb-4">
+                  <div className="text-sm text-orange-600 dark:text-orange-400 flex items-center gap-2">
+                    <Coins className="h-4 w-4" />
+                    Balance
+                  </div>
+                </div>
+
+                {/* EVM Balance Display */}
+                <div className="text-center mb-4">
+                  {selectedEVMWallet?.isLoading ? (
+                    <div className="flex items-center justify-center gap-2">
+                      <div className="w-6 h-6 rounded-full border-2 border-transparent animate-spin" style={{ borderTopColor: '#f97316' }} />
+                    </div>
+                  ) : selectedEVMWallet?.balance !== null ? (
+                    <>
+                      <div className="flex items-center justify-center gap-3">
+                        <span className="text-4xl font-bold tracking-tight text-orange-600 dark:text-orange-400">
+                          {selectedEVMWallet?.balance || '0.000000'} {evmNetwork.symbol}
+                        </span>
+                        <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-orange-600 dark:text-orange-400 hover:bg-orange-500/10"
+                          onClick={() => { fetchEvmBalance(); fetchEvmTokens(); fetchEvmNfts(); fetchEvmTransactions(); }}
+                          disabled={evmRpcStatus !== 'connected' || selectedEVMWallet?.isLoading}>
+                          <RefreshCw className={`h-4 w-4 ${selectedEVMWallet?.isLoading ? 'animate-spin' : ''}`} />
+                        </Button>
+                      </div>
+                      {ethPrice !== null && selectedEVMWallet?.balance && (
+                        <div className="text-lg text-muted-foreground mt-1">
+                          ≈ {calculateUSDValue(selectedEVMWallet.balance, ethPrice)}
+                          {evmNetwork.isTestnet && <span className="text-xs ml-2">(devnet)</span>}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="text-xl text-muted-foreground">
+                      {evmRpcStatus === 'connected' ? 'Loading...' : 'RPC Disconnected'}
+                    </div>
+                  )}
+                </div>
+
+                {/* Send Native Token Button */}
+                <div className="w-full max-w-lg mb-4">
+                  <Button variant="outline" className="w-full h-12 gap-2 border-orange-500/30 hover:border-orange-500/50 hover:bg-orange-500/5 text-orange-600 dark:text-orange-400"
+                    onClick={() => openEvmSendDialog('native')} disabled={evmRpcStatus !== 'connected'}>
+                    <Send className="h-4 w-4" />Send {evmNetwork.symbol}
+                  </Button>
+                </div>
+
+                {/* Tokens & NFTs Tabs */}
+                <div className="w-full max-w-lg">
+                  <Tabs value={evmActiveTab} onValueChange={(v) => setEvmActiveTab(v as 'tokens' | 'nfts')}>
+                    <div className="flex items-center justify-between mb-2">
+                      <TabsList className="h-8">
+                        <TabsTrigger value="tokens" className="text-xs h-7 px-3 gap-1"><Coins className="h-3 w-3" />Tokens ({evmTokens.length})</TabsTrigger>
+                        <TabsTrigger value="nfts" className="text-xs h-7 px-3 gap-1"><Image className="h-3 w-3" />NFTs ({evmNfts.length})</TabsTrigger>
+                      </TabsList>
+                      <Button variant="outline" size="sm" className="h-7 text-xs gap-1 border-orange-500/30" onClick={() => evmActiveTab === 'tokens' ? setShowEvmImportToken(true) : setShowEvmImportNFT(true)}>
+                        <Plus className="h-3 w-3" />Import
+                      </Button>
+                    </div>
+                    
+                    <TabsContent value="tokens" className="mt-0">
+                      <div className="space-y-2 max-h-[200px] overflow-auto">
+                        {isLoadingEvmTokens ? (
+                          <div className="flex items-center justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>
+                        ) : evmTokens.length > 0 ? (
+                          evmTokens.map((token) => (
+                            <div key={`${token.address}-${token.chainId}`} className="p-2.5 bg-muted/50 rounded-lg border border-border hover:border-orange-500/30 transition-colors flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <div className="w-8 h-8 rounded-full bg-orange-500/10 flex items-center justify-center text-xs font-bold text-orange-600 overflow-hidden flex-shrink-0">
+                                  {token.logo
+                                    ? <img src={token.logo} alt={token.symbol} className="w-full h-full object-contain" />
+                                    : token.symbol.slice(0, 2)
+                                  }
+                                </div>
+                                <div><p className="text-sm font-medium">{token.name}</p><p className="text-xs text-muted-foreground">{token.symbol}</p></div>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <p className="text-sm font-semibold">{token.balance}</p>
+                                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => openEvmSendDialog('token', token)} disabled={parseFloat(token.balance) <= 0}><Send className="h-3 w-3" /></Button>
+                              </div>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="flex flex-col items-center justify-center py-6 text-muted-foreground">
+                            <Coins className="h-8 w-8 mb-2 opacity-20" /><p className="text-xs">No tokens found</p>
+                            <Button variant="link" size="sm" className="text-xs" onClick={() => setShowEvmImportToken(true)}>Import Token</Button>
+                          </div>
+                        )}
+                      </div>
+                    </TabsContent>
+                    
+                    <TabsContent value="nfts" className="mt-0">
+                      <div className="grid grid-cols-3 gap-2 max-h-[200px] overflow-auto">
+                        {evmNfts.length > 0 ? (
+                          evmNfts.map((nft) => (
+                            <div key={`${nft.contractAddress}-${nft.tokenId}`} className="p-2 bg-muted/50 rounded-lg border border-border hover:border-orange-500/30 transition-colors">
+                              <div className="aspect-square bg-muted rounded mb-1.5 flex items-center justify-center overflow-hidden">
+                                {nft.imageUrl ? <img src={nft.imageUrl} alt={nft.name} className="w-full h-full object-cover" /> : <Image className="h-6 w-6 text-muted-foreground/30" />}
+                              </div>
+                              <p className="text-xs font-medium truncate">{nft.name}</p>
+                              <p className="text-[10px] text-muted-foreground">#{nft.tokenId}</p>
+                              <Button variant="outline" size="sm" className="w-full mt-1.5 h-6 text-[10px]" onClick={() => openEvmSendDialog('nft', undefined, nft)}><Send className="h-2.5 w-2.5 mr-1" />Send</Button>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="col-span-3 flex flex-col items-center justify-center py-6 text-muted-foreground">
+                            <Image className="h-8 w-8 mb-2 opacity-20" /><p className="text-xs">No NFTs found</p>
+                            <Button variant="link" size="sm" className="text-xs" onClick={() => setShowEvmImportNFT(true)}>Import NFT</Button>
+                          </div>
+                        )}
+                      </div>
+                    </TabsContent>
+                  </Tabs>
+                </div>
+              </>
+            ) : (
+              /* Normal Octra Wallet Content */
+              <>
+                {/* Mode Label */}
+                <div className="text-xs text-muted-foreground mb-1">
+                  {operationMode === 'private' ? 'Encrypted Balance' : 'Public Balance'}
+                </div>
+
+                {/* Balance Display */}
+                <div className="text-center mb-3">
+                  {(operationMode === 'private' ? isLoadingEncryptedBalance : isLoadingBalance) || isRefreshingData ? (
+                    <div className="flex items-center justify-center gap-2">
+                      <div className="w-6 h-6 rounded-full border-2 border-transparent animate-spin" style={{ borderTopColor: '#00E5C0' }} />
+                    </div>
+                  ) : balanceError && operationMode === 'public' ? (
+                    <div className="flex items-center justify-center gap-2 text-destructive text-sm py-1">
+                      <AlertCircle className="h-4 w-4 flex-shrink-0" />
+                      <span>Failed to load balance</span>
+                      <button
+                        type="button"
+                        onClick={refreshWalletData}
+                        className="underline hover:no-underline text-sm"
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex items-center justify-center gap-4">
+                        <div className={`text-3xl font-bold tracking-tight ${operationMode === 'private' ? 'text-[#00E5C0]' : ''}`}>
+                          {operationMode === 'private'
+                            ? `${(encryptedBalance?.encrypted || 0).toFixed(8)} OCT`
+                            : `${(balance || 0).toFixed(8)} OCT`
+                          }
+                        </div>
+                        {operationMode === 'public' ? (
+                          <>
+                            <div className="h-8 border-l border-dashed border-border" />
+                            <Button
+                              variant="ghost"
+                              className="group h-auto px-0 py-1 text-sm font-medium bg-transparent text-[#00E5C0] hover:bg-transparent hover:text-[#00E5C0]"
+                              onClick={() => openPrivateModal('encrypt')}
+                              disabled={!balance || balance <= 0.001}
+                            >
+                              <Lock className="h-6 w-6 mr-3 text-[#00E5C0] transition-colors group-hover:drop-shadow-[0_0_6px_rgba(0,229,192,0.6)]" />
+                              <span className="transition-colors group-hover:text-[#00E5C0] group-hover:drop-shadow-[0_0_6px_rgba(0,229,192,0.6)]">Encrypt</span>
+                            </Button>
+                          </>
+                        ) : (
+                          <>
+                            <div className="h-8 border-l border-dashed border-border" />
+                            <Button
+                              variant="outline"
+                              className="group h-auto px-0 py-1 text-sm font-medium bg-transparent border-0 text-muted-foreground hover:bg-transparent hover:text-muted-foreground"
+                              onClick={() => openPrivateModal('decrypt')}
+                              disabled={!encryptedBalance || encryptedBalance.encrypted <= 0}
+                            >
+                              <Unlock className="h-6 w-6 mr-3 text-muted-foreground transition-colors group-hover:drop-shadow-[0_0_10px_rgba(0,0,0,0.45)] dark:group-hover:drop-shadow-[0_0_10px_rgba(255,255,255,0.35)]" />
+                              <span className="transition-colors group-hover:drop-shadow-[0_0_10px_rgba(0,0,0,0.45)] dark:group-hover:drop-shadow-[0_0_10px_rgba(255,255,255,0.35)]">Decrypt</span>
+                            </Button>
+                          </>
+                        )}
+                      </div>
+                      {octPrice !== null && (
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          ≈ {formatUsd((operationMode === 'private' ? (encryptedBalance?.encrypted || 0) : (balance || 0)) * octPrice)}
+                        </p>
+                      )}
+                    </>
+                  )}
+                </div>
+
+                {/* Action Buttons */}
+                {operationMode === 'public' ? (
+                  /* Public Mode Actions */
+                  <div className="grid grid-cols-3 gap-3 w-full max-w-lg">
+                    {/* Standard Send */}
+                    <Button
+                      variant="outline"
+                      className="group flex flex-col items-center gap-2 h-auto py-4 border-0 rounded-none bg-transparent shadow-none hover:bg-transparent hover:text-primary transition-colors"
+                      onClick={() => openSendModal('standard')}
+                    >
+                      <Send className="h-7 w-7 transition-colors group-hover:drop-shadow-[0_0_12px_rgba(58,77,255,0.7)]" />
+                      <span className="text-sm font-medium transition-colors group-hover:drop-shadow-[0_0_12px_rgba(58,77,255,0.7)]">Send</span>
+                      <span className="text-[10px] text-muted-foreground">Single transfer</span>
+                    </Button>
+
+                    {/* Multi Send */}
+                    <Button
+                      variant="outline"
+                      className="group flex flex-col items-center gap-2 h-auto py-4 border-0 rounded-none bg-transparent shadow-none hover:bg-transparent hover:text-primary transition-colors"
+                      onClick={() => openSendModal('multi')}
+                    >
+                      <Layers className="h-7 w-7 transition-colors group-hover:drop-shadow-[0_0_8px_rgba(58,77,255,0.5)]" />
+                      <span className="text-sm font-medium transition-colors group-hover:drop-shadow-[0_0_8px_rgba(58,77,255,0.5)]">Multi Send</span>
+                      <span className="text-[10px] text-muted-foreground">Multiple recipients</span>
+                    </Button>
+
+                    {/* Bulk Send */}
+                    <Button
+                      variant="outline"
+                      className="group flex flex-col items-center gap-2 h-auto py-4 border-0 rounded-none bg-transparent shadow-none hover:bg-transparent hover:text-primary transition-colors"
+                      onClick={() => openSendModal('bulk')}
+                    >
+                      <FileText className="h-7 w-7 transition-colors group-hover:drop-shadow-[0_0_8px_rgba(58,77,255,0.5)]" />
+                      <span className="text-sm font-medium transition-colors group-hover:drop-shadow-[0_0_8px_rgba(58,77,255,0.5)]">Bulk Send</span>
+                      <span className="text-[10px] text-muted-foreground">Import from file</span>
+                    </Button>
+                  </div>
+                ) : (
+                  /* Private Mode Actions */
+                  <div className="grid grid-cols-2 gap-3 w-full max-w-lg">
+                    {/* Send (Private Transfer) */}
+                    <Button
+                      variant="outline"
+                      className="group flex flex-col items-center gap-2 h-auto py-4 border-0 rounded-none bg-transparent shadow-none text-[#00E5C0] hover:bg-transparent transition-colors"
+                      onClick={() => openSendModal('standard')}
+                    >
+                      <Send className="h-7 w-7 transition-colors group-hover:drop-shadow-[0_0_8px_rgba(0,229,192,0.5)]" />
+                      <span className="text-sm font-medium transition-colors group-hover:drop-shadow-[0_0_8px_rgba(0,229,192,0.5)]">Send</span>
+                      <span className="text-[10px] text-muted-foreground">Private transfer</span>
+                    </Button>
+                    {/* Claim */}
+                    <Button
+                      variant="outline"
+                      className="group flex flex-col items-center gap-2 h-auto py-4 border-0 rounded-none bg-transparent shadow-none text-[#00E5C0] hover:bg-transparent transition-colors relative"
+                      onClick={openClaimScreen}
+                    >
+                      <Gift className="h-7 w-7 transition-colors group-hover:drop-shadow-[0_0_12px_rgba(0,229,192,0.7)]" />
+                      <span className="text-sm font-medium transition-colors group-hover:drop-shadow-[0_0_12px_rgba(0,229,192,0.7)]">Claim</span>
+                      <span className="text-[10px] text-muted-foreground">Pending transfers</span>
+                      {pendingTransfersCount > 0 && (
+                        <Badge className="absolute -top-2 -right-2 bg-[#00E5C0] text-white text-[10px] h-5 min-w-5 flex items-center justify-center">
+                          {pendingTransfersCount}
+                        </Badge>
+                      )}
+                    </Button>
+                  </div>
+                )}
+                
+                {/* EVM Assets Section - Only in Public Mode */}
+                {operationMode === 'public' && (
+                  <div className="w-full max-w-lg">
+                    {/* Balance Pie Chart - shows immediately with public balance, encrypted loads progressively */}
+                    {balance !== null && balance > 0 && (
+                      <div className="pt-6">
+                        <BalancePieChart 
+                          publicBalance={balance || 0}
+                          encryptedBalance={encryptedBalance?.encrypted || 0}
+                          isCompact={false}
+                          isDecrypting={isDecryptingBalance || isLoadingEncryptedBalance}
+                          octPrice={octPrice ?? undefined}
+                        />
+                      </div>
+                    )}
+
+                    {/* Octra Assets + EVM Assets — placed after pie chart so they
+                         sit at the bottom of the public dashboard. Two buttons
+                         side-by-side separated by a vertical dashed divider. */}
+                    <div className="pt-6">
+                      <div className="grid grid-cols-2 items-stretch">
+                        {/* Octra Assets button */}
+                        <Button
+                          variant="ghost"
+                          onMouseDown={(e) => e.preventDefault()}
+                          style={{ outline: 'none', boxShadow: 'none', borderRadius: 0 }}
+                          className="no-focus-ring group flex items-center justify-center gap-2 h-14 rounded-none bg-transparent text-primary hover:bg-muted/40 transition-colors"
+                          onClick={() => setExpandedAssetsOpen(true)}
+                        >
+                          <Coins className="h-5 w-5 transition-colors group-hover:drop-shadow-[0_0_6px_currentColor]" />
+                          <div className="flex flex-col items-start">
+                            <span className="text-[14px] leading-tight font-medium transition-colors group-hover:drop-shadow-[0_0_6px_currentColor]">Octra Assets</span>
+                            <span className="text-[11px] leading-tight text-muted-foreground">OCS01 tokens</span>
+                          </div>
+                        </Button>
+
+                        {/* EVM Assets button (with vertical dashed left border only) */}
+                        <Button
+                          variant="ghost"
+                          onMouseDown={(e) => e.preventDefault()}
+                          style={{
+                            outline: 'none',
+                            boxShadow: 'none',
+                            borderRadius: 0,
+                            borderTop: 0,
+                            borderRight: 0,
+                            borderBottom: 0,
+                            borderLeft: '1px dashed hsl(var(--border))',
+                          }}
+                          className="no-focus-ring group flex items-center justify-center gap-2 h-14 rounded-none bg-transparent text-orange-600 dark:text-orange-400 hover:bg-muted/40 transition-colors"
+                          onClick={() => {
+                            if (isPopupMode) {
+                              onExpandedView?.('evm');
+                            } else {
+                              enterEvmMode();
+                            }
+                          }}
+                        >
+                          <Coins className="h-5 w-5 transition-colors group-hover:text-orange-600 dark:group-hover:text-orange-300 group-hover:drop-shadow-[0_0_6px_rgba(249,115,22,0.6)]" />
+                          <div className="flex flex-col items-start">
+                            <span className="text-[14px] leading-tight font-medium transition-colors group-hover:text-orange-600 dark:group-hover:text-orange-300 group-hover:drop-shadow-[0_0_6px_rgba(249,115,22,0.6)]">EVM Assets</span>
+                            <span className="text-[11px] leading-tight text-muted-foreground">Ethereum VM</span>
+                          </div>
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          {/* Claim Inline Screen (Private Mode) */}
+          {operationMode === 'private' && activeTab === 'claim' && !evmMode && (
+            <div 
+              className={`poctra-runtime-layer fixed inset-0 z-[45] bg-background/95 backdrop-blur-sm flex flex-col transition-all duration-200 ${
+                claimAnimating ? 'animate-in slide-in-from-right-4 fade-in' : ''
+              } ${claimClosing ? 'animate-out slide-out-to-right-4 fade-out' : ''}`}
+              style={{ 
+                top: showWalletSidebar ? '49px' : '69px', 
+                left: sidebarLeftOffset,
+                right: historySidebarRightOffset,
+                bottom: '40px'
+              }}
+            >
+              <div className="flex items-center justify-between px-6 pt-4 pb-2">
+                <div className="flex items-center gap-3">
+                  <Button 
+                    variant="ghost" 
+                    size="sm" 
+                    onClick={closeClaimScreen} 
+                    className="h-9 w-9 p-0"
+                  >
+                    <ChevronDown className="h-5 w-5 rotate-90" />
+                  </Button>
+                  <div className="flex items-center gap-2">
+                  <Gift className="h-5 w-5 text-[#00E5C0]" />
+                  <h2 className="text-lg font-semibold text-[#00E5C0]">Claim Transfers</h2>
+                    {pendingTransfersCount > 0 && (
+                    <Badge variant="secondary" className="ml-1 bg-[#00E5C0]/10 text-[#00E5C0]">
+                        {pendingTransfersCount}
+                      </Badge>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className="flex-1 overflow-auto p-6">
+                <ClaimTransfers
+                  wallet={wallet}
+                  onTransactionSuccess={handleTransactionSuccess}
+                  onEncryptedBalanceUpdate={handleEncryptedBalanceUpdate}
+                  onPendingCountChange={setPendingTransfersCount}
+                  isPopupMode={false}
+                  hideBorder={true}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+        )}
+      </main>
+      </div>
+
+      {/* History Sidebar - Right side (Expanded mode only) */}
+      {!isPopupMode && (
+        <>
+          <aside 
+            className={`${showExpandedTxDetails ? 'poctra-runtime-layer poctra-history-detail' : ''} fixed right-0 bottom-0 z-30 bg-background border-l border-border transition-all ${isResizingHistory ? 'duration-0' : 'duration-300'} ${showHistorySidebar ? '' : 'w-0'} overflow-hidden`}
+            style={{ 
+              width: showHistorySidebar ? `${historySidebarWidth}px` : '0px',
+              top: showWalletSidebar ? '49px' : '69px'
+            }}
+          >
+            <div className="h-full flex flex-col pt-4 pb-4 pl-2 pr-3" style={{ width: `${historySidebarWidth}px` }}>
+              {/* Transaction Details View */}
+              {showExpandedTxDetails ? (
+                <div className={`h-full flex flex-col transition-all duration-200 ${
+                  txDetailsAnimating ? 'animate-in slide-in-from-right-4 fade-in' : ''
+                } ${txDetailsClosing ? 'animate-out slide-out-to-right-4 fade-out' : ''}`}>
+                  {/* Header */}
+                  <div className="flex items-center gap-2 py-3 flex-shrink-0 mt-3">
+                    <Button 
+                      variant="ghost" 
+                      size="sm" 
+                      onClick={closeExpandedTxDetails} 
+                      className="h-8 w-8 p-0 ml-2"
+                    >
+                      <ChevronDown className="h-4 w-4 rotate-90" />
+                    </Button>
+                    <div className="flex items-center gap-2">
+                      <h3 className="font-semibold text-sm">Transaction Details</h3>
+                    </div>
+                  </div>
+                  
+                  {/* Content */}
+                  <ScrollArea className="flex-1">
+                    <div className="p-3 pb-4 min-h-full flex flex-col">
+                      {loadingTxDetails ? (
+                        <div className="flex-1 flex items-center justify-center py-12">
+                          <div className="w-6 h-6 rounded-full border-2 border-transparent animate-spin" style={{ borderTopColor: '#3B567F' }} />
+                        </div>
+                      ) : selectedTxDetails ? (
+                        <>
+                        <div className="flex-1 flex flex-col divide-y divide-dashed divide-border">
+                          {/* Status */}
+                          <div className="py-2.5 flex items-center justify-between">
+                            <span className="text-xs text-muted-foreground">Status</span>
+                            {getTxStatus(selectedTxDetails) === 'pending' ? (
+                              <Badge variant="secondary" className="text-xs bg-yellow-500/20 text-yellow-600">
+                                {getTxStatus(selectedTxDetails)}
+                              </Badge>
+                            ) : (
+                              <Badge variant="secondary" className="text-xs bg-[#3B567F]/20 text-[#3B567F]">
+                                confirmed
+                              </Badge>
+                            )}
+                          </div>
+
+                          {/* Time */}
+                          {getTxTimestamp(selectedTxDetails) > 0 && (
+                            <div className="py-2.5 flex items-center justify-between">
+                              <span className="text-xs text-muted-foreground">Time (UTC)</span>
+                              <span className="text-xs">
+                                {new Date(getTxTimestamp(selectedTxDetails) * 1000).toLocaleString('en-US', { timeZone: 'UTC', hour12: false })}
+                              </span>
+                            </div>
+                          )}
+
+                          {/* Hash */}
+                          <div className="py-2.5">
+                            <div className="flex items-center justify-between mb-1">
+                              <span className="text-xs text-muted-foreground">Hash</span>
+                              <Button 
+                                variant="ghost" 
+                                size="sm" 
+                                className="h-5 w-5 p-0" 
+                                onClick={() => copyToClipboard(getTxHash(selectedTxDetails), 'txHash')}
+                              >
+                                {copiedField === 'txHash' ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
+                              </Button>
+                            </div>
+                            <p className="font-mono text-[11px] break-all leading-relaxed">
+                              {getTxHash(selectedTxDetails)}
+                            </p>
+                          </div>
+
+                          {/* From */}
+                          {getTxFrom(selectedTxDetails) && (
+                            <div className="py-2.5">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-xs text-muted-foreground">From</span>
+                                <Button 
+                                  variant="ghost" 
+                                  size="sm" 
+                                  className="h-5 w-5 p-0" 
+                                  onClick={() => copyToClipboard(getTxFrom(selectedTxDetails), 'txFrom')}
+                                >
+                                  {copiedField === 'txFrom' ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
+                                </Button>
+                              </div>
+                              <p className="font-mono text-xs break-all leading-relaxed">
+                                {getTxFrom(selectedTxDetails)}
+                              </p>
+                            </div>
+                          )}
+
+                          {/* To */}
+                          {getTxTo(selectedTxDetails) && (
+                            <div className="py-2.5">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-xs text-muted-foreground">To</span>
+                                <Button 
+                                  variant="ghost" 
+                                  size="sm" 
+                                  className="h-5 w-5 p-0" 
+                                  onClick={() => copyToClipboard(getTxTo(selectedTxDetails), 'txTo')}
+                                >
+                                  {copiedField === 'txTo' ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
+                                </Button>
+                              </div>
+                              <p className="font-mono text-xs break-all leading-relaxed">
+                                {getTxTo(selectedTxDetails)}
+                              </p>
+                            </div>
+                          )}
+
+                          {/* Amount */}
+                          {getTxAmount(selectedTxDetails) && (
+                            <div className="py-2.5 flex items-center justify-between">
+                              <span className="text-xs text-muted-foreground">Amount</span>
+                              <span className="font-mono text-sm font-medium">
+                                {getTxAmount(selectedTxDetails)} OCT
+                              </span>
+                            </div>
+                          )}
+
+                          {/* OU (Gas) */}
+                          {getTxOu(selectedTxDetails) && (() => {
+                            const ouValue = getTxOu(selectedTxDetails);
+                            const ouNum = parseInt(ouValue) || 0;
+                            const feeOct = (ouNum / 1_000_000).toFixed(6);
+                            return (
+                              <div className="py-2.5 flex items-center justify-between">
+                                <span className="text-xs text-muted-foreground">OU (Gas)</span>
+                                <div className="text-right">
+                                  <span className="font-mono text-sm">{ouValue}</span>
+                                  <p className="text-[10px] text-muted-foreground">≈ {feeOct} OCT</p>
+                                </div>
+                              </div>
+                            );
+                          })()}
+
+                          {/* Nonce */}
+                          {getTxNonce(selectedTxDetails) !== undefined && (
+                            <div className="py-2.5 flex items-center justify-between">
+                              <span className="text-xs text-muted-foreground">Nonce</span>
+                              <span className="font-mono text-sm">
+                                {getTxNonce(selectedTxDetails)}
+                              </span>
+                            </div>
+                          )}
+
+                          {/* Message */}
+                          {getTxMessage(selectedTxDetails) && (() => {
+                            const message = getTxMessage(selectedTxDetails)!;
+                            const isLongMessage = message.length > 250;
+                            return (
+                              <div className="py-2.5">
+                                <span className="text-xs text-muted-foreground">Message</span>
+                                <p className="text-xs mt-1 break-all">
+                                  {isLongMessage && !showFullMessage ? truncateMessage(message) : message}
+                                </p>
+                                {isLongMessage && (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => setShowFullMessage(!showFullMessage)}
+                                    className="h-6 px-2 text-[10px] text-muted-foreground hover:text-foreground mt-1"
+                                  >
+                                    {showFullMessage ? 'Show less' : 'Show all'}
+                                  </Button>
+                                )}
+                              </div>
+                            );
+                          })()}
+                        </div>
+
+                        {/* Spacer to push button to bottom */}
+                        <div className="flex-1" />
+
+                        {/* View on Explorer - outside divide container */}
+                        {getTxStatus(selectedTxDetails) !== 'pending' && (
+                          <div className="pt-4 border-t border-dashed border-x-0 border-b-0 border-border">
+                            <Button
+                              variant="ghost"
+                              className="w-full h-10 text-sm"
+                              asChild
+                            >
+                              <a 
+                                href={`${scannerUrl(selectedTxHash ?? "")}`} 
+                                target="_blank" 
+                                rel="noopener noreferrer"
+                              >
+                                <ExternalLink className="h-4 w-4 mr-2" />
+                                View on {scannerName}
+                              </a>
+                            </Button>
+                          </div>
+                        )}
+                      </>
+                      ) : (
+                        <div className="flex-1 flex items-center justify-center text-muted-foreground">
+                          <p className="text-sm">No transaction data available</p>
+                        </div>
+                      )}
+                    </div>
+                  </ScrollArea>
+                </div>
+              ) : (
+                /* History List View */
+                <div className={`h-full flex flex-col p-2 pl-3 pb-6 transition-all duration-200 ${
+                  txDetailsClosing ? 'animate-in slide-in-from-left-4 fade-in' : ''
+                }`}>
+                  {/* EVM Mode History */}
+                  {evmMode ? (
+                    <>
+                      <div className="flex items-center justify-between mb-4 mt-2 mr-2 flex-shrink-0">
+                        <h3 className="font-semibold text-base flex items-center gap-2 text-orange-600 dark:text-orange-400">
+                          <History className="h-5 w-5" />
+                          EVM Activity
+                        </h3>
+                        <div className="flex items-center gap-1">
+                          <Button 
+                            variant="ghost" 
+                            size="sm" 
+                            className="h-7 w-7 p-0"
+                            onClick={fetchEvmTransactions}
+                            disabled={isLoadingEvmTxs}
+                          >
+                            <RefreshCw className={`h-3.5 w-3.5 ${isLoadingEvmTxs ? 'animate-spin' : ''}`} />
+                          </Button>
+                          {selectedEVMWallet && (
+                            <Button 
+                              variant="ghost" 
+                              size="sm" 
+                              className="h-7 w-7 p-0"
+                              asChild
+                            >
+                              <a href={`${evmNetwork.explorer}/address/${selectedEVMWallet.evmAddress}`} target="_blank" rel="noopener noreferrer">
+                                <ExternalLink className="h-3.5 w-3.5" />
+                              </a>
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex-1 min-h-0 overflow-hidden">
+                        <ScrollArea className="h-full">
+                          <ScrollAreaContent className="pr-2">
+                            {isLoadingEvmTxs ? (
+                              <div className="flex items-center justify-center py-12">
+                                <Loader2 className="h-8 w-8 animate-spin text-orange-500" />
+                              </div>
+                            ) : evmTransactions.length > 0 ? (
+                              evmTransactions.map((tx, index) => (
+                                <a 
+                                  key={`${tx.hash}-${index}`} 
+                                  href={`${evmNetwork.explorer}/tx/${tx.hash}`} 
+                                  target="_blank" 
+                                  rel="noopener noreferrer"
+                                  className="block"
+                                >
+                                  {index > 0 && (
+                                    <div className="border-t border-dashed border-border mx-2" />
+                                  )}
+                                  <div className="p-3 hover:bg-muted/50 transition-colors cursor-pointer">
+                                    <div className="flex items-center justify-between mb-1">
+                                      <div className="flex items-center gap-2">
+                                        {tx.type === 'sent' ? (
+                                          <ArrowUpRight className="h-4 w-4 text-red-500" />
+                                        ) : (
+                                          <ArrowDownLeft className="h-4 w-4 text-green-500" />
+                                        )}
+                                        <span className="text-sm font-medium capitalize">
+                                          {tx.type}
+                                          {tx.tokenSymbol && <span className="text-xs text-muted-foreground ml-1">({tx.tokenSymbol})</span>}
+                                        </span>
+                                      </div>
+                                      <p className={`text-sm font-semibold ${tx.type === 'sent' ? 'text-red-500' : 'text-green-500'}`}>
+                                        {tx.type === 'sent' ? '-' : '+'}{tx.value} {tx.tokenSymbol || evmNetwork.symbol}
+                                      </p>
+                                    </div>
+                                    <div className="flex items-center justify-between">
+                                      <code className="text-[10px] font-mono text-muted-foreground truncate max-w-[150px]">
+                                        {tx.hash.slice(0, 10)}...{tx.hash.slice(-8)}
+                                      </code>
+                                      <span className="text-[10px] text-muted-foreground">
+                                        {new Date(tx.timestamp).toLocaleDateString()}
+                                      </span>
+                                    </div>
+                                  </div>
+                                </a>
+                              ))
+                            ) : (
+                              <div className="flex items-center justify-center py-12">
+                                <div className="text-center text-muted-foreground">
+                                  <AlertCircle className="h-12 w-12 mx-auto mb-3 opacity-20" />
+                                  <p className="text-sm font-medium">No transactions found</p>
+                                  {selectedEVMWallet && (
+                                    <Button variant="link" size="sm" className="mt-4 text-orange-600 dark:text-orange-400" asChild>
+                                      <a href={`${evmNetwork.explorer}/address/${selectedEVMWallet.evmAddress}`} target="_blank" rel="noopener noreferrer">
+                                        View on Explorer <ExternalLink className="h-3 w-3 ml-1" />
+                                      </a>
+                                    </Button>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                          </ScrollAreaContent>
+                        </ScrollArea>
+                      </div>
+                    </>
+                  ) : (
+                    /* Normal Octra History */
+                    <>
+                      <div className="flex items-center justify-between mb-4 mt-2 mr-2 flex-shrink-0">
+                        <h3 className={`font-semibold text-base flex items-center gap-2 ${operationMode === 'private' ? 'text-[#00E5C0]' : ''}`}>
+                          <History className="h-5 w-5" />
+                          Activity
+                        </h3>
+                        <div className="flex items-center gap-1">
+                          <Button 
+                            variant="ghost" 
+                            size="sm" 
+                            className="h-7 w-7 p-0"
+                            onClick={refreshOctraHistory}
+                            disabled={isRefreshingOctraHistory}
+                          >
+                            <RefreshCw className={`h-3.5 w-3.5 ${isRefreshingOctraHistory ? 'animate-spin' : ''}`} />
+                          </Button>
+                          <Button 
+                            variant="ghost" 
+                            size="sm" 
+                            className="h-7 w-7 p-0"
+                            asChild
+                          >
+                          <a href={`${scannerAddressUrl(wallet.address)}`} target="_blank" rel="noopener noreferrer">
+                              <ExternalLink className="h-3.5 w-3.5" />
+                            </a>
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="flex-1 min-h-0 overflow-hidden">
+                        <UnifiedHistory 
+                          wallet={wallet} 
+                          transactions={transactions}
+                          onTransactionsUpdate={handleTransactionsUpdate}
+                          isLoading={isLoadingTransactions}
+                          isPopupMode={false}
+                          hideBorder={true}
+                          operationMode={operationMode}
+                          isCompact={true}
+                          onViewTxDetails={handleViewTxDetails}
+                        />
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+            
+            {/* Resize Handle - positioned on left side */}
+            <div
+              className="absolute top-0 left-0 w-2 h-full cursor-col-resize hover:bg-primary/20 active:bg-primary/40 transition-colors z-10"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                setIsResizingHistory(true);
+              }}
+            />
+          </aside>
+          
+          {/* History Sidebar Toggle Button */}
+          <button
+            onClick={() => {
+              setShowHistorySidebar(!showHistorySidebar);
+              // Update bothPanelsHidden state
+              if (showWalletSidebar && !showHistorySidebar) setBothPanelsHidden(false);
+              if (!showWalletSidebar && showHistorySidebar) setBothPanelsHidden(true);
+            }}
+            className={`fixed z-[50] h-12 w-4 flex items-center justify-center bg-muted/80 hover:bg-accent border-y border-l border-border transition-all opacity-30 hover:opacity-100 ${isResizingHistory ? 'duration-0' : 'duration-300'}`}
+            style={{
+              right: showHistorySidebar ? `${historySidebarWidth}px` : '0px',
+              top: showWalletSidebar ? '57px' : '71px'
+            }}
+          >
+            {showHistorySidebar ? <ChevronRight className="h-3 w-3" /> : <ChevronLeft className="h-3 w-3" />}
+          </button>
+        </>
+      )}
+
+      {/* Expanded Mode Send Modals */}
+      {!isPopupMode && expandedSendModal && (
+        <div 
+          className={`poctra-runtime-layer fixed z-[45] bg-background/95 backdrop-blur-sm flex flex-col transition-all ${isResizing || isResizingHistory ? 'duration-0' : 'duration-300'} ease-out ${
+            sendModalAnimating ? 'animate-send-modal-enter' : ''
+          } ${sendModalClosing ? 'animate-send-modal-exit' : ''}`}
+          style={{ 
+            top: showWalletSidebar ? '49px' : '69px', 
+            left: sidebarLeftOffset,
+            right: historySidebarRightOffset,
+            bottom: '40px'
+          }}
+        >
+          {/* Modal Header */}
+          <div className="flex items-center justify-between px-6 pt-4 pb-2">
+            <div className="flex items-center gap-3">
+              <Button 
+                variant="ghost" 
+                size="sm" 
+                onClick={closeSendModal} 
+                className="h-9 w-9 p-0"
+              >
+                <ChevronDown className="h-5 w-5 rotate-90" />
+              </Button>
+              <div className="flex items-center gap-2">
+                {operationMode === 'private' ? (
+                  <Send className="h-5 w-5 text-[#00E5C0]" />
+                ) : (
+                  <>
+                    {expandedSendModal === 'standard' && <Send className="h-5 w-5" />}
+                    {expandedSendModal === 'multi' && <Layers className="h-5 w-5" />}
+                    {expandedSendModal === 'bulk' && <FileText className="h-5 w-5" />}
+                  </>
+                )}
+                <h2 className={`text-lg font-semibold ${operationMode === 'private' ? 'text-[#00E5C0]' : ''}`}>
+                  {operationMode === 'private' ? 'Private Transfer' : (
+                    <>
+                      {expandedSendModal === 'standard' && 'Single Send'}
+                      {expandedSendModal === 'multi' && 'Multi Send'}
+                      {expandedSendModal === 'bulk' && 'Bulk Send'}
+                    </>
+                  )}
+                </h2>
+              </div>
+            </div>
+            {expandedSendModal === 'bulk' && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setBulkResetTrigger(prev => prev + 1)}
+                className="text-xs"
+              >
+                <RotateCcw className="h-3.5 w-3.5 mr-1.5" />
+                Reset
+              </Button>
+            )}
+            {expandedSendModal === 'multi' && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setMultiResetTrigger(prev => prev + 1)}
+                className="text-xs"
+              >
+                <RotateCcw className="h-3.5 w-3.5 mr-1.5" />
+                Reset
+              </Button>
+            )}
+          </div>
+          
+          {/* Modal Content */}
+          {operationMode === 'private' ? (
+            /* Private Mode - Private Transfer */
+            <ScrollArea className="flex-1">
+              <div className="p-6 max-w-xl mx-auto">
+                <PrivateTransfer
+                  wallet={wallet}
+                  balance={balance}
+                  nonce={nonce}
+                  encryptedBalance={encryptedBalance}
+                  onBalanceUpdate={handleBalanceUpdate}
+                  onNonceUpdate={handleNonceUpdate}
+                  onTransactionSuccess={() => {
+                    handleTransactionSuccess();
+                  }}
+                  onEncryptedBalanceUpdate={handleEncryptedBalanceUpdate}
+                  isCompact={false}
+                  onAddToAddressBook={handleAddToAddressBook}
+                />
+              </div>
+            </ScrollArea>
+          ) : expandedSendModal === 'standard' ? (
+            <ScrollArea className="flex-1">
+              <div className="p-6 max-w-xl mx-auto">
+                <SendTransaction
+                  wallet={wallet}
+                  balance={balance}
+                  nonce={nonce}
+                  onBalanceUpdate={handleBalanceUpdate}
+                  onNonceUpdate={handleNonceUpdate}
+                  onTransactionSuccess={handleTransactionSuccess}
+                  onModalClose={closeSendModal}
+                  onAddToAddressBook={handleAddToAddressBook}
+                />
+              </div>
+            </ScrollArea>
+          ) : (
+            <div className="flex-1 px-6 py-2 overflow-auto xl:overflow-hidden">
+              {expandedSendModal === 'multi' && (
+                <MultiSend
+                  wallet={wallet}
+                  balance={balance}
+                  nonce={nonce}
+                  onBalanceUpdate={handleBalanceUpdate}
+                  onNonceUpdate={handleNonceUpdate}
+                  onTransactionSuccess={handleTransactionSuccess}
+                  onModalClose={closeSendModal}
+                  hideBorder={true}
+                  resetTrigger={multiResetTrigger}
+                  sidebarOpen={showWalletSidebar}
+                  historySidebarOpen={showHistorySidebar}
+                  onAddToAddressBook={handleAddToAddressBook}
+                />
+              )}
+              {expandedSendModal === 'bulk' && (
+                <FileMultiSend
+                  wallet={wallet}
+                  balance={balance}
+                  nonce={nonce}
+                  onBalanceUpdate={handleBalanceUpdate}
+                  onNonceUpdate={handleNonceUpdate}
+                  onTransactionSuccess={handleTransactionSuccess}
+                  hideBorder={true}
+                  resetTrigger={bulkResetTrigger}
+                  sidebarOpen={showWalletSidebar}
+                  historySidebarOpen={showHistorySidebar}
+                />
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Expanded Mode Octra Assets Modal */}
+      {!isPopupMode && expandedAssetsOpen && (
+        <div 
+          className="poctra-runtime-layer fixed z-[45] bg-background/95 backdrop-blur-sm flex flex-col"
+          style={{ 
+            top: showWalletSidebar ? '49px' : '69px', 
+            left: sidebarLeftOffset,
+            right: historySidebarRightOffset,
+            bottom: '40px'
+          }}
+        >
+          <div className="flex items-center justify-between px-6 pt-4 pb-2">
+            <div className="flex items-center gap-3">
+              <Button 
+                variant="ghost" 
+                size="sm" 
+                onClick={() => setExpandedAssetsOpen(false)} 
+                className="h-9 w-9 p-0"
+              >
+                <ChevronDown className="h-5 w-5 rotate-90" />
+              </Button>
+              <div className="flex items-center gap-2">
+                <Coins className="h-5 w-5" />
+                <h2 className="text-lg font-semibold">Octra Assets</h2>
+              </div>
+            </div>
+          </div>
+          <div className="flex-1 overflow-hidden">
+            <div className="h-full max-w-2xl mx-auto px-6 pb-6">
+              <OctraAssets
+                wallet={wallet}
+                nonce={nonce}
+                onBack={() => setExpandedAssetsOpen(false)}
+                onTransactionSuccess={handleTransactionSuccess}
+                onNonceUpdate={handleNonceUpdate}
+                inline={true}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Expanded Mode Private Modals (Encrypt/Decrypt) */}
+      {!isPopupMode && expandedPrivateModal && (
+        <div 
+          className={`poctra-runtime-layer fixed z-[45] bg-background/95 backdrop-blur-sm flex flex-col transition-all ${isResizing || isResizingHistory ? 'duration-0' : 'duration-300'} ease-out ${
+            privateModalAnimating ? 'animate-send-modal-enter' : ''
+          } ${privateModalClosing ? 'animate-send-modal-exit' : ''}`}
+          style={{ 
+            top: showWalletSidebar ? '49px' : '69px', 
+            left: sidebarLeftOffset,
+            right: historySidebarRightOffset,
+            bottom: '40px'
+          }}
+        >
+          {/* Modal Header */}
+          <div className="flex items-center justify-between px-6 pt-4 pb-2">
+            <div className="flex items-center gap-3">
+              <Button 
+                variant="ghost" 
+                size="sm" 
+                onClick={closePrivateModal} 
+                className="h-9 w-9 p-0"
+              >
+                <ChevronDown className="h-5 w-5 rotate-90" />
+              </Button>
+              <div className="flex items-center gap-2">
+                {expandedPrivateModal === 'encrypt' && <Lock className="h-5 w-5 text-[#00E5C0]" />}
+                {expandedPrivateModal === 'decrypt' && <Unlock className="h-5 w-5 text-muted-foreground" />}
+                <h2 className={`text-lg font-semibold ${expandedPrivateModal === 'encrypt' ? 'text-[#00E5C0]' : 'text-muted-foreground'}`}>
+                  {expandedPrivateModal === 'encrypt' && 'Encrypt OCT'}
+                  {expandedPrivateModal === 'decrypt' && 'Decrypt OCT'}
+                </h2>
+              </div>
+            </div>
+          </div>
+          
+          {/* Modal Content */}
+          <ScrollArea className="flex-1">
+            <div className="p-6 max-w-xl mx-auto">
+              {expandedPrivateModal === 'encrypt' && (
+                <EncryptBalanceDialog
+                  open={true}
+                  onOpenChange={(open) => {
+                    if (!open) closePrivateModal();
+                  }}
+                  wallet={wallet}
+                  publicBalance={encryptedBalance?.public || balance || 0}
+                  onBalanceUpdate={setBalance}
+                  onEncryptedBalanceUpdate={setEncryptedBalance}
+                  onSuccess={(freshPublic, freshEnc, freshNonce) => {
+                    updateCacheAfterTx(freshPublic, freshEnc, freshNonce);
+                    silentRefreshAfterTx(3000);
+                  }}
+                  isPopupMode={false}
+                  isInline={true}
+                />
+              )}
+              {expandedPrivateModal === 'decrypt' && (
+                <DecryptBalanceDialog
+                  open={true}
+                  onOpenChange={(open) => {
+                    if (!open) closePrivateModal();
+                  }}
+                  wallet={wallet}
+                  encryptedBalance={encryptedBalance?.encrypted || 0}
+                  currentCipher={encryptedBalance?.cipher}
+                  onBalanceUpdate={setBalance}
+                  onEncryptedBalanceUpdate={setEncryptedBalance}
+                  onSuccess={(freshPublic, freshEnc, freshNonce) => {
+                    updateCacheAfterTx(freshPublic, freshEnc, freshNonce);
+                    silentRefreshAfterTx(3000);
+                  }}
+                  isPopupMode={false}
+                  isInline={true}
+                />
+              )}
+            </div>
+          </ScrollArea>
+        </div>
+      )}
+
+      {/* Fixed Bottom Footer - Popup Mode Only - visible on all screens */}
+      {isPopupMode && (
+        <div className="fixed bottom-[1px] left-[1px] right-[1px] z-[200] bg-background border-t border-border">
+          {/* Network Status Footer */}
+          <div className="flex items-center justify-between px-3 py-1.5">
+            {/* Left: Connection Status */}
+            <div className="flex items-center gap-1.5">
+              <div className={`w-1.5 h-1.5 rounded-full ${
+                rpcStatus === 'connected' ? (operationMode === 'private' ? 'bg-[#00E5C0]' : 'bg-[#3B567F]') : 
+                rpcStatus === 'disconnected' ? 'bg-red-500' : 
+                'bg-yellow-500 animate-pulse'
+              }`} />
+              <span className={`text-[10px] ${
+                rpcStatus === 'connected' ? (operationMode === 'private' ? 'text-[#00E5C0]' : 'text-[#3B567F]') : 
+                rpcStatus === 'disconnected' ? 'text-red-500' : 
+                'text-yellow-500'
+              }`}>
+                {rpcStatus === 'connected' ? `Connected (${activeNetwork === 'devnet' ? 'DevNet' : activeNetwork.charAt(0).toUpperCase() + activeNetwork.slice(1)})` : 
+                 rpcStatus === 'disconnected' ? 'Disconnected' : 
+                 'Connecting...'}
+                {rpcStatus === 'connected' && latestEpoch !== null && (
+                  <span className="text-muted-foreground"> | #{latestEpoch}</span>
+                )}
+              </span>
+            </div>
+            {/* Right: GitHub + Version */}
+            <div className="flex items-center gap-1.5">
+              <a
+                href="https://github.com/m-tq/OctWa"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="hover:text-foreground transition-colors text-muted-foreground"
+                title="View on GitHub"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="currentColor"
+                >
+                  <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+                </svg>
+              </a>
+              <span className="text-muted-foreground/50">|</span>
+              <span className="text-[10px] text-muted-foreground">{__APP_NAME__.split(' ')[0]} {__APP_VERSION__}</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Footer Spacer - Only for expanded mode */}
+      {!isPopupMode && <div className="h-10" />}
+
+      {/* Toggle Both Panels Button - Above Footer */}
+      {!isPopupMode && (
+        <div 
+          className={`fixed bottom-10 z-[47] flex justify-center transition-[left,right] ${isResizing || isResizingHistory ? 'duration-0' : 'duration-300'} ease-out group`}
+          style={{ left: sidebarLeftOffset, right: historySidebarRightOffset }}
+        >
+          <button
+            onClick={toggleBothPanels}
+            className="h-6 px-3 flex items-center justify-center gap-1 bg-muted/80 hover:bg-accent border border-border rounded-full transition-all duration-300 text-xs text-muted-foreground hover:text-foreground opacity-30 hover:opacity-100"
+            title={bothPanelsHidden ? "Show panels" : "Hide panels"}
+          >
+            {bothPanelsHidden ? (
+              <>
+                <ChevronRight className="h-3 w-3" />
+                <ChevronLeft className="h-3 w-3" />
+              </>
+            ) : (
+              <>
+                <ChevronLeft className="h-3 w-3" />
+                <ChevronRight className="h-3 w-3" />
+              </>
+            )}
+          </button>
+        </div>
+      )}
+
+      {/* Footer Credit - Only for expanded mode */}
+      {!isPopupMode && (
+        <footer 
+          className={`fixed bottom-0 py-2 px-4 text-xs text-muted-foreground bg-background/80 backdrop-blur-sm border-t border-x-0 border-b-0 border-border flex items-center justify-between transition-[left,right] ${isResizing || isResizingHistory ? 'duration-0' : 'duration-300'} ease-out z-[46]`}
+          style={{ left: sidebarLeftOffset, right: historySidebarRightOffset }}
+        >
+          {/* Left: Connection Status */}
+          {evmMode ? (
+            /* EVM Mode Footer - Left: RPC with wifi icon */
+            <div className="flex items-center gap-1.5 text-orange-600 dark:text-orange-400">
+              <Wifi className="h-3.5 w-3.5" />
+              <span>{getRpcDisplayName(getEVMRpcUrl(evmNetwork.id))}</span>
+            </div>
+          ) : (
+            /* Normal Octra Footer */
+            <div className="flex items-center gap-1.5">
+              <div className={`w-1.5 h-1.5 rounded-full ${
+                rpcStatus === 'connected' ? (operationMode === 'private' ? 'bg-[#00E5C0]' : 'bg-[#3B567F]') : 
+                rpcStatus === 'disconnected' ? 'bg-red-500' : 
+                'bg-yellow-500 animate-pulse'
+              }`} />
+              <span className={`${
+                rpcStatus === 'connected' ? (operationMode === 'private' ? 'text-[#00E5C0]' : 'text-[#3B567F]') : 
+                rpcStatus === 'disconnected' ? 'text-red-500' : 
+                'text-yellow-500'
+              }`}>
+                {rpcStatus === 'connected' ? `Connected (${activeNetwork === 'devnet' ? 'DevNet' : activeNetwork.charAt(0).toUpperCase() + activeNetwork.slice(1)})` : 
+                 rpcStatus === 'disconnected' ? 'Disconnected' : 
+                 'Connecting...'}
+                {rpcStatus === 'connected' && latestEpoch !== null && (
+                  <span className="text-muted-foreground"> | #{latestEpoch}</span>
+                )}
+              </span>
+            </div>
+          )}
+          
+          {/* Center: Gas price (EVM mode) */}
+          {evmMode && evmGasPrice && (
+            <span className="text-orange-600 dark:text-orange-400">
+              Gas: <span className="font-medium">{evmGasPrice} Gwei</span>
+            </span>
+          )}
+          
+          {/* Right: GitHub + Version */}
+          <div className="flex items-center gap-2">
+            <a
+              href="https://github.com/m-tq/OctWa"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:text-foreground transition-colors"
+              title="View on GitHub"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="currentColor"
+              >
+                <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+              </svg>
+            </a>
+            <span className="text-muted-foreground/50">|</span>
+            <span className="text-muted-foreground">{__APP_NAME__.split(' ')[0]} {__APP_VERSION__}</span>
+          </div>
+        </footer>
+      )}
+
+      {/* EVM RPC Manager Dialog - Network Management */}
+      <Dialog open={showEvmRpcManager} onOpenChange={setShowEvmRpcManager}>
+        <DialogContent
+          className={isPopupMode ? "poctra-manager-screen" : "sm:max-w-lg max-h-[85vh] overflow-hidden flex flex-col"}
+          hideCloseButton={isPopupMode}
+          preventCloseOnOutsideClick
+          onEscapeKeyDown={(event) => event.preventDefault()}
+        >
+          <DialogHeader className={isPopupMode ? "poctra-manager-header" : ""}>
+            {isPopupMode && <Button variant="ghost" size="icon" className="poctra-mobile-back" onClick={() => setShowEvmRpcManager(false)}><ChevronLeft /></Button>}
+            <div><DialogTitle>EVM Networks</DialogTitle><DialogDescription>Manage networks and RPC endpoints</DialogDescription></div>
+          </DialogHeader>
+          
+          <div className="flex-1 overflow-auto space-y-4 px-0.5">
+            {/* Network List */}
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">Networks</Label>
+              <ScrollArea className="h-[180px]">
+                <ScrollAreaContent className="space-y-1">
+                  {allEvmNetworks.map((network) => (
+                    <div 
+                      key={network.id} 
+                      className={`flex items-center justify-between p-2.5 rounded cursor-pointer transition-colors ${evmNetwork.id === network.id ? 'bg-orange-500/10' : 'bg-muted/30 hover:bg-muted/50'}`}
+                      onClick={() => { handleEvmNetworkChange(network.id); }}
+                    >
+                      <div className="flex items-center gap-2 flex-1 min-w-0">
+                        <div className="flex flex-col min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-sm font-medium truncate">{network.name}</span>
+                            <Badge variant="outline" className="text-[9px] shrink-0">{network.symbol}</Badge>
+                            {network.isCustom && <Badge variant="secondary" className="text-[9px] shrink-0">Custom</Badge>}
+                            {network.isTestnet && <Badge variant="outline" className="text-[9px] shrink-0 border-yellow-500/50 text-yellow-600">Devnet</Badge>}
+                          </div>
+                          <span className="text-[10px] text-muted-foreground truncate">{getRpcDisplayName(getEVMRpcUrl(network.id))}</span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <span className="text-xs text-muted-foreground">ID: {network.chainId}</span>
+                        {evmNetwork.id === network.id && (
+                          evmRpcStatus === 'connected' ? <Wifi className="h-3.5 w-3.5 text-green-500 ml-1" /> : 
+                          evmRpcStatus === 'checking' ? <Loader2 className="h-3.5 w-3.5 animate-spin ml-1" /> : 
+                          <WifiOff className="h-3.5 w-3.5 text-red-500 ml-1" />
+                        )}
+                        {network.isCustom && (
+                          <Button 
+                            variant="ghost" 
+                            size="sm" 
+                            className="h-6 w-6 p-0 text-red-500 ml-1" 
+                            onClick={(e) => { e.stopPropagation(); handleRemoveEvmNetwork(network.id); }}
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </ScrollAreaContent>
+              </ScrollArea>
+            </div>
+            
+            <div className="border-t border-dashed border-border" />
+            
+            {/* Custom RPC for current network */}
+            <div className="space-y-2">
+              <Label className="text-sm">Custom RPC for {evmNetwork.name} (optional)</Label>
+              <div className="flex gap-2">
+                <Input placeholder="https://your-rpc-endpoint.com" value={evmCustomRpcUrl} onChange={(e) => setEvmCustomRpcUrl(e.target.value)} className="flex-1 h-9 text-sm" />
+                <Button size="sm" onClick={handleSaveEvmCustomRpc} disabled={!evmCustomRpcUrl.trim()}>Save</Button>
+              </div>
+            </div>
+            
+            <div className="border-t border-dashed border-border" />
+            
+            {/* Infura & Etherscan API Keys */}
+            <div className="space-y-3">
+              <Label className="text-sm font-medium">EVM API Keys</Label>
+              <p className="text-[11px] text-muted-foreground leading-relaxed">
+                Keys are stored locally in your wallet and never embedded in the extension bundle.
+                Infura is used for RPC calls; Etherscan for transaction history.
+              </p>
+              <div className="space-y-2">
+                <Label className="text-xs text-muted-foreground">Infura Project ID</Label>
+                <Input
+                  placeholder="Enter your Infura Project ID"
+                  value={evmInfuraKey}
+                  onChange={(e) => setEvmInfuraKey(e.target.value)}
+                  className="h-8 text-sm font-mono"
+                  type="password"
+                  autoComplete="off"
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  Get one free at{' '}
+                  <a href="https://app.infura.io/" target="_blank" rel="noopener noreferrer" className="text-orange-500 hover:underline">
+                    app.infura.io
+                  </a>
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label className="text-xs text-muted-foreground">Etherscan API Key <span className="text-muted-foreground/60">(optional)</span></Label>
+                <Input
+                  placeholder="Enter your Etherscan API key"
+                  value={evmEtherscanKey}
+                  onChange={(e) => setEvmEtherscanKey(e.target.value)}
+                  className="h-8 text-sm font-mono"
+                  type="password"
+                  autoComplete="off"
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  For transaction history. Get one at{' '}
+                  <a href="https://etherscan.io/myapikey" target="_blank" rel="noopener noreferrer" className="text-orange-500 hover:underline">
+                    etherscan.io/myapikey
+                  </a>
+                </p>
+              </div>
+              <Button
+                size="sm"
+                onClick={handleSaveEvmApiKeys}
+                className="w-full bg-orange-500 hover:bg-orange-600"
+              >
+                {evmApiKeysSaved ? '✓ Keys Saved' : 'Save API Keys'}
+              </Button>
+            </div>
+
+            <div className="border-t border-dashed border-border" />
+            
+            {/* Add Custom Network */}
+            <div className="space-y-3">
+              <Label className="text-sm font-medium">Add Custom Network</Label>
+              <div className="grid grid-cols-2 gap-2">
+                <Input placeholder="Network Name *" value={newEvmNetwork.name} onChange={(e) => setNewEvmNetwork({ ...newEvmNetwork, name: e.target.value })} className="h-8 text-sm" />
+                <Input placeholder="Symbol *" value={newEvmNetwork.symbol} onChange={(e) => setNewEvmNetwork({ ...newEvmNetwork, symbol: e.target.value })} className="h-8 text-sm" />
+              </div>
+              <Input placeholder="RPC URL *" value={newEvmNetwork.rpcUrl} onChange={(e) => setNewEvmNetwork({ ...newEvmNetwork, rpcUrl: e.target.value })} className="h-8 text-sm" />
+              <div className="grid grid-cols-2 gap-2">
+                <Input placeholder="Chain ID *" value={newEvmNetwork.chainId} onChange={(e) => setNewEvmNetwork({ ...newEvmNetwork, chainId: e.target.value })} className="h-8 text-sm" />
+                <Input placeholder="Explorer URL" value={newEvmNetwork.explorer} onChange={(e) => setNewEvmNetwork({ ...newEvmNetwork, explorer: e.target.value })} className="h-8 text-sm" />
+              </div>
+              <Button onClick={handleAddEvmNetwork} disabled={isAddingEvmNetwork} className="w-full bg-orange-500 hover:bg-orange-600">
+                {isAddingEvmNetwork ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Plus className="h-4 w-4 mr-2" />}Add Network
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* EVM Import Token Dialog */}
+      <Dialog open={showEvmImportToken} onOpenChange={setShowEvmImportToken}>
+        <DialogContent className={isPopupMode ? "poctra-manager-screen" : ""} hideCloseButton={isPopupMode}>
+          <DialogHeader className={isPopupMode ? "poctra-manager-header" : ""}>
+            {isPopupMode && <Button variant="ghost" size="icon" className="poctra-mobile-back" onClick={() => setShowEvmImportToken(false)}><ChevronLeft /></Button>}
+            <div><DialogTitle>Import Token</DialogTitle>
+            <DialogDescription>Import an ERC20 token on {evmNetwork.name}</DialogDescription>
+            </div>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label>Token Contract Address</Label>
+              <div className="flex gap-2">
+                <Input placeholder="0x..." value={evmImportTokenAddress} onChange={(e) => setEvmImportTokenAddress(e.target.value)} className="flex-1" />
+                <Button onClick={handleEvmLookupToken} disabled={isLoadingEvmTokenInfo || !evmImportTokenAddress}>{isLoadingEvmTokenInfo ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Lookup'}</Button>
+              </div>
+            </div>
+            {evmImportTokenInfo && (
+              <div className="p-3 bg-muted rounded-lg flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-orange-500/10 flex items-center justify-center text-sm font-bold text-orange-600">{evmImportTokenInfo.symbol.slice(0, 2)}</div>
+                <div><p className="font-medium">{evmImportTokenInfo.name}</p><p className="text-sm text-muted-foreground">{evmImportTokenInfo.symbol} • {evmImportTokenInfo.decimals} decimals</p></div>
+              </div>
+            )}
+          </div>
+          <DialogFooter className={isPopupMode ? "poctra-mobile-footer-actions" : ""}>
+            <Button className="flex-1" variant="secondary" onClick={() => { setShowEvmImportToken(false); setEvmImportTokenAddress(''); setEvmImportTokenInfo(null); }}>Cancel</Button>
+            <Button className="flex-1" onClick={handleEvmImportToken} disabled={!evmImportTokenInfo}>Import Token</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* EVM Import NFT Dialog */}
+      <Dialog open={showEvmImportNFT} onOpenChange={setShowEvmImportNFT}>
+        <DialogContent className={isPopupMode ? "poctra-manager-screen" : ""} hideCloseButton={isPopupMode}>
+          <DialogHeader className={isPopupMode ? "poctra-manager-header" : ""}>
+            {isPopupMode && <Button variant="ghost" size="icon" className="poctra-mobile-back" onClick={() => setShowEvmImportNFT(false)}><ChevronLeft /></Button>}
+            <div><DialogTitle>Import NFT</DialogTitle>
+            <DialogDescription>Import an ERC721 NFT on {evmNetwork.name}</DialogDescription>
+            </div>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label>NFT Contract Address</Label>
+              <Input placeholder="0x..." value={evmImportNFTAddress} onChange={(e) => setEvmImportNFTAddress(e.target.value)} />
+            </div>
+            <div className="space-y-2">
+              <Label>Token ID</Label>
+              <div className="flex gap-2">
+                <Input placeholder="1" value={evmImportNFTTokenId} onChange={(e) => setEvmImportNFTTokenId(e.target.value)} className="flex-1" />
+                <Button onClick={handleEvmLookupNFT} disabled={isLoadingEvmNFTInfo || !evmImportNFTAddress || !evmImportNFTTokenId}>{isLoadingEvmNFTInfo ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Lookup'}</Button>
+              </div>
+            </div>
+            {evmImportNFTInfo && (
+              <div className="p-3 bg-muted rounded-lg flex items-center gap-3">
+                <div className="w-14 h-14 rounded-lg bg-muted-foreground/10 flex items-center justify-center overflow-hidden">
+                  {evmImportNFTInfo.imageUrl ? <img src={evmImportNFTInfo.imageUrl} alt={evmImportNFTInfo.name} className="w-full h-full object-cover" /> : <Image className="h-6 w-6 text-muted-foreground/30" />}
+                </div>
+                <div><p className="font-medium">{evmImportNFTInfo.name}</p><p className="text-sm text-muted-foreground">{evmImportNFTInfo.symbol} #{evmImportNFTTokenId}</p></div>
+              </div>
+            )}
+          </div>
+          <DialogFooter className={isPopupMode ? "poctra-mobile-footer-actions" : ""}>
+            <Button className="flex-1" variant="secondary" onClick={() => { setShowEvmImportNFT(false); setEvmImportNFTAddress(''); setEvmImportNFTTokenId(''); setEvmImportNFTInfo(null); }}>Cancel</Button>
+            <Button className="flex-1" onClick={handleEvmImportNFT} disabled={!evmImportNFTInfo}>Import NFT</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* EVM Send Transaction Dialog - Updated for tokens/NFTs */}
+      <Dialog open={showEvmSendDialog} onOpenChange={setShowEvmSendDialog}>
+        <DialogContent
+          className={isPopupMode ? "poctra-manager-screen" : "sm:max-w-md"}
+          hideCloseButton={isPopupMode}
+          preventCloseOnOutsideClick
+          onEscapeKeyDown={(event) => event.preventDefault()}
+        >
+          <DialogHeader className={isPopupMode ? "poctra-manager-header" : ""}>
+            {isPopupMode && <Button variant="ghost" size="icon" className="poctra-mobile-back" onClick={() => setShowEvmSendDialog(false)}><ChevronLeft /></Button>}
+            <div><DialogTitle>
+              Send {evmSendType === 'native' ? evmNetwork.symbol : evmSendType === 'token' ? selectedEvmToken?.symbol : `NFT #${selectedEvmNFT?.tokenId}`}
+            </DialogTitle>
+            <DialogDescription>
+              {evmSendType === 'native' ? `Send ${evmNetwork.symbol} from your wallet` : evmSendType === 'token' ? `Send ${selectedEvmToken?.name} tokens` : `Transfer NFT ${selectedEvmNFT?.name}`}
+            </DialogDescription></div>
+          </DialogHeader>
+          
+          {!evmTxHash ? (
+            <div className="space-y-4 py-2">
+              <div className="space-y-2">
+                <Label>Recipient Address</Label>
+                <Input placeholder="0x..." value={evmSendTo} onChange={(e) => setEvmSendTo(e.target.value)} disabled={isEvmSending} />
+              </div>
+              {evmSendType !== 'nft' && (
+                <div className="space-y-2">
+                  <Label>Amount ({evmSendType === 'native' ? evmNetwork.symbol : selectedEvmToken?.symbol})</Label>
+                  <Input type="number" step="0.000001" placeholder="0.0" value={evmSendAmount} onChange={(e) => setEvmSendAmount(e.target.value)} disabled={isEvmSending} />
+                </div>
+              )}
+              {evmSendType === 'nft' && selectedEvmNFT && (
+                <div className="p-3 bg-muted rounded-lg flex items-center gap-3">
+                  <div className="w-12 h-12 rounded-lg bg-muted-foreground/10 flex items-center justify-center overflow-hidden">
+                    {selectedEvmNFT.imageUrl ? <img src={selectedEvmNFT.imageUrl} alt={selectedEvmNFT.name} className="w-full h-full object-cover" /> : <Image className="h-5 w-5 text-muted-foreground/30" />}
+                  </div>
+                  <div><p className="font-medium">{selectedEvmNFT.name}</p><p className="text-sm text-muted-foreground">Token ID: {selectedEvmNFT.tokenId}</p></div>
+                </div>
+              )}
+              {evmSendError && <div className="text-sm text-destructive bg-destructive/10 p-2 rounded">{evmSendError}</div>}
+              {evmSendType === 'native' && selectedEVMWallet?.balance && <div className="text-sm text-muted-foreground">Available: {selectedEVMWallet.balance} {evmNetwork.symbol}</div>}
+              {evmSendType === 'token' && selectedEvmToken && <div className="text-sm text-muted-foreground">Available: {selectedEvmToken.balance} {selectedEvmToken.symbol}</div>}
+              {evmGasPrice && <div className="text-xs text-muted-foreground">Gas: ~{evmGasPrice} Gwei</div>}
+            </div>
+          ) : (
+            <div className="py-4">
+              <div className="w-16 h-16 bg-green-500/10 rounded-full flex items-center justify-center mx-auto mb-3"><Check className="h-8 w-8 text-green-500" /></div>
+              <p className="text-lg font-semibold mb-1 text-center">Transaction Sent!</p>
+              <p className="text-sm text-muted-foreground mb-4 text-center">Your transaction has been broadcast</p>
+              <div className="space-y-2">
+                <div className="bg-muted p-3 rounded-lg">
+                  <Label className="text-xs text-muted-foreground">Transaction Hash</Label>
+                  <div className="flex items-center gap-2 mt-1">
+                    <code className="flex-1 text-xs font-mono break-all">{evmTxHash}</code>
+                    <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => copyToClipboard(evmTxHash!, 'evmtxhash')}>{copiedField === 'evmtxhash' ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}</Button>
+                  </div>
+                </div>
+                {evmNetwork.explorer && (
+                  <Button variant="outline" className="w-full" asChild><a href={`${evmNetwork.explorer}/tx/${evmTxHash}`} target="_blank" rel="noopener noreferrer"><ExternalLink className="h-4 w-4 mr-2" />View on Explorer</a></Button>
+                )}
+              </div>
+            </div>
+          )}
+          
+          <DialogFooter className={isPopupMode ? "poctra-mobile-footer-actions" : ""}>
+            {!evmTxHash ? (
+              <>
+                <Button className="flex-1" variant="secondary" onClick={() => setShowEvmSendDialog(false)} disabled={isEvmSending}>Cancel</Button>
+                <Button className="flex-1" onClick={handleEvmSendReview} disabled={isEvmSending || !evmSendTo || (evmSendType !== 'nft' && !evmSendAmount)}>
+                  {isEvmSending ? <><Loader2 className="h-4 w-4 animate-spin mr-2" />Sending...</> : 'Send'}
+                </Button>
+              </>
+            ) : (
+              <Button className="w-full" onClick={() => { setShowEvmSendDialog(false); setEvmTxHash(null); setEvmSendTo(''); setEvmSendAmount(''); }}>Close</Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <TransactionReviewDialog
+        open={showEvmSendReview}
+        onOpenChange={setShowEvmSendReview}
+        title={`Review ${evmSendType === 'native' ? evmNetwork.symbol : evmSendType === 'token' ? selectedEvmToken?.symbol || 'Token' : 'NFT'} Send`}
+        description={`Confirm this transaction on ${evmNetwork.name}.`}
+        details={[
+          { label: 'Account', value: selectedEVMWallet?.evmAddress || '-', mono: true },
+          { label: 'Recipient', value: evmSendTo || '-', mono: true },
+          { label: 'Asset', value: evmSendType === 'native' ? evmNetwork.symbol : evmSendType === 'token' ? selectedEvmToken?.symbol || 'ERC20' : `${selectedEvmNFT?.name || 'NFT'} #${selectedEvmNFT?.tokenId || '-'}` },
+          ...(evmSendType !== 'nft' ? [{ label: 'Amount', value: `${evmSendAmount} ${evmSendType === 'native' ? evmNetwork.symbol : selectedEvmToken?.symbol || ''}`, mono: true, emphasis: true }] : []),
+          { label: 'Network', value: evmNetwork.name },
+        ]}
+        fee={{
+          network: evmNetwork.name,
+          value: evmGasPrice ? `~${evmGasPrice} Gwei` : 'Estimate unavailable',
+          note: 'Final gas is calculated by the active RPC.',
+        }}
+        warning="Confirm the network and recipient. Blockchain transactions cannot be reversed."
+        isProcessing={isEvmSending}
+        confirmLabel="Send Transaction"
+        onConfirm={handleEvmSendTransaction}
+      />
+      </div>
+    </div>
+  );
+}

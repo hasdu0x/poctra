@@ -1,9 +1,8 @@
-package com.poctra.wallet.ui
+﻿package com.poctra.wallet.ui
 
 import android.graphics.Color as AndroidColor
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -34,8 +33,7 @@ fun WalletIdenticonView(
         modifier = modifier
             .size(size)
             .clip(RoundedCornerShape(Radius.md))
-            .background(if (spec.letter != null) SurfaceMuted else spec.background)
-            .border(1.dp, BorderLine.copy(alpha = 0.72f), RoundedCornerShape(Radius.md)),
+            .background(if (spec.letter != null) SurfaceMuted else spec.background),
         contentAlignment = Alignment.Center,
     ) {
         Canvas(Modifier.size(size)) {

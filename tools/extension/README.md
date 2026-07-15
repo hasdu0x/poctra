@@ -1,74 +1,57 @@
-# circle viewer Chrome extension
+# poctra Chrome Extension
 
-This extension gives Chrome a circle viewer flow for Octra Explore:
+Password-secured Octra and EVM wallet for Chromium browsers. The extension follows the Poctra consumer UI and implements the RFC-O-1 provider interface for dApp connectivity.
 
-- open `oct://<circle>/index.html` public or sealed circle resources
-- input `foo.oct`, `app.foo.oct`, or an Octra address and resolve it with the active Octra Identity Provider
-- route normal Octra addresses to the configured explorer
-- route circle addresses to the extension circle viewer
-- intercept clicked `oct://` links on regular web pages
-- use the omnibox keyword `oct`, for example `oct root.oct`
-- manage Octra RPC networks and Identity Provider contracts inside the popup
-- switch dark/light theme inside the popup
+## Development
 
-## Install for development
+Requirements: Node.js 20 or newer and a Chromium browser.
 
-1. Open `chrome://extensions`.
-2. Enable `Developer mode`.
-3. Click `Load unpacked`.
-4. Select `C:\Users\Administrator\Documents\Devs\poctra\extension`.
-5. Pin the extension, then open the popup.
-
-## Default settings
-
-Mainnet:
-
-- RPC: `https://octra.network`
-- Explorer: `https://octrascan.io`
-- Identity Provider: `octH1GEiwunjEZyiBMjp1ETy1VUJJKEEnsMRZ8P2AvTC3et`
-
-Devnet:
-
-- RPC: `http://165.227.225.79:8080`
-- Explorer: `https://devnet.octrascan.io`
-- Identity Provider: `oct8oCgpxvdEytE7tkfjyF8am3xvK28J6rJApkv3omRQnKH`
-
-## Chrome protocol limitation
-
-Chrome extensions cannot fully register a custom browser-level protocol such as `oct://` for direct address-bar navigation without a native protocol handler installed at the OS level. This extension supports the practical browser flows Chrome allows:
-
-- popup input
-- omnibox keyword `oct`
-- context menu
-- clicked `oct://` links on pages where content scripts can run
-
-Chrome also does not allow an extension to wrap, replace, or inject custom UI into the native address bar. The closest supported flow is the omnibox keyword, so users can type `oct root.oct` or `oct oct://...` directly in Chrome's address bar.
-
-## Circle RPC inside apps
-
-The viewer renders circle HTML inside a Chrome extension sandbox page. This avoids normal extension CSP blocking dApp inline scripts while keeping the page away from privileged `chrome.*` APIs.
-
-The viewer injects a small read-only RPC bridge into rendered circle HTML. A circle app can call the active Octra RPC by using:
-
-```js
-await fetch("", {
-  method: "POST",
-  headers: { "content-type": "application/json" },
-  body: JSON.stringify({
-    jsonrpc: "2.0",
-    id: 1,
-    method: "octra_callProgramView",
-    params: [{
-      address: circleId,
-      method: "get_counter",
-      params: []
-    }]
-  })
-});
+```powershell
+npm install
+npm run test
+npm run build
 ```
 
-Allowed read methods are kept intentionally small: `octra_callProgramView`, `contract_call`, `circle_info`, `circle_asset`, `node_status`, `epoch_current`, `octra_balance`, `octra_account`, `octra_transaction`, `contract_receipt`, and `octra_recommendedFee`.
+Load `tools/extension/dist` from `chrome://extensions` using **Load unpacked**. Always load the built `dist` directory, not the source directory.
 
-## Notes
+## RFC-O-1 Provider
 
-The extension viewer is sandboxed so circle content cannot access extension storage or privileged APIs. Public HTML circles with common `script`, `link rel=stylesheet`, and `img` relative assets are inlined before rendering. More advanced browser APIs may need a dedicated native app or a hosted web gateway later.
+Poctra injects an RFC-O-1 provider at `window.octra`, participates in the `window.octraProviders` multi-wallet registry, and implements the `octra:requestProvider` / `octra:announceProvider` discovery handshake.
+
+Supported Octra methods:
+
+- Accounts, permissions, disconnect, network information, and network switching
+- Message signing, transaction signing/submission, OCT transfers
+- Contract views, contract transactions, and contract receipts
+- Read-only Octra RPC methods from the RFC allowlist
+
+Supported EVM methods:
+
+- Derived address, chain/network information, balances, calls, gas, and token reads
+- Chain switching, native transfers, message/EIP-712 signing, ERC-20 transfers and approvals
+
+Privacy provider methods intentionally return RFC error `4200` with reason `privacy_not_supported`; privacy operations are excluded from this extension build.
+
+Provider requests use a long-lived MV3 port while approval is open. Errors preserve RFC codes and `data.reason`, and all signing or write operations require an origin-scoped permission plus explicit review.
+
+## Security Model
+
+- Wallet material is encrypted with AES-256-GCM.
+- Password derivation uses PBKDF2-HMAC-SHA256 with 600,000 iterations.
+- Decrypted vault data is stored only in trusted `chrome.storage.session` and is removed on lock or timeout.
+- dApps receive no account until the user approves an origin-scoped connection.
+- Every signature, network switch, token approval, and transaction has a dedicated review window.
+- The content bridge verifies same-origin page messages and derives the requesting origin from Chrome's sender metadata.
+- The extension contains no Infura or Etherscan API keys.
+
+The `<all_urls>` host scope is required to inject the RFC-O-1 provider into HTTPS production dApps and HTTP development dApps. It does not grant a dApp wallet access; account and signing capabilities remain gated by explicit Poctra permissions.
+
+## Verification
+
+```powershell
+npm run typecheck
+npm run test
+npm run build
+npm run qa:visual
+npm audit
+```

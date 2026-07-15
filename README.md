@@ -46,7 +46,7 @@ On Android versions below the biometric prompt flow, users should use PIN-based 
 The static marketing/circle package lives in:
 
 ```text
-public_circle/landing/
+tools/public_circle/common/landing/
 ```
 
 It contains a dependency-free landing page with poctra styling, local Fira Code fonts,
@@ -69,19 +69,19 @@ or passphrase is required.
 Deployment metadata is stored at:
 
 ```text
-public_circle/landing/deployment.devnet.json
+tools/public_circle/deployments/common.landing.devnet.json
 ```
 
 Devnet Octra Identity dApp circle:
 
 ```text
-oct://octDKJ5vct7qDnbbAQdeq1SkCpt15V5uEb8XuEpyLWq851h/index.html
+oct://oct2EPYSkqjD6f1zLuWhyP6G2rDGB8rZp1nNDirVCqp3drD/index.html
 ```
 
 Its metadata is stored at:
 
 ```text
-public_circle/dapp/deployment.devnet.json
+tools/public_circle/deployments/dapp.octraid.devnet.json
 ```
 
 ## Build

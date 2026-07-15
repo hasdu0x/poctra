@@ -1,4 +1,4 @@
-package com.poctra.wallet.ui
+﻿package com.poctra.wallet.ui
 
 import android.annotation.SuppressLint
 import android.app.Activity
@@ -27,11 +27,9 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.horizontalScroll
@@ -87,6 +85,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -144,12 +143,14 @@ import com.poctra.wallet.data.BridgeStatus
 import com.poctra.wallet.data.BridgeStep
 import com.poctra.wallet.data.CircleAsset
 import com.poctra.wallet.data.DAppSession
+import com.poctra.wallet.data.DAppCatalogEntry
 import com.poctra.wallet.data.EvmNetwork
 import com.poctra.wallet.data.EvmGasEstimate
 import com.poctra.wallet.data.EvmNft
 import com.poctra.wallet.data.EvmToken
 import com.poctra.wallet.data.EvmTransaction
 import com.poctra.wallet.data.OctraIdentityProvider
+import com.poctra.wallet.data.OctraIdentityName
 import com.poctra.wallet.data.RpcStatus
 import com.poctra.wallet.data.RpcNetwork
 import com.poctra.wallet.data.SecurityMethod
@@ -337,7 +338,6 @@ private fun DAppApprovalDialog(
                         .navigationBarsPadding(),
                     shape = RoundedCornerShape(topStart = Radius.md, topEnd = Radius.md),
                     colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-                    border = BorderStroke(1.dp, BorderLine),
                 ) {
                     Column(
                         modifier = Modifier
@@ -386,7 +386,6 @@ private fun DAppApprovalDialog(
                                     .heightIn(max = detailMaxHeight),
                                 shape = RoundedCornerShape(Radius.sm),
                                 colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-                                border = BorderStroke(1.dp, BorderLine),
                             ) {
                                 Column(
                                     modifier = Modifier
@@ -407,7 +406,6 @@ private fun DAppApprovalDialog(
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(Radius.sm))
                                 .background(SurfaceBase)
-                                .border(1.dp, BorderLine, RoundedCornerShape(Radius.sm))
                                 .padding(horizontal = Space.x5, vertical = Space.x4),
                         ) {
                             Text(
@@ -525,7 +523,6 @@ private fun TransactionResultDialog(
                     .navigationBarsPadding(),
                 shape = RoundedCornerShape(topStart = Radius.md, topEnd = Radius.md),
                 colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-                border = BorderStroke(1.dp, BorderLine),
             ) {
                 Column(
                     modifier = Modifier
@@ -675,7 +672,6 @@ private fun EvmSendReviewDialog(controller: PoctraController) {
                         .navigationBarsPadding(),
                     shape = RoundedCornerShape(topStart = Radius.md, topEnd = Radius.md),
                     colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-                    border = BorderStroke(1.dp, BorderLine),
                 ) {
                     Column(
                         modifier = Modifier
@@ -770,7 +766,6 @@ private fun EvmSendReviewContent(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(horizontal = Space.x6, vertical = Space.x3)) {
             DetailLine("From", controller.evmAccount?.address ?: "Current EVM account")
@@ -812,7 +807,6 @@ private fun EvmSendGasPanel(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(Space.x5)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -923,7 +917,6 @@ private fun EvmSendProgressContent(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(horizontal = Space.x6, vertical = Space.x3)) {
             DetailLine("Recipient", controller.evmSendDialogRecipient)
@@ -1089,7 +1082,6 @@ private fun TransactionProgressStepper(transaction: SubmittedTransaction, pollin
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.sm))
             .background(SurfaceBase)
-            .border(1.dp, BorderLine, RoundedCornerShape(Radius.sm))
             .padding(Space.x5),
     ) {
         steps.forEachIndexed { index, step ->
@@ -1130,8 +1122,7 @@ private fun TxProgressStepRow(step: TxProgressStep, showLine: Boolean) {
                             TxStepVisual.Error -> ErrorRed.copy(alpha = 0.18f)
                             else -> SurfaceRaised.copy(alpha = 0.22f)
                         },
-                    )
-                    .border(1.dp, color, RoundedCornerShape(Radius.pill)),
+                    ),
                 contentAlignment = Alignment.Center,
             ) {
                 when (step.visual) {
@@ -1274,8 +1265,7 @@ private fun ImportWalletScreen(controller: PoctraController) {
             modifier = Modifier
                 .size(66.dp)
                 .clip(RoundedCornerShape(Radius.md))
-                .background(SurfaceRaised.copy(alpha = 0.16f))
-                .border(1.dp, SurfaceRaised.copy(alpha = 0.42f), RoundedCornerShape(Radius.md)),
+                .background(SurfaceRaised.copy(alpha = 0.16f)),
             contentAlignment = Alignment.Center,
         ) {
             GlyphIcon(Glyph.Import, modifier = Modifier.size(34.dp), color = SurfaceRaised)
@@ -1421,11 +1411,6 @@ private fun ImportMethodCard(
         animationSpec = tween(120, easing = FastOutSlowInEasing),
         label = "importMethodScale",
     )
-    val borderColor = when {
-        selected -> SurfaceRaised.copy(alpha = 0.72f)
-        enabled -> BorderLine
-        else -> BorderLine.copy(alpha = 0.45f)
-    }
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -1434,8 +1419,7 @@ private fun ImportMethodCard(
                 scaleY = scale
             }
             .clip(RoundedCornerShape(Radius.md))
-            .background(if (selected) SurfaceRaised.copy(alpha = 0.14f) else SurfaceStrong)
-            .border(1.dp, borderColor, RoundedCornerShape(Radius.md))
+            .background(if (selected) SurfaceRaised.copy(alpha = 0.14f) else SurfaceMuted.copy(alpha = 0.72f))
             .clickable(enabled = enabled, onClick = onClick)
             .padding(
                 horizontal = if (compact) Space.x4 else Space.x7,
@@ -1497,7 +1481,6 @@ private fun ImportSecretForm(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(Space.x7)) {
             Text(method.title(), color = TextTertiary, fontWeight = FontWeight.SemiBold)
@@ -1972,7 +1955,6 @@ private fun OverviewPullRefreshIndicator(
         modifier = modifier
             .clip(RoundedCornerShape(Radius.md))
             .background(SurfaceStrong)
-            .border(1.dp, if (ready || refreshing) SurfaceRaised else BorderLine, RoundedCornerShape(Radius.md))
             .padding(horizontal = Space.x5, vertical = Space.x3),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -2068,8 +2050,7 @@ private fun OverviewNetworkChip(
         modifier = Modifier
             .height(OverviewHeaderHeight)
             .clip(RoundedCornerShape(Radius.md))
-            .background(if (enabled) SurfaceStrong else SurfaceMuted)
-            .border(1.dp, borderColor.copy(alpha = 0.65f), RoundedCornerShape(Radius.md))
+            .background(if (enabled) borderColor.copy(alpha = 0.10f) else SurfaceMuted)
             .clickable(enabled = enabled, onClick = onClick)
             .semantics { contentDescription = "Open Octra RPC network settings" }
             .padding(horizontal = Space.x5, vertical = Space.x2),
@@ -2104,8 +2085,7 @@ private fun AddressDropdownBlock(
         modifier = modifier
             .height(OverviewHeaderHeight)
             .clip(RoundedCornerShape(Radius.md))
-            .background(SurfaceStrong)
-            .border(1.dp, BorderLine, RoundedCornerShape(Radius.md))
+            .background(SurfaceMuted.copy(alpha = 0.72f))
             .clickable(onClick = onClick)
             .padding(horizontal = Space.x4),
         verticalAlignment = Alignment.CenterVertically,
@@ -2173,7 +2153,6 @@ private fun WalletDrawerOverlay(
                     .navigationBarsPadding(),
                 shape = RoundedCornerShape(topEnd = Radius.md, bottomEnd = Radius.md),
                 colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-                border = BorderStroke(1.dp, SurfaceRaised.copy(alpha = 0.28f)),
             ) {
                 Column(
                     modifier = Modifier
@@ -2185,8 +2164,7 @@ private fun WalletDrawerOverlay(
                             modifier = Modifier
                                 .size(36.dp)
                                 .clip(RoundedCornerShape(Radius.md))
-                                .background(SurfaceRaised.copy(alpha = 0.16f))
-                                .border(1.dp, SurfaceRaised.copy(alpha = 0.42f), RoundedCornerShape(Radius.md)),
+                                .background(SurfaceRaised.copy(alpha = 0.16f)),
                             contentAlignment = Alignment.Center,
                         ) {
                             GlyphIcon(Glyph.Wallet, modifier = Modifier.size(18.dp), color = SurfaceRaised)
@@ -2355,15 +2333,6 @@ private fun DrawerWalletRow(
                     else -> SurfaceStrong
                 }
             )
-            .border(
-                1.dp,
-                when {
-                    dragging -> SurfaceRaised.copy(alpha = 0.62f)
-                    active -> SurfaceRaised.copy(alpha = 0.30f)
-                    else -> BorderLine.copy(alpha = 0.62f)
-                },
-                cardShape,
-            )
             .then(if (!editing) Modifier.clickable(onClick = onSelect) else Modifier)
             .then(dragModifier)
             .padding(start = Space.x5, top = Space.x5, end = Space.x5, bottom = Space.x4),
@@ -2528,15 +2497,6 @@ private fun WalletDrawerActionIcon(
                     else -> SurfaceMuted
                 },
             )
-            .border(
-                1.dp,
-                when {
-                    danger -> ErrorRed.copy(alpha = 0.45f)
-                    active -> SurfaceRaised.copy(alpha = 0.6f)
-                    else -> BorderLine
-                },
-                RoundedCornerShape(Radius.sm),
-            )
             .then(if (clickable) Modifier.clickable(onClick = onClick) else Modifier)
             .semantics { this.contentDescription = contentDescription }
     }
@@ -2676,7 +2636,6 @@ private fun RecentActivity(controller: PoctraController, address: String) {
             modifier = Modifier
                 .clip(RoundedCornerShape(Radius.sm))
                 .background(SurfaceRaised.copy(alpha = 0.12f))
-                .border(1.dp, SurfaceRaised.copy(alpha = 0.34f), RoundedCornerShape(Radius.sm))
                 .clickable(onClick = controller::openActivityCenter)
                 .padding(horizontal = Space.x4, vertical = Space.x2),
             color = SurfaceRaised,
@@ -2830,13 +2789,6 @@ private fun RecentActivityEmpty() {
             .padding(vertical = Space.x8),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Box(
-            modifier = Modifier
-                .width(42.dp)
-                .height(2.dp)
-                .background(BorderLine),
-        )
-        Spacer(Modifier.height(Space.x5))
         Text("No activity yet", color = TextSecondary, style = MaterialTheme.typography.bodyMedium)
     }
 }
@@ -2863,7 +2815,6 @@ private fun OpTypeBadge(text: String) {
                     else -> SurfaceMuted
                 },
             )
-            .border(1.dp, BorderLine, RoundedCornerShape(Radius.sm))
             .padding(horizontal = Space.x4, vertical = Space.x2),
         color = TextTertiary,
         style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 12.sp),
@@ -2970,8 +2921,7 @@ private fun MiniHeaderAction(
             .width(50.dp)
             .height(42.dp)
             .clip(RoundedCornerShape(Radius.md))
-            .background(if (enabled) SurfaceStrong else SurfaceMuted)
-            .border(1.dp, BorderLine, RoundedCornerShape(Radius.md))
+            .background(if (enabled) SurfaceMuted.copy(alpha = 0.78f) else SurfaceMuted.copy(alpha = 0.48f))
             .clickable(enabled = enabled, onClick = onClick)
             .padding(vertical = Space.x2),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -3006,8 +2956,7 @@ private fun EvmAccountCard(controller: PoctraController) {
             .fillMaxWidth()
             .clickable(onClick = controller::openEvm),
         shape = RoundedCornerShape(Radius.sm),
-        colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
+        colors = CardDefaults.cardColors(containerColor = SurfaceMuted.copy(alpha = 0.62f)),
     ) {
         Row(
             modifier = Modifier.padding(Space.x7),
@@ -3213,8 +3162,7 @@ private fun TradeHeaderNetworkPill(controller: PoctraController) {
             .width(154.dp)
             .height(44.dp)
             .clip(RoundedCornerShape(Radius.md))
-            .background(SurfaceStrong)
-            .border(1.dp, BorderLine, RoundedCornerShape(Radius.md))
+            .background(SurfaceMuted.copy(alpha = 0.72f))
             .clickable(onClick = controller::openEvmNetworkSettingsFromTrade)
             .padding(horizontal = Space.x4),
         verticalAlignment = Alignment.CenterVertically,
@@ -3247,8 +3195,7 @@ private fun TradeMiniChart(controller: PoctraController) {
             .fillMaxWidth()
             .height(194.dp),
         shape = RoundedCornerShape(Radius.md),
-        colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
+        colors = CardDefaults.cardColors(containerColor = SurfaceMuted.copy(alpha = 0.54f)),
     ) {
         Column(
             Modifier.padding(
@@ -3279,7 +3226,6 @@ private fun TradeMiniChart(controller: PoctraController) {
                     .height(136.dp)
                     .clip(RoundedCornerShape(Radius.sm))
                     .background(SurfaceBase)
-                    .border(1.dp, BorderLine, RoundedCornerShape(Radius.sm))
                     .padding(start = Space.x3, top = Space.x3, end = 0.dp, bottom = Space.x3),
                 contentAlignment = Alignment.Center,
             ) {
@@ -3295,7 +3241,6 @@ private fun TradeMiniChart(controller: PoctraController) {
                                 .align(Alignment.TopStart)
                                 .clip(RoundedCornerShape(Radius.sm))
                                 .background(Warning.copy(alpha = 0.18f))
-                                .border(1.dp, Warning.copy(alpha = 0.45f), RoundedCornerShape(Radius.sm))
                                 .padding(horizontal = Space.x3, vertical = Space.x1),
                             color = TextTertiary,
                             style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, lineHeight = 10.sp),
@@ -3323,7 +3268,6 @@ private fun SmallRefreshButton(loading: Boolean, onClick: () -> Unit, enabled: B
             .size(30.dp)
             .clip(RoundedCornerShape(Radius.sm))
             .background(if (interactive) SurfaceMuted else SurfaceMuted.copy(alpha = 0.55f))
-            .border(1.dp, BorderLine, RoundedCornerShape(Radius.sm))
             .clickable(enabled = interactive, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
@@ -3502,8 +3446,7 @@ private fun TradeSwapCard(
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
-        colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
+        colors = CardDefaults.cardColors(containerColor = SurfaceMuted.copy(alpha = 0.54f)),
     ) {
         Column(Modifier.padding(Space.x6)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -3628,7 +3571,6 @@ private fun TradeReviewSheet(
                         .navigationBarsPadding(),
                     shape = RoundedCornerShape(topStart = Radius.md, topEnd = Radius.md),
                     colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-                    border = BorderStroke(1.dp, BorderLine),
                 ) {
                     Column(
                         modifier = Modifier
@@ -3768,7 +3710,6 @@ private fun TradeReviewSummaryCard(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(horizontal = Space.x5, vertical = Space.x5)) {
             Row(horizontalArrangement = Arrangement.spacedBy(Space.x4)) {
@@ -3787,12 +3728,6 @@ private fun TradeReviewSummaryCard(
                 )
             }
             Spacer(Modifier.height(Space.x4))
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(1.dp)
-                    .background(BorderLine),
-            )
             Spacer(Modifier.height(Space.x3))
             TradeReviewKeyValue("Minimum", "${quote.minimumOut} ${toAsset.symbol}")
             TradeReviewKeyValue("Impact", quote.priceImpactLabel)
@@ -3820,7 +3755,6 @@ private fun TradeReviewAmountCard(
         modifier = modifier
             .clip(RoundedCornerShape(Radius.sm))
             .background(accent.copy(alpha = if (highlighted) 0.14f else 0.10f))
-            .border(1.dp, accent.copy(alpha = 0.28f), RoundedCornerShape(Radius.sm))
             .padding(horizontal = Space.x4, vertical = Space.x3),
     ) {
         Text(
@@ -3893,7 +3827,6 @@ private fun TradeReviewGasPanel(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(Space.x5)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -3982,7 +3915,6 @@ private fun TradeFlowProgressContent(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(horizontal = Space.x6, vertical = Space.x3)) {
             DetailLine("Pay", "${amount.replace(",", ".").trim()} ${tradeAssetLabel(fromAsset)}")
@@ -4064,7 +3996,6 @@ private fun TradeProgressCard(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(Space.x5), verticalArrangement = Arrangement.spacedBy(Space.x4)) {
             steps.forEachIndexed { index, step ->
@@ -4115,15 +4046,6 @@ private fun TradeProgressStepRow(
                         active -> SurfaceRaised.copy(alpha = 0.18f)
                         else -> SurfaceMuted
                     },
-                )
-                .border(
-                    1.dp,
-                    when {
-                        failed -> ErrorRed
-                        done || active -> SurfaceRaised
-                        else -> BorderLine
-                    },
-                    RoundedCornerShape(Radius.md),
                 ),
             contentAlignment = Alignment.Center,
         ) {
@@ -4190,11 +4112,23 @@ private fun TradeAssetInputRow(
     enabled: Boolean,
     isError: Boolean,
 ) {
+    var amountFocused by remember { mutableStateOf(false) }
+    val focusScale by animateFloatAsState(
+        targetValue = if (amountFocused) 0.988f else 1f,
+        animationSpec = tween(150, easing = FastOutSlowInEasing),
+        label = "tradeAmountFocusScale",
+    )
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .graphicsLayer {
+                scaleX = focusScale
+                scaleY = focusScale
+            },
         shape = RoundedCornerShape(Radius.md),
-        colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-        border = BorderStroke(1.dp, if (isError) ErrorRed else BorderLine),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isError) ErrorRed.copy(alpha = 0.08f) else SurfaceBase,
+        ),
     ) {
         Column(Modifier.padding(horizontal = Space.x5, vertical = Space.x4)) {
             TradeAssetPanelHeader(
@@ -4215,6 +4149,7 @@ private fun TradeAssetInputRow(
                     onValueChange = { raw -> onAmountChange(raw.filter { it.isDigit() || it == '.' || it == ',' }) },
                     modifier = Modifier.weight(1f),
                     enabled = enabled,
+                    onFocusChanged = { amountFocused = it },
                 )
                 TradeAssetSelector(
                     asset = asset,
@@ -4234,11 +4169,14 @@ private fun TradeAmountField(
     onValueChange: (String) -> Unit,
     enabled: Boolean,
     modifier: Modifier = Modifier,
+    onFocusChanged: (Boolean) -> Unit = {},
 ) {
     BasicTextField(
         value = value,
         onValueChange = onValueChange,
-        modifier = modifier.height(42.dp),
+        modifier = modifier
+            .height(42.dp)
+            .onFocusChanged { onFocusChanged(it.isFocused) },
         enabled = enabled,
         singleLine = true,
         textStyle = MaterialTheme.typography.titleMedium.copy(
@@ -4314,8 +4252,7 @@ private fun TradeSwapDirectionButton(onClick: () -> Unit, enabled: Boolean) {
             modifier = Modifier
                 .size(34.dp)
                 .clip(RoundedCornerShape(Radius.md))
-                .background(if (enabled) SurfaceBase else SurfaceMuted)
-                .border(1.dp, BorderLine, RoundedCornerShape(Radius.md))
+                .background(if (enabled) SurfaceMuted.copy(alpha = 0.80f) else SurfaceMuted.copy(alpha = 0.48f))
                 .clickable(enabled = enabled, onClick = onClick),
             contentAlignment = Alignment.Center,
         ) {
@@ -4359,7 +4296,6 @@ private fun TradeAssetOutputRow(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceMuted.copy(alpha = 0.48f)),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(horizontal = Space.x5, vertical = Space.x4)) {
             TradeAssetPanelHeader(
@@ -4406,8 +4342,7 @@ private fun TradeAssetSelector(
                 .fillMaxWidth()
                 .height(42.dp)
                 .clip(RoundedCornerShape(Radius.md))
-                .background(SurfaceStrong)
-                .border(1.dp, BorderLine, RoundedCornerShape(Radius.md))
+                .background(SurfaceMuted.copy(alpha = 0.72f))
                 .clickable(enabled = enabled) { expanded = true }
                 .padding(horizontal = Space.x4),
             verticalAlignment = Alignment.CenterVertically,
@@ -4540,7 +4475,6 @@ private fun TradeQuotePanel(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(Radius.md),
                 colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-                border = BorderStroke(1.dp, BorderLine),
             ) {
                 Column(Modifier.padding(horizontal = Space.x6, vertical = Space.x4)) {
                     DetailLine("Route", quote.routeLabel)
@@ -4585,7 +4519,6 @@ private fun TradeInfoHint(
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.sm))
             .background(color.copy(alpha = 0.10f))
-            .border(1.dp, color.copy(alpha = 0.34f), RoundedCornerShape(Radius.sm))
             .padding(horizontal = Space.x4, vertical = Space.x3),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -4609,8 +4542,7 @@ private fun TradeInfoHint(
                 modifier = Modifier
                     .size(28.dp)
                     .clip(RoundedCornerShape(Radius.sm))
-                    .background(if (retryEnabled) SurfaceStrong else SurfaceMuted.copy(alpha = 0.55f))
-                    .border(1.dp, BorderLine, RoundedCornerShape(Radius.sm))
+                    .background(if (retryEnabled) SurfaceMuted.copy(alpha = 0.82f) else SurfaceMuted.copy(alpha = 0.45f))
                     .clickable(enabled = retryEnabled, onClick = onRetry)
                     .semantics { contentDescription = "Retry quote" },
                 contentAlignment = Alignment.Center,
@@ -4633,20 +4565,10 @@ private fun normalizeTradeToAsset(fromAsset: TradeAsset, currentTo: TradeAsset):
 private fun tradeReviewKey(fromAsset: TradeAsset, toAsset: TradeAsset, amount: String, slippageBps: Int): String =
     "${fromAsset.symbol}:${toAsset.symbol}:${amount.replace(",", ".").trim()}:$slippageBps"
 
-private data class DAppSite(val title: String, val url: String, val subtitle: String, val iconRes: Int)
-
 @Composable
 private fun ExploreDAppsContent(controller: PoctraController) {
-    val octraNetwork = controller.activeRpcNetwork?.networkType ?: "mainnet"
-    val octraIdentityUrl = controller.octraIdentityDAppUrl()
-    val sites = listOf(
-        DAppSite(
-            title = "Octra Identity",
-            url = octraIdentityUrl,
-            subtitle = if (octraNetwork == "devnet") "Octra Identity devnet" else "Octra Identity mainnet",
-            iconRes = com.poctra.wallet.R.drawable.ic_octra_identity,
-        ),
-    )
+    LaunchedEffect(Unit) { controller.refreshDAppCatalog() }
+    val sites = controller.dAppCatalog
     Column(Modifier.fillMaxWidth()) {
         Text("Explore", color = TextTertiary, style = MaterialTheme.typography.titleLarge)
         Spacer(Modifier.height(Space.x3))
@@ -4655,44 +4577,90 @@ private fun ExploreDAppsContent(controller: PoctraController) {
         CustomDAppLauncher(controller)
         Spacer(Modifier.height(Space.x8))
         Column(verticalArrangement = Arrangement.spacedBy(Space.x6)) {
-            sites.forEach { site ->
-                DAppSiteRow(site = site, onClick = { controller.openDAppBrowser(site.title, site.url) })
+            if (controller.dAppCatalogLoading && sites.isEmpty()) {
+                ExploreCatalogStatus(message = "Loading dApps...", loading = true)
+            } else if (controller.dAppCatalogError != null && sites.isEmpty()) {
+                ExploreCatalogStatus(
+                    message = controller.dAppCatalogError ?: "Unable to load dApps.",
+                    onRetry = { controller.refreshDAppCatalog(force = true) },
+                )
+            } else if (sites.isEmpty()) {
+                ExploreCatalogStatus(message = "No dApps are published yet.")
+            } else {
+                sites.forEach { site ->
+                    DAppSiteRow(site = site, onClick = { controller.openDAppBrowser(site.title, site.dappLink) })
+                }
             }
         }
     }
 }
 
 @Composable
-private fun DAppSiteRow(site: DAppSite, onClick: () -> Unit) {
+private fun ExploreCatalogStatus(
+    message: String,
+    loading: Boolean = false,
+    onRetry: (() -> Unit)? = null,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (loading) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(14.dp),
+                color = MaterialTheme.colorScheme.primary,
+                strokeWidth = 1.8.dp,
+            )
+        } else {
+            GlyphIcon(Glyph.Info, modifier = Modifier.size(14.dp), color = TextSecondary)
+        }
+        Spacer(Modifier.width(Space.x4))
+        Text(
+            text = message,
+            modifier = Modifier.weight(1f),
+            color = TextSecondary,
+            style = MaterialTheme.typography.labelSmall,
+        )
+        if (onRetry != null) {
+            Spacer(Modifier.width(Space.x4))
+            Box(
+                modifier = Modifier
+                    .size(30.dp)
+                    .clip(RoundedCornerShape(Radius.sm))
+                    .background(SurfaceMuted)
+                    .clickable(onClick = onRetry)
+                    .semantics { contentDescription = "Retry dApp catalog" },
+                contentAlignment = Alignment.Center,
+            ) {
+                GlyphIcon(Glyph.Refresh, modifier = Modifier.size(13.dp), color = MaterialTheme.colorScheme.primary)
+            }
+        }
+    }
+}
+
+@Composable
+private fun DAppSiteRow(site: DAppCatalogEntry, onClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.md))
-            .background(SurfaceStrong)
-            .border(1.dp, BorderLine, RoundedCornerShape(Radius.md))
+            .background(SurfaceMuted.copy(alpha = 0.72f))
             .clickable(onClick = onClick)
             .padding(Space.x7),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(
-            modifier = Modifier
-                .size(42.dp)
-                .clip(RoundedCornerShape(Radius.md))
-                .background(SurfaceRaised.copy(alpha = 0.16f)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Image(
-                painter = painterResource(site.iconRes),
-                contentDescription = site.title,
-                modifier = Modifier.size(24.dp),
-            )
-        }
+        DAppLogoView(
+            logoSvg = site.logoSvg,
+            contentDescription = "${site.title} logo",
+            size = 42.dp,
+        )
         Spacer(Modifier.width(Space.x6))
         Column(Modifier.weight(1f)) {
             Text(site.title, color = TextTertiary, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(Space.x2))
-            Text(site.subtitle, color = TextSecondary, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(site.url, color = TextSecondary, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(site.description, color = TextSecondary, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Spacer(Modifier.height(Space.x1))
+            Text(site.dappLink, color = TextSecondary, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -4784,7 +4752,6 @@ private fun DAppInputPreviewCard(
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.md))
             .background(color.copy(alpha = if (isError) 0.10f else 0.12f))
-            .border(1.dp, color.copy(alpha = if (isError) 0.38f else 0.30f), RoundedCornerShape(Radius.md))
             .clickable(enabled = canOpen, onClick = onClick)
             .padding(horizontal = Space.x5, vertical = Space.x4),
         verticalAlignment = Alignment.CenterVertically,
@@ -4836,7 +4803,6 @@ private fun OctProtocolBadge() {
             .padding(start = Space.x2)
             .clip(RoundedCornerShape(Radius.sm))
             .background(SurfaceRaised.copy(alpha = 0.16f))
-            .border(1.dp, SurfaceRaised.copy(alpha = 0.34f), RoundedCornerShape(Radius.sm))
             .padding(horizontal = Space.x3, vertical = Space.x1),
         contentAlignment = Alignment.Center,
     ) {
@@ -4854,8 +4820,7 @@ private fun BrowserToolbarButton(
         modifier = Modifier
             .size(34.dp)
             .clip(RoundedCornerShape(Radius.sm))
-            .background(SurfaceBase)
-            .border(1.dp, BorderLine, RoundedCornerShape(Radius.sm))
+            .background(SurfaceMuted.copy(alpha = 0.80f))
             .semantics { this.contentDescription = contentDescription }
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
@@ -4900,7 +4865,6 @@ private fun OctProtocolLeftBadge() {
         modifier = Modifier
             .clip(shape)
             .background(SurfaceRaised.copy(alpha = 0.16f))
-            .border(1.dp, SurfaceRaised.copy(alpha = 0.34f), shape)
             .padding(horizontal = Space.x3, vertical = 1.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -4940,7 +4904,6 @@ private fun DAppBrowserScreen(controller: PoctraController) {
             modifier = Modifier
                 .fillMaxWidth()
                 .background(SurfaceStrong)
-                .border(1.dp, BorderLine),
         ) {
             Row(
                 modifier = Modifier
@@ -4990,8 +4953,9 @@ private fun DAppBrowserScreen(controller: PoctraController) {
                                     if (!isUserGesture) return false
                                     val popupView = WebView(view.context)
                                     fun openPopupUrl(popupUrl: String) {
-                                        if (controller.isOctraCircleInput(popupUrl)) {
-                                            controller.openDAppBrowser("oct://", popupUrl)
+                                        val octraInput = controller.normalizeOctraBrowserInput(popupUrl)
+                                        if (octraInput != null) {
+                                            controller.openDAppBrowser("oct://", octraInput)
                                         } else {
                                             controller.openDAppBrowserTab(browserTabFallbackTitle(popupUrl), popupUrl)
                                         }
@@ -5024,8 +4988,9 @@ private fun DAppBrowserScreen(controller: PoctraController) {
                                     request: android.webkit.WebResourceRequest,
                                 ): Boolean {
                                     val nextUrl = request.url?.toString().orEmpty()
-                                    if (controller.isOctraCircleInput(nextUrl)) {
-                                        controller.openDAppBrowser("oct://", nextUrl)
+                                    val octraInput = controller.normalizeOctraBrowserInput(nextUrl)
+                                    if (octraInput != null) {
+                                        controller.openDAppBrowser("oct://", octraInput)
                                         return true
                                     }
                                     if (request.isForMainFrame && controller.selectedCircleTarget != null && !controller.isCircleBrowserUrl(nextUrl)) {
@@ -5180,8 +5145,7 @@ private fun DAppBrowserTabChip(
         modifier = Modifier
             .width(176.dp)
             .clip(shape)
-            .background(if (active) SurfaceRaised.copy(alpha = 0.14f) else SurfaceBase.copy(alpha = 0.76f))
-            .border(1.dp, if (active) SurfaceRaised.copy(alpha = 0.36f) else BorderLine, shape)
+            .background(if (active) SurfaceRaised.copy(alpha = 0.14f) else SurfaceMuted.copy(alpha = 0.72f))
             .clickable(onClick = onClick)
             .padding(start = Space.x3, end = Space.x2, top = Space.x2, bottom = Space.x2),
         verticalAlignment = Alignment.CenterVertically,
@@ -5272,7 +5236,6 @@ private fun CirclePassphraseDialog(
                         .navigationBarsPadding(),
                     shape = RoundedCornerShape(topStart = Radius.md, topEnd = Radius.md),
                     colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-                    border = BorderStroke(1.dp, BorderLine),
                 ) {
                     Column(
                         modifier = Modifier
@@ -5626,6 +5589,7 @@ private fun injectCircleRuntime(asset: CircleAsset, bridgeToken: String): String
           var rpcUrl = 'poctra://circle-rpc';
           var nextCircleRequestId = 0;
           var pendingCircleRequests = {};
+          var pendingCircleDownloads = {};
           var pendingRpcFetches = [];
           var rpcFetchTimer = 0;
           function rejectNativeBridge(message) {
@@ -5644,6 +5608,26 @@ private fun injectCircleRuntime(asset: CircleAsset, bridgeToken: String): String
             var error = new Error(message || 'Circle request failed.');
             error.code = code;
             entry.reject(error);
+          };
+          window.__poctraCircleDownloadProgress = function (id, completed, total) {
+            var entry = pendingCircleDownloads[id];
+            if (!entry) return;
+            entry.link.textContent = 'Preparing ' + completed + '/' + total;
+          };
+          window.__poctraCircleDownloadDone = function (id) {
+            var entry = pendingCircleDownloads[id];
+            if (!entry) return;
+            delete pendingCircleDownloads[id];
+            entry.link.innerHTML = entry.originalHtml;
+            entry.link.removeAttribute('aria-disabled');
+          };
+          window.__poctraCircleDownloadError = function (id, message) {
+            var entry = pendingCircleDownloads[id];
+            if (!entry) return;
+            delete pendingCircleDownloads[id];
+            entry.link.textContent = 'Retry download';
+            entry.link.removeAttribute('aria-disabled');
+            try { console.error(message || 'Circle download failed.'); } catch (_) {}
           };
           function circleRequest(method, payload) {
             if (!window.PoctraAndroid || !window.PoctraAndroid.circleRequest) {
@@ -5780,6 +5764,69 @@ private fun injectCircleRuntime(asset: CircleAsset, bridgeToken: String): String
               });
             };
           }
+          function canonicalDownloadPath(raw) {
+            if (!raw || raw === '#') return '';
+            try {
+              var parsed = new URL(raw, window.location.href);
+              var path = parsed.pathname || '';
+              var prefix = '/oct/' + context.circle_id;
+              if (path === prefix) path = context.path || '/index.html';
+              if (path.indexOf(prefix + '/') === 0) path = path.slice(prefix.length);
+              return path.charAt(0) === '/' ? path : '/' + path;
+            } catch (_) {
+              return raw.charAt(0) === '/' ? raw : '/' + raw;
+            }
+          }
+          function downloadMime(fileName, explicitMime) {
+            if (explicitMime) return explicitMime;
+            var lower = String(fileName || '').toLowerCase();
+            if (lower.endsWith('.apk')) return 'application/vnd.android.package-archive';
+            if (lower.endsWith('.pdf')) return 'application/pdf';
+            if (lower.endsWith('.zip')) return 'application/zip';
+            return 'application/octet-stream';
+          }
+          function circleDownloadSpec(link) {
+            var declared = link.getAttribute('data-circle-download-parts') || '';
+            var href = link.getAttribute('href') || '';
+            var parts = declared.split(/[\n,]+/).map(function (item) {
+              return canonicalDownloadPath(item.trim());
+            }).filter(Boolean);
+            if (!parts.length) {
+              var directPath = canonicalDownloadPath(href);
+              var isDownload = link.hasAttribute('download') || /\.(apk|exe|msi|pdf|zip|7z|rar|dmg|deb|rpm|tar|gz|csv|docx?|xlsx?|pptx?)(?:$|[?#])/i.test(href);
+              if (!isDownload || !directPath) return null;
+              parts = [directPath];
+            }
+            var fallback = parts[parts.length - 1].split('/').pop().replace(/\.part\d+$/i, '');
+            var fileName = link.getAttribute('data-circle-download-name') || link.getAttribute('download') || fallback || 'circle-download';
+            return {
+              paths: parts,
+              fileName: fileName,
+              mimeType: downloadMime(fileName, link.getAttribute('data-circle-download-type') || link.getAttribute('type') || ''),
+              sha256: link.getAttribute('data-circle-download-sha256') || ''
+            };
+          }
+          document.addEventListener('click', function (event) {
+            var link = event.target && event.target.closest ? event.target.closest('a[href]') : null;
+            if (!link) return;
+            var spec = circleDownloadSpec(link);
+            if (!spec) return;
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            if (!window.PoctraAndroid || !window.PoctraAndroid.circleDownload) return;
+            var id = 'download_' + String(++nextCircleRequestId);
+            pendingCircleDownloads[id] = { link: link, originalHtml: link.innerHTML };
+            link.textContent = 'Preparing 0/' + spec.paths.length;
+            link.setAttribute('aria-disabled', 'true');
+            window.PoctraAndroid.circleDownload(JSON.stringify({
+              id: id,
+              bridgeToken: bridgeToken,
+              paths: spec.paths,
+              fileName: spec.fileName,
+              mimeType: spec.mimeType,
+              sha256: spec.sha256
+            }));
+          }, true);
         })();
         </script>
     """.trimIndent()
@@ -5858,8 +5905,7 @@ private fun DAppBrowserLoadingOverlay(title: String, url: String) {
                 modifier = Modifier
                     .size(54.dp)
                     .clip(RoundedCornerShape(Radius.md))
-                    .background(SurfaceStrong)
-                    .border(1.dp, BorderLine, RoundedCornerShape(Radius.md)),
+                    .background(SurfaceStrong),
                 contentAlignment = Alignment.Center,
             ) {
                 CircularProgressIndicator(color = SurfaceRaised, modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
@@ -5961,6 +6007,43 @@ private class PoctraProviderBridge(
         )
     }
 
+    @JavascriptInterface
+    fun circleDownload(payload: String) {
+        val json = runCatching { JSONObject(payload) }.getOrNull()
+        val id = json?.optString("id").orEmpty()
+        val token = json?.optString("bridgeToken").orEmpty()
+        if (token.isBlank() || token != expectedToken()) {
+            rejectCircleDownload(id, "Invalid poctra circle download token.")
+            return
+        }
+        val pathsJson = json?.optJSONArray("paths")
+        val paths = mutableListOf<String>()
+        if (pathsJson != null) {
+            for (index in 0 until pathsJson.length()) {
+                pathsJson.optString(index).takeIf { it.isNotBlank() }?.let(paths::add)
+            }
+        }
+        controller.downloadCircleAssets(
+            paths = paths,
+            fileName = json?.optString("fileName").orEmpty(),
+            mimeType = json?.optString("mimeType").orEmpty(),
+            expectedSha256 = json?.optString("sha256")?.ifBlank { null },
+            onProgress = { completed, total ->
+                evaluate(
+                    "window.__poctraCircleDownloadProgress && window.__poctraCircleDownloadProgress(" +
+                        "${JSONObject.quote(id)},$completed,$total);",
+                )
+            },
+            onSuccess = {
+                evaluate(
+                    "window.__poctraCircleDownloadDone && window.__poctraCircleDownloadDone(" +
+                        "${JSONObject.quote(id)});",
+                )
+            },
+            onError = { message -> rejectCircleDownload(id, message) },
+        )
+    }
+
     private fun reject(id: String, code: Int, message: String) {
         if (id.isBlank()) return
         evaluate(
@@ -5974,6 +6057,14 @@ private class PoctraProviderBridge(
         evaluate(
             "window.__poctraCircleReject && window.__poctraCircleReject(" +
                 "${JSONObject.quote(id)},$code,${JSONObject.quote(message)});",
+        )
+    }
+
+    private fun rejectCircleDownload(id: String, message: String) {
+        if (id.isBlank()) return
+        evaluate(
+            "window.__poctraCircleDownloadError && window.__poctraCircleDownloadError(" +
+                "${JSONObject.quote(id)},${JSONObject.quote(message)});",
         )
     }
 }
@@ -6014,7 +6105,7 @@ private fun poctraProviderScript(bridgeToken: String): String = """
         }
       }
       function announceProvider(provider, info) {
-        var detail = { provider: provider, info: info };
+        var detail = Object.freeze({ provider: provider, info: info });
         var announceEvent = customEvent('octra:announceProvider', detail);
         if (announceEvent) dispatchEventSafely(announceEvent);
         var loadedEvent = customEvent('octraLoaded', detail);
@@ -6039,10 +6130,10 @@ private fun poctraProviderScript(bridgeToken: String): String = """
       }
       if (window.__poctraProviderInstalled && window.octra) {
         var existingInfo = window.__poctraProviderInfo || {
-          uuid: 'poctra-mobile',
+          uuid: '8f286d3e-891a-4cc4-98a5-48dc905b36bb',
           name: 'poctra',
           rdns: 'id.octra.poctra',
-          version: '0.1.0'
+          version: '1.0.0'
         };
         installProviderGlobals(window.octra, existingInfo);
         announceProvider(window.octra, existingInfo);
@@ -6052,12 +6143,18 @@ private fun poctraProviderScript(bridgeToken: String): String = """
       var nextId = 1;
       var pending = {};
       var listeners = {};
-      var info = {
-        uuid: 'poctra-mobile',
+      var connected = false;
+      function requestPermissions(params) {
+        var request = Array.isArray(params) ? params[0] : params;
+        if (request && Array.isArray(request.permissions)) return request.permissions.slice();
+        return ['read_address', 'read_balance'];
+      }
+      var info = Object.freeze({
+        uuid: '8f286d3e-891a-4cc4-98a5-48dc905b36bb',
         name: 'poctra',
         rdns: 'id.octra.poctra',
-        version: '0.1.0'
-      };
+        version: '1.0.0'
+      });
 
       window.__poctraProviderInfo = info;
       window.__poctraResolve = function (id, result) {
@@ -6065,8 +6162,27 @@ private fun poctraProviderScript(bridgeToken: String): String = """
         if (!entry) return;
         delete pending[id];
         if ((entry.method === 'octra_requestAccounts' || entry.method === 'octra_accounts') && Array.isArray(result)) {
+          connected = result.length > 0;
           emit('accountsChanged', result);
-          if (result.length > 0) emit('connect', { accounts: result });
+          if (connected) {
+            if (entry.method === 'octra_requestAccounts') {
+              emit('permissionsChanged', requestPermissions(entry.params));
+            }
+            provider.request({ method: 'octra_networkInfo' }).then(function (networkInfo) {
+              emit('connect', { networkId: networkInfo && networkInfo.id, networkInfo: networkInfo });
+            }).catch(function () {
+              emit('connect', { networkId: null, accounts: result });
+            });
+          }
+        }
+        if (entry.method === 'octra_disconnect') {
+          connected = false;
+          emit('accountsChanged', []);
+          emit('permissionsChanged', []);
+          var disconnectError = new Error('Disconnected');
+          disconnectError.name = 'OctraProviderError';
+          disconnectError.code = 4900;
+          emit('disconnect', disconnectError);
         }
         entry.resolve(result);
       };
@@ -6075,6 +6191,7 @@ private fun poctraProviderScript(bridgeToken: String): String = """
         if (!entry) return;
         delete pending[id];
         var error = new Error(message || 'poctra request failed');
+        error.name = 'OctraProviderError';
         error.code = code;
         entry.reject(error);
       };
@@ -6085,17 +6202,19 @@ private fun poctraProviderScript(bridgeToken: String): String = """
         providerId: 'poctra',
         name: 'poctra',
         rdns: 'id.octra.poctra',
-        version: '0.1.0',
+        version: '1.0.0',
+        get isConnected() { return connected; },
         request: function (args) {
           return new Promise(function (resolve, reject) {
             if (!args || !args.method) {
               var invalid = new Error('Octra provider method is required');
-              invalid.code = -32600;
+              invalid.name = 'OctraProviderError';
+              invalid.code = 4200;
               reject(invalid);
               return;
             }
             var id = String(nextId++);
-            pending[id] = { resolve: resolve, reject: reject, method: args.method };
+            pending[id] = { resolve: resolve, reject: reject, method: args.method, params: args.params };
             try {
               window.PoctraAndroid.request(JSON.stringify({
                 id: id,
@@ -6184,11 +6303,6 @@ private fun DashboardBottomNav(
             .fillMaxWidth()
             .clip(RoundedCornerShape(topStart = Radius.md, topEnd = Radius.md))
             .background(SurfaceStrong)
-            .border(
-                1.dp,
-                BorderLine.copy(alpha = 0.78f),
-                RoundedCornerShape(topStart = Radius.md, topEnd = Radius.md),
-            )
             .navigationBarsPadding()
             .padding(start = Space.x5, top = Space.x3, end = Space.x5),
         horizontalArrangement = Arrangement.spacedBy(Space.x1),
@@ -6228,7 +6342,6 @@ private fun DashboardBottomNav(
             onClick = { onSelect(DashboardTab.Privacy) },
             modifier = Modifier.weight(1f),
             accentColor = PrivacyPrimary,
-            compactLabel = true,
             iconicPrivacy = true,
         )
     }
@@ -6242,7 +6355,6 @@ private fun BottomNavItem(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     accentColor: Color = SurfaceRaised,
-    compactLabel: Boolean = false,
     iconicPrivacy: Boolean = false,
 ) {
     val itemScale by animateFloatAsState(
@@ -6269,7 +6381,7 @@ private fun BottomNavItem(
         ) {
             GlyphIcon(
                 glyph,
-                modifier = Modifier.size(if (iconicPrivacy) 17.dp else 16.dp),
+                modifier = Modifier.size(if (iconicPrivacy) 18.dp else 16.dp),
                 color = if (selected) accentColor else TextSecondary,
             )
             Spacer(Modifier.height(Space.x1))
@@ -6277,18 +6389,14 @@ private fun BottomNavItem(
                 label,
                 color = if (selected) accentColor else TextSecondary,
                 fontWeight = FontWeight.SemiBold,
-                style = if (compactLabel) {
-                    MaterialTheme.typography.labelSmall.copy(fontSize = 8.sp, lineHeight = 9.sp)
-                } else {
-                    MaterialTheme.typography.labelSmall
-                },
+                style = MaterialTheme.typography.labelSmall,
                 maxLines = 1,
             )
         }
         Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .size(width = 20.dp, height = 3.dp)
+                .size(width = if (iconicPrivacy) 28.dp else 20.dp, height = 3.dp)
                 .clip(RoundedCornerShape(Radius.md))
                 .background(if (selected) accentColor else Color.Transparent),
         )
@@ -6303,7 +6411,6 @@ private fun WalletManagementSection(controller: PoctraController) {
     Card(
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = androidx.compose.foundation.BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(Space.x7), verticalArrangement = Arrangement.spacedBy(Space.x6)) {
             vault.wallets.forEachIndexed { index, item ->
@@ -6351,12 +6458,7 @@ private fun WalletRow(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.sm))
-            .background(if (active) SurfaceRaised.copy(alpha = 0.18f) else SurfaceBase)
-            .border(
-                1.dp,
-                if (active) SurfaceRaised.copy(alpha = 0.9f) else BorderLine,
-                RoundedCornerShape(Radius.sm),
-            )
+            .background(if (active) SurfaceRaised.copy(alpha = 0.18f) else SurfaceMuted.copy(alpha = 0.72f))
             .clickable(onClick = onSelect)
             .padding(Space.x6),
         verticalAlignment = Alignment.CenterVertically,
@@ -6398,7 +6500,6 @@ private fun WalletActionButton(
         animationSpec = tween(90, easing = FastOutSlowInEasing),
         label = "walletActionPress",
     )
-    val edgeColor = if (disabled) BorderLine.copy(alpha = 0.4f) else BorderLine
     Box(
         modifier = modifier
             .height(62.dp)
@@ -6407,7 +6508,7 @@ private fun WalletActionButton(
                 scaleY = pressScale
             }
             .clip(RoundedCornerShape(Radius.md))
-            .background(edgeColor)
+            .background(if (disabled) SurfaceMuted.copy(alpha = 0.48f) else SurfaceMuted.copy(alpha = 0.82f))
             .clickable(
                 enabled = !disabled,
                 interactionSource = interactionSource,
@@ -6419,10 +6520,9 @@ private fun WalletActionButton(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(59.dp)
+                .height(62.dp)
                 .clip(RoundedCornerShape(Radius.md))
-                .background(if (disabled) SurfaceMuted else SurfaceStrong)
-                .border(1.dp, BorderLine.copy(alpha = if (disabled) 0.44f else 0.9f), RoundedCornerShape(Radius.md))
+                .background(if (disabled) SurfaceMuted.copy(alpha = 0.48f) else SurfaceMuted.copy(alpha = 0.82f))
                 .padding(horizontal = Space.x3),
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically,
@@ -6458,11 +6558,9 @@ fun EmptyPanel(text: String, compact: Boolean = false) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(Radius.md))
-            .border(1.dp, BorderLine, RoundedCornerShape(Radius.md))
             .padding(
                 horizontal = if (compact) Space.x6 else Space.x8,
-                vertical = if (compact) Space.x4 else Space.x8,
+                vertical = if (compact) Space.x3 else Space.x6,
             ),
         contentAlignment = Alignment.Center,
     ) {
@@ -6753,8 +6851,7 @@ private fun OctraNetworkFeePanel(
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
-        colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
+        colors = CardDefaults.cardColors(containerColor = SurfaceMuted.copy(alpha = 0.54f)),
     ) {
         Column(Modifier.padding(Space.x5)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -6919,7 +7016,6 @@ private fun SendAssetScreen(controller: PoctraController) {
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(Radius.sm),
             colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-            border = BorderStroke(1.dp, BorderLine),
         ) {
             Row(
                 modifier = Modifier.padding(Space.x6),
@@ -7153,7 +7249,6 @@ private fun OctraSendReviewSheet(
                     .navigationBarsPadding(),
                 shape = RoundedCornerShape(topStart = Radius.md, topEnd = Radius.md),
                 colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-                border = BorderStroke(1.dp, BorderLine),
             ) {
                 Column(
                     modifier = Modifier
@@ -7191,7 +7286,6 @@ private fun OctraSendReviewSheet(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(Radius.md),
                         colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-                        border = BorderStroke(1.dp, BorderLine),
                     ) {
                         Column(Modifier.padding(horizontal = Space.x6, vertical = Space.x3)) {
                             DetailLine("Recipient", recipient)
@@ -7276,7 +7370,6 @@ private fun ReceiveScreen(controller: PoctraController) {
                 modifier = Modifier
                     .clip(RoundedCornerShape(Radius.md))
                     .background(InfoBlue.copy(alpha = 0.12f))
-                    .border(1.dp, InfoBlue.copy(alpha = 0.26f), RoundedCornerShape(Radius.md))
                     .padding(horizontal = Space.x5, vertical = Space.x3),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(Space.x3),
@@ -7299,8 +7392,7 @@ private fun ReceiveScreen(controller: PoctraController) {
             modifier = Modifier
                 .fillMaxWidth(),
             shape = RoundedCornerShape(Radius.md),
-            colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-            border = BorderStroke(1.dp, BorderLine),
+            colors = CardDefaults.cardColors(containerColor = SurfaceMuted.copy(alpha = 0.62f)),
         ) {
             Text(
                 text = wallet.address,
@@ -7512,8 +7604,7 @@ private fun BridgeHeaderAction(
             .width(50.dp)
             .height(44.dp)
             .clip(RoundedCornerShape(Radius.md))
-            .background(if (enabled) SurfaceStrong else SurfaceMuted)
-            .border(1.dp, BorderLine, RoundedCornerShape(Radius.md))
+            .background(if (enabled) SurfaceMuted.copy(alpha = 0.78f) else SurfaceMuted.copy(alpha = 0.48f))
             .clickable(enabled = enabled, onClick = onClick)
             .padding(vertical = Space.x2),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -7544,8 +7635,7 @@ private fun BridgeResumeCard(controller: PoctraController) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
-        colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, SurfaceRaised.copy(alpha = 0.45f)),
+        colors = CardDefaults.cardColors(containerColor = SurfaceRaised.copy(alpha = 0.08f)),
     ) {
         Row(
             modifier = Modifier.padding(Space.x5),
@@ -7598,7 +7688,6 @@ private fun BridgeStatusStrip(status: BridgeStatus) {
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = Space.x4, vertical = Space.x3),
@@ -7808,16 +7897,18 @@ private fun BridgeHistoryRow(
 ) {
     val recoverable = bridgeHistoryCanRecover(item)
     val completed = item.status == "completed"
+    var expanded by remember(item.id) { mutableStateOf(false) }
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .animateContentSize(animationSpec = tween(220, easing = FastOutSlowInEasing))
+            .clickable { expanded = !expanded },
         shape = RoundedCornerShape(Radius.md),
-        colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(
-            1.dp,
-            when (item.status) {
-                "failed" -> ErrorRed.copy(alpha = 0.55f)
-                "claimable" -> SurfaceRaised.copy(alpha = 0.70f)
-                else -> BorderLine
+        colors = CardDefaults.cardColors(
+            containerColor = when (item.status) {
+                "failed" -> ErrorRed.copy(alpha = 0.08f)
+                "claimable" -> SurfaceRaised.copy(alpha = 0.08f)
+                else -> SurfaceStrong
             },
         ),
     ) {
@@ -7843,47 +7934,54 @@ private fun BridgeHistoryRow(
                     Text("${item.amount} ${if (item.direction == BridgeDirection.OctToWoct) "OCT" else "wOCT"}", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
                 }
                 BridgeHistoryStatusBadge(item.status)
-            }
-            Spacer(Modifier.height(Space.x5))
-            DetailSeparator()
-            DetailLine("From", bridgeHistoryFromAddress(item))
-            DetailSeparator()
-            DetailLine("To", bridgeHistoryToAddress(item))
-            DetailSeparator()
-            DetailLine("Step", bridgeStepLabel(item.step))
-            DetailSeparator()
-            DetailLine("Created", formatBridgeHistoryTime(item.createdAt))
-            DetailSeparator()
-            DetailLine("Updated", formatBridgeHistoryTime(item.updatedAt))
-            if (item.message.isNotBlank()) {
-                DetailSeparator()
-                DetailLine("Message", item.message)
-            }
-            item.octraTxHash?.let { hash ->
-                DetailSeparator()
-                DetailLine("Octra Tx", hash, actionLabel = "Open", onAction = onOpenOctra)
-            }
-            item.evmTxHash?.let { hash ->
-                DetailSeparator()
-                DetailLine("EVM Tx", hash, actionLabel = "Open", onAction = onOpenEvm)
-            }
-            Spacer(Modifier.height(Space.x5))
-            if (completed) {
-                BridgeHistoryOutcome(text = "Completed successfully", glyph = Glyph.Check, isError = false)
-            } else if (recoverable) {
-                Spacer(Modifier.height(Space.x5))
-                PoctraButton(
-                    text = bridgeHistoryActionLabel(item),
-                    onClick = onRecover,
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = !busy,
-                    loading = busy,
-                    compact = true,
-                    variant = ButtonVariant.Primary,
-                    leadingGlyph = if (item.status == "claimable") Glyph.Check else Glyph.Refresh,
+                Spacer(Modifier.width(Space.x3))
+                GlyphIcon(
+                    if (expanded) Glyph.ChevronUp else Glyph.ChevronDown,
+                    modifier = Modifier.size(15.dp),
+                    color = TextSecondary,
                 )
-            } else {
-                BridgeHistoryOutcome(text = bridgeHistoryPassiveLabel(item), glyph = Glyph.Info, isError = item.status == "failed")
+            }
+            Spacer(Modifier.height(Space.x3))
+            Text(
+                "${bridgeStepLabel(item.step)}  |  ${formatBridgeHistoryTime(item.updatedAt)}",
+                color = TextSecondary,
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (expanded) {
+                Spacer(Modifier.height(Space.x5))
+                Column(verticalArrangement = Arrangement.spacedBy(Space.x2)) {
+                    DetailLine("From", bridgeHistoryFromAddress(item))
+                    DetailLine("To", bridgeHistoryToAddress(item))
+                    DetailLine("Step", bridgeStepLabel(item.step))
+                    DetailLine("Created", formatBridgeHistoryTime(item.createdAt))
+                    DetailLine("Updated", formatBridgeHistoryTime(item.updatedAt))
+                    if (item.message.isNotBlank()) DetailLine("Message", item.message)
+                    item.octraTxHash?.let { hash ->
+                        DetailLine("Octra Tx", hash, actionLabel = "Open", onAction = onOpenOctra)
+                    }
+                    item.evmTxHash?.let { hash ->
+                        DetailLine("EVM Tx", hash, actionLabel = "Open", onAction = onOpenEvm)
+                    }
+                }
+                Spacer(Modifier.height(Space.x5))
+                if (completed) {
+                    BridgeHistoryOutcome(text = "Completed successfully", glyph = Glyph.Check, isError = false)
+                } else if (recoverable) {
+                    PoctraButton(
+                        text = bridgeHistoryActionLabel(item),
+                        onClick = onRecover,
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !busy,
+                        loading = busy,
+                        compact = true,
+                        variant = ButtonVariant.Primary,
+                        leadingGlyph = if (item.status == "claimable") Glyph.Check else Glyph.Refresh,
+                    )
+                } else {
+                    BridgeHistoryOutcome(text = bridgeHistoryPassiveLabel(item), glyph = Glyph.Info, isError = item.status == "failed")
+                }
             }
         }
     }
@@ -7896,7 +7994,6 @@ private fun BridgeHistoryOutcome(text: String, glyph: Glyph, isError: Boolean) {
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.sm))
             .background((if (isError) ErrorRed else SurfaceRaised).copy(alpha = 0.12f))
-            .border(1.dp, (if (isError) ErrorRed else SurfaceRaised).copy(alpha = 0.45f), RoundedCornerShape(Radius.sm))
             .padding(horizontal = Space.x5, vertical = Space.x4),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -7920,7 +8017,6 @@ private fun BridgeHistoryStatusBadge(status: String) {
         text = normalized.ifBlank { "unknown" },
         modifier = Modifier
             .clip(RoundedCornerShape(Radius.sm))
-            .border(1.dp, color.copy(alpha = 0.7f), RoundedCornerShape(Radius.sm))
             .background(color.copy(alpha = 0.10f))
             .padding(horizontal = Space.x4, vertical = Space.x2),
         color = color,
@@ -7945,7 +8041,6 @@ private fun BridgeDirectionBadge(direction: BridgeDirection) {
         modifier = Modifier
             .clip(RoundedCornerShape(Radius.sm))
             .background(color.copy(alpha = 0.12f))
-            .border(1.dp, color.copy(alpha = 0.55f), RoundedCornerShape(Radius.sm))
             .padding(horizontal = Space.x3, vertical = Space.x1),
         color = color,
         style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, lineHeight = 10.sp),
@@ -8051,12 +8146,22 @@ private fun BridgeAmountInput(
     isError: Boolean,
     supportingText: String?,
 ) {
+    var focused by remember { mutableStateOf(false) }
+    val focusScale by animateFloatAsState(
+        targetValue = if (focused) 0.988f else 1f,
+        animationSpec = tween(150, easing = FastOutSlowInEasing),
+        label = "bridgeAmountFocusScale",
+    )
     Column(Modifier.fillMaxWidth()) {
         Card(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .graphicsLayer {
+                    scaleX = focusScale
+                    scaleY = focusScale
+                },
             shape = RoundedCornerShape(Radius.md),
             colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-            border = BorderStroke(1.dp, if (isError) ErrorRed else BorderLine),
         ) {
             Column(
                 modifier = Modifier
@@ -8069,7 +8174,9 @@ private fun BridgeAmountInput(
                     BasicTextField(
                         value = value,
                         onValueChange = onValueChange,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier
+                            .weight(1f)
+                            .onFocusChanged { focused = it.isFocused },
                         singleLine = true,
                         textStyle = MaterialTheme.typography.titleLarge.copy(color = TextTertiary),
                         keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -8142,7 +8249,6 @@ private fun BridgeInfoSheet(
                     .navigationBarsPadding(),
                 shape = RoundedCornerShape(topStart = Radius.md, topEnd = Radius.md),
                 colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-                border = BorderStroke(1.dp, BorderLine),
             ) {
                 Column(
                     modifier = Modifier
@@ -8223,7 +8329,6 @@ private fun BridgeFlowCard(title: String, glyph: Glyph, steps: List<String>) {
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(Space.x6)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -8258,7 +8363,6 @@ private fun BridgeAddressCard(unlockOperator: String) {
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(horizontal = Space.x6, vertical = Space.x4)) {
             DetailLine("Octra Bridge", BridgeRepository.OctraBridgeContract)
@@ -8338,7 +8442,6 @@ private fun BridgeReviewSheet(
                     .navigationBarsPadding(),
                 shape = RoundedCornerShape(topStart = Radius.md, topEnd = Radius.md),
                 colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-                border = BorderStroke(1.dp, BorderLine),
             ) {
                 Column(
                     modifier = Modifier
@@ -8467,7 +8570,6 @@ private fun BridgeReviewContent(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(horizontal = Space.x6, vertical = Space.x3)) {
             DetailLine("Amount", "$amount ${if (direction == BridgeDirection.OctToWoct) "OCT" else "wOCT"}")
@@ -8533,7 +8635,6 @@ private fun BridgeReviewFeePanel(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(Space.x5)) {
             Text("Network Fee", color = TextTertiary, fontWeight = FontWeight.SemiBold)
@@ -8648,8 +8749,7 @@ private fun BridgeFeePresetRow(
                 modifier = Modifier
                     .weight(1f)
                     .clip(RoundedCornerShape(Radius.sm))
-                    .background(if (selected == preset) SurfaceRaised.copy(alpha = 0.18f) else SurfaceStrong)
-                    .border(1.dp, if (selected == preset) SurfaceRaised else BorderLine, RoundedCornerShape(Radius.sm))
+                    .background(if (selected == preset) SurfaceRaised.copy(alpha = 0.18f) else SurfaceMuted.copy(alpha = 0.72f))
                     .clickable { onSelect(preset) }
                     .padding(horizontal = Space.x2, vertical = verticalPadding),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -8733,7 +8833,6 @@ private fun BridgeFlowProgressContent(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(horizontal = Space.x6, vertical = Space.x3)) {
             DetailLine("Amount", "$amount ${if (direction == BridgeDirection.OctToWoct) "OCT" else "wOCT"}")
@@ -8908,7 +9007,6 @@ private fun BridgeNetworkStrip(controller: PoctraController) {
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(
             modifier = Modifier.padding(Space.x6),
@@ -8917,18 +9015,16 @@ private fun BridgeNetworkStrip(controller: PoctraController) {
             ActiveNetworkLine(
                 glyph = Glyph.Wallet,
                 label = "Octra",
-                value = octraNetwork?.let(::networkNameWithKind)
+                value = octraNetwork?.name
                     ?: "No active Octra RPC",
-                detail = octraNetwork?.url ?: "Set an active RPC endpoint",
                 onChange = controller::openRpcManagementFromBridge,
             )
             DetailSeparator()
             ActiveNetworkLine(
                 glyph = Glyph.Evm,
                 label = "EVM",
-                value = evmNetwork?.let(::networkNameWithKind)
+                value = evmNetwork?.name
                     ?: "No active EVM network",
-                detail = evmNetwork?.let { "Chain ID ${it.chainId} - ${it.symbol}" } ?: "Set an active EVM network",
                 onChange = controller::openEvmNetworkSettingsFromBridge,
             )
         }
@@ -8942,7 +9038,6 @@ private fun TradeNetworkInfoCard(controller: PoctraController) {
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         ActiveNetworkLine(
             glyph = Glyph.Evm,
@@ -8961,9 +9056,9 @@ private fun ActiveNetworkLine(
     glyph: Glyph,
     label: String,
     value: String,
-    detail: String,
     onChange: () -> Unit,
     modifier: Modifier = Modifier,
+    detail: String? = null,
 ) {
     Row(
         modifier = modifier.fillMaxWidth(),
@@ -8983,14 +9078,16 @@ private fun ActiveNetworkLine(
             Text(label, color = TextSecondary, style = MaterialTheme.typography.labelSmall, maxLines = 1)
             Spacer(Modifier.height(Space.x1))
             Text(value, color = TextTertiary, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(detail, color = TextSecondary, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            detail?.takeIf { it.isNotBlank() }?.let {
+                Text(it, color = TextSecondary, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
         }
         Spacer(Modifier.width(Space.x4))
         Text(
             "Change",
             modifier = Modifier
                 .clip(RoundedCornerShape(Radius.sm))
-                .border(1.dp, BorderLine, RoundedCornerShape(Radius.sm))
+                .background(SurfaceMuted.copy(alpha = 0.72f))
                 .clickable(onClick = onChange)
                 .padding(horizontal = Space.x4, vertical = Space.x2),
             color = SurfaceRaised,
@@ -9036,7 +9133,6 @@ private fun BridgeBalancePanel(controller: PoctraController) {
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(Space.x7)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -9109,7 +9205,6 @@ private fun BridgeDirectionButton(
             .clickable(enabled = enabled, onClick = onClick),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = if (selected) SurfaceRaised.copy(alpha = 0.18f) else SurfaceStrong),
-        border = BorderStroke(1.dp, if (selected) SurfaceRaised else BorderLine),
     ) {
         Column(
             modifier = Modifier
@@ -9190,7 +9285,6 @@ private fun BridgeRecipientCard(title: String, address: String, glyph: Glyph) {
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Row(Modifier.padding(horizontal = Space.x5, vertical = Space.x4), verticalAlignment = Alignment.CenterVertically) {
             Box(
@@ -9219,7 +9313,6 @@ private fun BridgeSummaryCard(direction: BridgeDirection, walletAddress: String,
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(horizontal = Space.x7, vertical = Space.x4)) {
             DetailLine("Route", if (direction == BridgeDirection.OctToWoct) "OCT -> wOCT" else "wOCT -> OCT")
@@ -9265,7 +9358,6 @@ private fun BridgeProgressCard(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, if (currentStep == BridgeStep.Failed) ErrorRed.copy(alpha = 0.65f) else BorderLine),
     ) {
         Column(Modifier.padding(Space.x7)) {
             Text(progress, color = TextTertiary, fontWeight = FontWeight.SemiBold)
@@ -9321,15 +9413,6 @@ private fun BridgeProgressStepRow(
                         active -> SurfaceRaised.copy(alpha = 0.18f)
                         else -> SurfaceMuted
                     },
-                )
-                .border(
-                    1.dp,
-                    when {
-                        failed -> ErrorRed
-                        done || active -> SurfaceRaised
-                        else -> BorderLine
-                    },
-                    RoundedCornerShape(Radius.md),
                 ),
             contentAlignment = Alignment.Center,
         ) {
@@ -9774,7 +9857,6 @@ private fun EvmAddNetworkScreen(controller: PoctraController) {
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(Radius.md),
             colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-            border = BorderStroke(1.dp, BorderLine),
         ) {
             Column(Modifier.padding(Space.x7)) {
                 Text("Network Details", color = TextTertiary, fontWeight = FontWeight.SemiBold)
@@ -9862,7 +9944,6 @@ private fun EvmBalanceHero(controller: PoctraController) {
                         .weight(1f, fill = false)
                         .clip(RoundedCornerShape(Radius.md))
                         .background(SurfaceRaised.copy(alpha = 0.16f))
-                        .border(1.dp, SurfaceRaised.copy(alpha = 0.35f), RoundedCornerShape(Radius.md))
                         .padding(horizontal = Space.x5, vertical = Space.x3),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -9875,8 +9956,7 @@ private fun EvmBalanceHero(controller: PoctraController) {
                 style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier
                     .clip(RoundedCornerShape(Radius.md))
-                    .background(SurfaceStrong)
-                    .border(1.dp, BorderLine, RoundedCornerShape(Radius.md))
+                    .background(SurfaceMuted.copy(alpha = 0.68f))
                     .padding(horizontal = Space.x5, vertical = Space.x3),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -9940,8 +10020,7 @@ private fun EvmSendPanel(
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
-        colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
+        colors = CardDefaults.cardColors(containerColor = SurfaceMuted.copy(alpha = 0.54f)),
     ) {
         Column(Modifier.padding(Space.x7)) {
             RecipientLookupField(
@@ -9992,7 +10071,6 @@ private fun EvmSendPanel(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(Radius.sm),
                     colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-                    border = BorderStroke(1.dp, BorderLine),
                 ) {
                     Column(Modifier.padding(horizontal = Space.x5, vertical = Space.x4)) {
                         DetailLine("NFT", selectedNft.name)
@@ -10025,12 +10103,9 @@ private fun EvmGasInfoCard(controller: PoctraController, selectedToken: EvmToken
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
-        colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
+        colors = CardDefaults.cardColors(containerColor = SurfaceMuted.copy(alpha = 0.54f)),
     ) {
         Column(Modifier.padding(Space.x7)) {
-            DetailLine("Network", controller.evmNetworkLabel())
-            DetailSeparator()
             DetailLine("Estimated Gas", controller.evmGasInfo(selectedToken, selectedNft))
         }
     }
@@ -10043,7 +10118,6 @@ private fun EvmReceivePanel(controller: PoctraController, clipboard: androidx.co
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(Space.x7), horizontalAlignment = Alignment.CenterHorizontally) {
             Text("Receive EVM", color = TextTertiary, fontWeight = FontWeight.SemiBold)
@@ -10106,7 +10180,6 @@ private fun EvmAddTokenScreen(controller: PoctraController) {
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(Radius.md),
             colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-            border = BorderStroke(1.dp, BorderLine),
         ) {
             Column(Modifier.padding(Space.x7)) {
                 Text("Token Contract", color = TextTertiary, fontWeight = FontWeight.SemiBold)
@@ -10182,7 +10255,6 @@ private fun EvmAddNftScreen(controller: PoctraController) {
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(Radius.md),
             colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-            border = BorderStroke(1.dp, BorderLine),
         ) {
             Column(Modifier.padding(Space.x7)) {
                 Text("NFT Details", color = TextTertiary, fontWeight = FontWeight.SemiBold)
@@ -10239,7 +10311,6 @@ private fun EvmNetworkPanel(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(Space.x7)) {
             Text("Active Network", color = TextTertiary, fontWeight = FontWeight.SemiBold)
@@ -10280,7 +10351,6 @@ private fun EvmNetworkDropdown(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(Radius.md))
                 .background(SurfaceBase)
-                .border(1.dp, BorderLine, RoundedCornerShape(Radius.md))
                 .clickable(enabled = enabled && networks.isNotEmpty()) { expanded = true }
                 .padding(horizontal = Space.x6, vertical = Space.x5),
             verticalAlignment = Alignment.CenterVertically,
@@ -10466,8 +10536,7 @@ private fun TokenLikeRow(
             .fillMaxWidth()
             .then(if (onSend != null) Modifier.clickable(onClick = onSend) else Modifier),
         shape = RoundedCornerShape(Radius.sm),
-        colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
+        colors = CardDefaults.cardColors(containerColor = SurfaceMuted.copy(alpha = 0.58f)),
     ) {
         Row(Modifier.padding(Space.x7), verticalAlignment = Alignment.CenterVertically) {
             Box(
@@ -10679,12 +10748,7 @@ private fun EvmActivityList(controller: PoctraController) {
                     onClick = { controller.openEvmTransaction(tx) },
                 )
                 if (index != controller.visibleEvmTransactions.lastIndex) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(1.dp)
-                            .background(BorderLine),
-                    )
+                    Spacer(Modifier.height(Space.x2))
                 }
             }
         }
@@ -10767,16 +10831,7 @@ private fun isValidOctraRecipientInput(value: String): Boolean {
 internal fun isValidOctraAddress(value: String): Boolean = value.startsWith("oct") && value.length == 47
 
 internal fun isValidOctraIdentityName(value: String): Boolean {
-    val normalized = value.trim().lowercase()
-    val path = normalized
-        .removeSuffix(".oct")
-        .removeSuffix(".octra")
-        .removeSuffix(".id")
-    val parts = path.split('.')
-    return normalized.contains('.') &&
-        parts.isNotEmpty() &&
-        parts.size <= 2 &&
-        parts.all { it.matches(Regex("^[a-z0-9]{3,63}$")) }
+    return OctraIdentityName.isValidDomain(value)
 }
 
 internal data class RecipientResolutionPreview(
@@ -10879,7 +10934,7 @@ internal fun RecipientLookupField(
     isError: Boolean = false,
     supportingText: String? = null,
     trailingContent: (@Composable () -> Unit)? = null,
-    accentColor: Color = InfoBlue,
+    accentColor: Color = SurfaceRaised,
 ) {
     val cleanValue = value.trim()
     val directResolution = if (showDirectOctraAddressPreview && isValidOctraAddress(cleanValue)) {
@@ -10923,13 +10978,12 @@ private fun ResolvedRecipientCard(
     resolution: RecipientResolutionPreview,
     glyph: Glyph,
     onClear: () -> Unit,
-    accentColor: Color = InfoBlue,
+    accentColor: Color = SurfaceRaised,
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = accentColor.copy(alpha = 0.12f)),
-        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.42f)),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = Space.x5, vertical = Space.x4),
@@ -10990,7 +11044,6 @@ private fun EvmNetworkOption(
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.md))
             .background(if (selected) SurfaceRaised.copy(alpha = 0.16f) else SurfaceStrong)
-            .border(1.dp, if (selected) SurfaceRaised else BorderLine, RoundedCornerShape(Radius.md))
             .clickable(enabled = enabled, onClick = onClick)
             .padding(Space.x6),
         verticalAlignment = Alignment.CenterVertically,
@@ -11056,7 +11109,6 @@ private fun TransactionDetailsScreen(controller: PoctraController) {
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(Radius.md),
             colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-            border = BorderStroke(1.dp, SurfaceRaised.copy(alpha = 0.35f)),
         ) {
             Row(
                 modifier = Modifier.padding(Space.x7),
@@ -11157,7 +11209,6 @@ private fun TransactionDetailCard(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(horizontal = Space.x7, vertical = Space.x5)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -11214,12 +11265,7 @@ fun DetailLine(
 
 @Composable
 fun DetailSeparator() {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(1.dp)
-            .background(BorderLine),
-    )
+    Spacer(Modifier.height(Space.x3))
 }
 
 @Composable
@@ -11277,7 +11323,6 @@ private fun AddAssetScreen(controller: PoctraController) {
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(Radius.md),
                 colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-                border = BorderStroke(1.dp, BorderLine),
             ) {
                 Column(Modifier.padding(Space.x7)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -11466,7 +11511,6 @@ private fun LegacySettingsScreen(activity: Activity, controller: PoctraControlle
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(Radius.md),
             colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-            border = BorderStroke(1.dp, BorderLine),
         ) {
             Column {
                 SettingsMenuButton(
@@ -11672,7 +11716,6 @@ private fun SettingsDestinationButton(
             },
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
         interactionSource = interactionSource,
     ) {
         Row(
@@ -12017,7 +12060,6 @@ private fun SensitiveKeyCard(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(horizontal = Space.x5, vertical = Space.x4)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -12058,7 +12100,6 @@ private fun SensitiveKeyCard(
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(Radius.sm))
                     .background(SurfaceBase)
-                    .border(1.dp, BorderLine, RoundedCornerShape(Radius.sm))
                     .padding(horizontal = Space.x4, vertical = Space.x3),
             ) {
                 Text(
@@ -12086,7 +12127,6 @@ private fun BackupWalletSummaryCard(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(horizontal = Space.x5, vertical = Space.x4)) {
             Text(
@@ -12174,7 +12214,6 @@ private fun AppearanceSettingsScreen(controller: PoctraController) {
                 .clickable(onClick = controller::toggleDarkMode),
             shape = RoundedCornerShape(Radius.md),
             colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-            border = BorderStroke(1.dp, BorderLine),
         ) {
             Row(
                 modifier = Modifier
@@ -12303,7 +12342,6 @@ private fun DAppPermissionsDialog(
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(Radius.md))
                                     .background(SurfaceBase)
-                                    .border(1.dp, BorderLine, RoundedCornerShape(Radius.md))
                                     .padding(horizontal = Space.x5, vertical = Space.x4),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
@@ -12399,7 +12437,6 @@ private fun AddIdentityProviderScreen(controller: PoctraController) {
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(Radius.md),
             colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-            border = BorderStroke(1.dp, BorderLine),
         ) {
             Column(Modifier.padding(Space.x7)) {
                 StateBanner("Network: ${networkTypeLabel(activeNetwork)}", isError = false)
@@ -12547,8 +12584,7 @@ private fun IdentityProviderRow(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.md))
-            .background(if (active) SurfaceRaised.copy(alpha = 0.14f) else SurfaceStrong)
-            .border(1.dp, if (active) SurfaceRaised else BorderLine, RoundedCornerShape(Radius.md))
+            .background(if (active) SurfaceRaised.copy(alpha = 0.14f) else SurfaceMuted.copy(alpha = 0.72f))
             .padding(Space.x6),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -12556,7 +12592,6 @@ private fun IdentityProviderRow(
             modifier = Modifier
                 .size(24.dp)
                 .clip(RoundedCornerShape(Radius.md))
-                .border(1.dp, if (active) SurfaceRaised else TextSecondary, RoundedCornerShape(Radius.md))
                 .background(if (active) SurfaceRaised else Color.Transparent)
                 .clickable(enabled = !active && !busy, onClick = onActivate),
             contentAlignment = Alignment.Center,
@@ -12661,7 +12696,6 @@ private fun SuggestedContactRow(contact: AddressBookContact, onSave: () -> Unit)
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = Space.x5, vertical = Space.x4),
@@ -12715,7 +12749,6 @@ private fun AddAddressBookContactScreen(controller: PoctraController) {
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(Radius.md),
             colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-            border = BorderStroke(1.dp, BorderLine),
         ) {
             Column(Modifier.padding(Space.x7)) {
                 PoctraTextField(
@@ -12894,7 +12927,6 @@ private fun AddressBookContactRow(
             .then(if (onUse != null) Modifier.clickable(onClick = onUse) else Modifier),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = Space.x5, vertical = Space.x4),
@@ -12932,7 +12964,6 @@ private fun AddressBookContactRow(
                     .size(28.dp)
                     .clip(RoundedCornerShape(Radius.sm))
                     .background(ErrorRed.copy(alpha = 0.14f))
-                    .border(1.dp, ErrorRed.copy(alpha = 0.45f), RoundedCornerShape(Radius.sm))
                     .clickable(onClick = onDelete)
                     .semantics { contentDescription = "Delete contact" },
                 contentAlignment = Alignment.Center,
@@ -12960,45 +12991,99 @@ private fun AboutScreen(controller: PoctraController) {
             Text("About", color = TextTertiary, style = MaterialTheme.typography.titleLarge)
         }
 
-        Spacer(Modifier.height(34.dp))
+        Spacer(Modifier.height(Space.x8))
         Image(
             painter = painterResource(com.poctra.wallet.R.drawable.poctra_logo),
             contentDescription = "poctra",
-            modifier = Modifier.size(78.dp),
+            modifier = Modifier.size(68.dp),
         )
-        Spacer(Modifier.height(Space.x8))
+        Spacer(Modifier.height(Space.x6))
         Text("poctra", color = TextTertiary, style = MaterialTheme.typography.titleLarge)
-        Spacer(Modifier.height(Space.x4))
+        Spacer(Modifier.height(Space.x2))
         Text("pocket octra", color = TextSecondary, textAlign = TextAlign.Center)
         Spacer(Modifier.height(Space.x8))
 
+        AboutProjectCard()
+        Spacer(Modifier.height(Space.x5))
+        Row(horizontalArrangement = Arrangement.spacedBy(Space.x5)) {
+            AboutFeatureCard(
+                title = "Self-custody",
+                description = "Keys remain encrypted on your device.",
+                glyph = Glyph.Key,
+                modifier = Modifier.weight(1f),
+            )
+            AboutFeatureCard(
+                title = "Multi-chain",
+                description = "Manage Octra and derived EVM accounts.",
+                glyph = Glyph.Evm,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Spacer(Modifier.height(Space.x5))
+        AboutFeatureCard(
+            title = "Consumer wallet",
+            description = "Send, receive, bridge, trade, manage assets, and connect to compatible dApps from one wallet.",
+            glyph = Glyph.Wallet,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(Space.x5))
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(Radius.md),
-            colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-            border = BorderStroke(1.dp, BorderLine),
+            colors = CardDefaults.cardColors(containerColor = SurfaceMuted.copy(alpha = 0.56f)),
         ) {
-            Column(Modifier.padding(horizontal = Space.x7, vertical = Space.x2)) {
+            Column(Modifier.padding(horizontal = Space.x6)) {
                 DetailLine("Version", "alpha v1.0.0")
-                DetailSeparator()
-                DetailLine("Active Network", controller.activeRpcNetwork?.networkType ?: "mainnet")
-                DetailSeparator()
-                DetailLine("RPC", controller.currentRpcUrl)
-                DetailSeparator()
-                DetailLine("Explorer", controller.activeRpcNetwork?.explorerUrl.orEmpty())
-                DetailSeparator()
-                DetailLine("Wallets", "${controller.vault?.wallets?.size ?: 0}")
-                DetailSeparator()
-                DetailLine("EVM Network", controller.activeEvmNetwork?.name ?: "Not selected")
-                DetailSeparator()
-                DetailLine("EVM Chain ID", controller.activeEvmNetwork?.chainId?.toString() ?: "-")
-                DetailSeparator()
-                DetailLine("EVM RPC", controller.activeEvmNetwork?.rpcUrl ?: "Not configured")
-                DetailSeparator()
-                DetailLine("EVM Explorer", controller.activeEvmNetwork?.explorerUrl ?: "Not configured")
-                DetailSeparator()
-                DetailLine("EVM Address", controller.evmAccount?.address ?: "Not available")
             }
+        }
+    }
+}
+
+@Composable
+private fun AboutProjectCard() {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(Radius.md),
+        colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
+    ) {
+        Column(Modifier.padding(Space.x7)) {
+            Text("Built for everyday Octra", color = TextTertiary, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(Space.x3))
+            Text(
+                "poctra is a self-custodial consumer wallet for managing Octra assets, EVM accounts, on-chain activity, and dApp connections with clear review and security flows.",
+                color = TextSecondary,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AboutFeatureCard(
+    title: String,
+    description: String,
+    glyph: Glyph,
+    modifier: Modifier = Modifier,
+) {
+    Card(
+        modifier = modifier,
+        shape = RoundedCornerShape(Radius.md),
+        colors = CardDefaults.cardColors(containerColor = SurfaceMuted.copy(alpha = 0.56f)),
+    ) {
+        Column(Modifier.padding(Space.x6)) {
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(RoundedCornerShape(Radius.sm))
+                    .background(SurfaceRaised.copy(alpha = 0.14f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                GlyphIcon(glyph, modifier = Modifier.size(16.dp), color = SurfaceRaised)
+            }
+            Spacer(Modifier.height(Space.x4))
+            Text(title, color = TextTertiary, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodyMedium)
+            Spacer(Modifier.height(Space.x2))
+            Text(description, color = TextSecondary, style = MaterialTheme.typography.labelSmall)
         }
     }
 }
@@ -13062,7 +13147,6 @@ private fun AddRpcNetworkScreen(controller: PoctraController) {
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(Radius.md),
             colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-            border = BorderStroke(1.dp, BorderLine),
         ) {
             Column(Modifier.padding(Space.x7)) {
                 PoctraTextField(
@@ -13265,7 +13349,6 @@ private fun RpcNetworkRow(
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.md))
             .background(if (active) SurfaceRaised.copy(alpha = 0.14f) else SurfaceStrong)
-            .border(1.dp, if (active) SurfaceRaised else BorderLine, RoundedCornerShape(Radius.md))
             .clickable(enabled = !busy, onClick = onActivate)
             .padding(Space.x6),
         verticalAlignment = Alignment.CenterVertically,
@@ -13274,7 +13357,6 @@ private fun RpcNetworkRow(
             modifier = Modifier
                 .size(24.dp)
                 .clip(RoundedCornerShape(Radius.md))
-                .border(1.dp, if (active) SurfaceRaised else TextSecondary, RoundedCornerShape(Radius.md))
                 .background(if (active) SurfaceRaised else Color.Transparent),
             contentAlignment = Alignment.Center,
         ) {
@@ -13318,8 +13400,7 @@ private fun NetworkTypeButton(
         modifier = modifier
             .height(48.dp)
             .clip(RoundedCornerShape(Radius.md))
-            .background(if (selected) SurfaceRaised.copy(alpha = 0.16f) else SurfaceStrong)
-            .border(1.dp, if (selected) SurfaceRaised else BorderLine, RoundedCornerShape(Radius.md))
+            .background(if (selected) SurfaceRaised.copy(alpha = 0.16f) else SurfaceMuted.copy(alpha = 0.72f))
             .clickable(onClick = onClick)
             .padding(horizontal = Space.x6),
         verticalAlignment = Alignment.CenterVertically,
@@ -13391,12 +13472,7 @@ private fun SettingsInlinePanel(content: @Composable () -> Unit) {
 
 @Composable
 private fun Separator() {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(1.dp)
-            .background(BorderLine),
-    )
+    Spacer(Modifier.height(Space.x3))
 }
 
 @Composable

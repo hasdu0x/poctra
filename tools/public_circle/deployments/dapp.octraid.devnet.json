@@ -1,0 +1,681 @@
+{
+  "project": "octraid",
+  "projectType": "dapp",
+  "network": "devnet",
+  "rpc": "http://165.227.225.79:8080",
+  "explorerHost": "https://devnet.octrascan.io",
+  "deployer": "oct5ZHUXnGVJwwZowQsQuVrEWmE6qqvDNgak9PorPYoctra",
+  "circleId": "oct2EPYSkqjD6f1zLuWhyP6G2rDGB8rZp1nNDirVCqp3drD",
+  "uri": "oct://oct2EPYSkqjD6f1zLuWhyP6G2rDGB8rZp1nNDirVCqp3drD/index.html",
+  "sealedRead": null,
+  "publicRead": {
+    "passphraseRequired": false,
+    "resourceMode": "public_resources"
+  },
+  "payload": {
+    "runtime": "octb",
+    "privacy_class": "public",
+    "browser_mode": "gateway_allowed",
+    "resource_mode": "public_resources",
+    "code_b64": null,
+    "policy_hash": null,
+    "members_root": null,
+    "export_policy": null,
+    "limits": {
+      "max_stable_bytes": "33554432",
+      "max_assets_bytes": "33554432",
+      "max_inline_value": "65536",
+      "max_wasm_bytes": "33554432"
+    }
+  },
+  "deployTxHash": "a3c4de3612e86ae211117af5c987cc2e4dcd3b31958388ef42c1553a241b6a64",
+  "assets": [
+    {
+      "path": "/assets/fira_code_medium-DL69PIB5.ttf",
+      "contentType": "font/ttf",
+      "bytes": 283684,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "97091f90623661fb4f7979c10d188f30f4806d8ce326b0bc8d1acc79dcc20d8f",
+      "ou": 80000,
+      "txHash": "35270f509db0ab132d08936535c0ca20ff617239cd2552969ed267118d9f00ae"
+    },
+    {
+      "path": "/assets/fira_code_regular-CzoQJ4O7.ttf",
+      "contentType": "font/ttf",
+      "bytes": 289624,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "5992ab9640e2df491b2f609467b1de60e8bc39b2c28db184342a0592d98f6117",
+      "ou": 80000,
+      "txHash": "61120f821f716df34f7424083fed3bf7b1b966f93b48104e3d34e3ea761edabf"
+    },
+    {
+      "path": "/assets/fira_code_semibold-CssfnJAs.ttf",
+      "contentType": "font/ttf",
+      "bytes": 304248,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "500c74eec6249b06d49aef922dd3e8fc754c70c3b3f7791cd7b1a09ca9a26140",
+      "ou": 80000,
+      "txHash": "7155a0c7ce8c69daddd9f3873fd60116f4695bd20830f880546f41dc6edcd3d1"
+    },
+    {
+      "path": "/assets/index-BZJAONcz.js",
+      "contentType": "application/javascript; charset=utf-8",
+      "bytes": 203305,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "8980dc4946ecdd63cd07d7a6501a35f56e627290d029fb0e6a0af472d7f69760",
+      "ou": 80000,
+      "txHash": "9f310b83c28ecb003b3eadf648918c82d123a87baf59e2c18b8097b1c50b548b"
+    },
+    {
+      "path": "/assets/index-CBOznhsj.css",
+      "contentType": "text/css; charset=utf-8",
+      "bytes": 23301,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "af76b873c45d701c22ab971c673b295e4b694e7100c20b2d2c645a5500bb2a30",
+      "ou": 20000,
+      "txHash": "47782780e452cb1b5b68f62e74e4c16676dcd676500f562455920aec1d993442"
+    },
+    {
+      "path": "/favicon.svg",
+      "contentType": "image/svg+xml",
+      "bytes": 484,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "159116ebc373b0a15237bf69741feabf02b9a34cfcede4f2f6e0fa7c098f312e",
+      "ou": 5000,
+      "txHash": "b2bfd958d5814e257420aa1eac8306df12697890f218516f6deda4d3218536dd"
+    },
+    {
+      "path": "/octra-id.svg",
+      "contentType": "image/svg+xml",
+      "bytes": 484,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "159116ebc373b0a15237bf69741feabf02b9a34cfcede4f2f6e0fa7c098f312e",
+      "ou": 5000,
+      "txHash": "707230bd40fb3e68097a9f563881f516734874be6cfa17fe45cd1d5aac5400ba"
+    },
+    {
+      "path": "/poctra.svg",
+      "contentType": "image/svg+xml",
+      "bytes": 695,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "460b8ab46b2d082733f577aa17ab314486c1d9fb9c425d1661ccfcb023b29bca",
+      "ou": 5000,
+      "txHash": "8270358333a4b3174c639cf1111c9fbea2d25bf60bf300be09803b06fb43ab04"
+    },
+    {
+      "path": "/runtime-config.json",
+      "contentType": "application/json; charset=utf-8",
+      "bytes": 159,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "17624f8de0a6354eaef7f8e077b087e814b0060285619ea7d413a22c154d1b0b",
+      "ou": 5000,
+      "txHash": "c720ecf5770b2eec04c21e6954c9a182f1686c919cd6b17e2411147cfecae69e"
+    },
+    {
+      "path": "/index.html",
+      "contentType": "text/html; charset=utf-8",
+      "bytes": 958,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "8335cb4d52fb9f5fb3f4f1fac4cd591e3923e8bcb9283c103c84ae728ff430b9",
+      "ou": 5000,
+      "txHash": "1d2743bbf31e87c87e67e4a5524f6c870097fa729918a48a734c304fff3a17a0"
+    }
+  ],
+  "deployedAt": "2026-07-06T00:18:32.568Z",
+  "updatedAt": "2026-07-14T01:21:41.288Z",
+  "updates": [
+    {
+      "network": "devnet",
+      "rpc": "http://165.227.225.79:8080",
+      "explorerHost": "https://devnet.octrascan.io",
+      "deployer": "oct5ZHUXnGVJwwZowQsQuVrEWmE6qqvDNgak9PorPYoctra",
+      "circleId": "oct2EPYSkqjD6f1zLuWhyP6G2rDGB8rZp1nNDirVCqp3drD",
+      "uri": "oct://oct2EPYSkqjD6f1zLuWhyP6G2rDGB8rZp1nNDirVCqp3drD/index.html",
+      "assets": [
+        {
+          "path": "/assets/fira_code_medium-DL69PIB5.ttf",
+          "contentType": "font/ttf",
+          "bytes": 283684,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "97091f90623661fb4f7979c10d188f30f4806d8ce326b0bc8d1acc79dcc20d8f",
+          "ou": 80000,
+          "txHash": "bab82e8ddffbcf6d303cca29036890daae21aa37b0b6b6fcd3a4f7237b6fe64a"
+        },
+        {
+          "path": "/assets/fira_code_regular-CzoQJ4O7.ttf",
+          "contentType": "font/ttf",
+          "bytes": 289624,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "5992ab9640e2df491b2f609467b1de60e8bc39b2c28db184342a0592d98f6117",
+          "ou": 80000,
+          "txHash": "8430421c54c544998b61ec3ff0d2bf7e9e7841f9b7662b406ff528b76ee2848b"
+        },
+        {
+          "path": "/assets/fira_code_semibold-CssfnJAs.ttf",
+          "contentType": "font/ttf",
+          "bytes": 304248,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "500c74eec6249b06d49aef922dd3e8fc754c70c3b3f7791cd7b1a09ca9a26140",
+          "ou": 80000,
+          "txHash": "363080bac8b629051e066d47838927de3a0210885c8769e768ce5a52c79413fc"
+        },
+        {
+          "path": "/assets/index-_0aZuKoj.js",
+          "contentType": "application/javascript; charset=utf-8",
+          "bytes": 197247,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "f923f0473dc3ca30b6485258ecc0e5aa7f0aa833a30caaebc8812d98bc0bd98f",
+          "ou": 80000,
+          "txHash": "bd4e0a22813a3ca0c035fe36df581893f81a50a2c1f652d72dca9b15e6769a9e"
+        },
+        {
+          "path": "/assets/index-DWG_HBKf.css",
+          "contentType": "text/css; charset=utf-8",
+          "bytes": 19571,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "a556779cf001b0a88241483b74b1a5249dd005a5d0a21187445993d80e0b50d5",
+          "ou": 20000,
+          "txHash": "f0e79ceb435d4a04ff4479b9159a2b73303e8c96b0efcaadd97083ba1a38642e"
+        },
+        {
+          "path": "/favicon.svg",
+          "contentType": "image/svg+xml",
+          "bytes": 484,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "159116ebc373b0a15237bf69741feabf02b9a34cfcede4f2f6e0fa7c098f312e",
+          "ou": 5000,
+          "txHash": "90b8680c64a5b553bbf14426007f27d6f8951503ec874ae63e5fecdadbe7a57b"
+        },
+        {
+          "path": "/octra-id.svg",
+          "contentType": "image/svg+xml",
+          "bytes": 484,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "159116ebc373b0a15237bf69741feabf02b9a34cfcede4f2f6e0fa7c098f312e",
+          "ou": 5000,
+          "txHash": "7695d2ff01419fdc5b8660b36fa02d06052f5e698e9c3b9943ee70424837321f"
+        },
+        {
+          "path": "/poctra.svg",
+          "contentType": "image/svg+xml",
+          "bytes": 695,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "460b8ab46b2d082733f577aa17ab314486c1d9fb9c425d1661ccfcb023b29bca",
+          "ou": 5000,
+          "txHash": "ed138a6634e407fb4e3c67f4eeac99ebc137ff36eb68d668d4cb0dfc1084fd20"
+        },
+        {
+          "path": "/index.html",
+          "contentType": "text/html; charset=utf-8",
+          "bytes": 969,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "2871cf478a075a092d6c00b3e8b545e74a3e89619e92d534f0056c82875a9e9d",
+          "ou": 5000,
+          "txHash": "126a4165aec42aaa05693a45f321eebface8337ce73bda57db9ca112e4c22ad7"
+        }
+      ],
+      "updatedAt": "2026-07-06T01:15:01.199Z"
+    },
+    {
+      "project": "octraid",
+      "network": "devnet",
+      "rpc": "http://165.227.225.79:8080",
+      "explorerHost": "https://devnet.octrascan.io",
+      "deployer": "oct5ZHUXnGVJwwZowQsQuVrEWmE6qqvDNgak9PorPYoctra",
+      "circleId": "oct2EPYSkqjD6f1zLuWhyP6G2rDGB8rZp1nNDirVCqp3drD",
+      "uri": "oct://oct2EPYSkqjD6f1zLuWhyP6G2rDGB8rZp1nNDirVCqp3drD/index.html",
+      "assets": [
+        {
+          "path": "/assets/fira_code_medium-DL69PIB5.ttf",
+          "contentType": "font/ttf",
+          "bytes": 283684,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "97091f90623661fb4f7979c10d188f30f4806d8ce326b0bc8d1acc79dcc20d8f",
+          "ou": 80000,
+          "txHash": "662b19f9d3e5d776572c60555325f3b4fa713a4f4740c538960ae28c299bc4b0"
+        },
+        {
+          "path": "/assets/fira_code_regular-CzoQJ4O7.ttf",
+          "contentType": "font/ttf",
+          "bytes": 289624,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "5992ab9640e2df491b2f609467b1de60e8bc39b2c28db184342a0592d98f6117",
+          "ou": 80000,
+          "txHash": "05e2e30cd8343f6cc156675b5d8a5b6836e4f34316caa9144970d54330193344"
+        },
+        {
+          "path": "/assets/fira_code_semibold-CssfnJAs.ttf",
+          "contentType": "font/ttf",
+          "bytes": 304248,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "500c74eec6249b06d49aef922dd3e8fc754c70c3b3f7791cd7b1a09ca9a26140",
+          "ou": 80000,
+          "txHash": "dfb1ea8c126131c16365094f0347b329d96295c7a5d6309ac09987601640a780"
+        },
+        {
+          "path": "/assets/index-BNw41FZ0.css",
+          "contentType": "text/css; charset=utf-8",
+          "bytes": 20957,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "25a94f448574a1edd75763508183551e1dda7b04658e8734c521bca34e3b0794",
+          "ou": 20000,
+          "txHash": "7d5705cad4a5eb9f5698bccfb8a3341dea569c911c29bfe030d18c7a26e68a56"
+        },
+        {
+          "path": "/assets/index-DeoA6uPX.js",
+          "contentType": "application/javascript; charset=utf-8",
+          "bytes": 198807,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "838d404217ced178ad172c6bcf36fcc5fe77220b0a08ca70709c9ee0a3e95a07",
+          "ou": 80000,
+          "txHash": "929fca2b7ef48d72e33c97776d72cbcb9c911e4323720a893334d59b0f12c1f5"
+        },
+        {
+          "path": "/favicon.svg",
+          "contentType": "image/svg+xml",
+          "bytes": 484,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "159116ebc373b0a15237bf69741feabf02b9a34cfcede4f2f6e0fa7c098f312e",
+          "ou": 5000,
+          "txHash": "dc45103a18f508240ac3278599fe44b8a58c4c22df3072bcf87775918ee068e6"
+        },
+        {
+          "path": "/octra-id.svg",
+          "contentType": "image/svg+xml",
+          "bytes": 484,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "159116ebc373b0a15237bf69741feabf02b9a34cfcede4f2f6e0fa7c098f312e",
+          "ou": 5000,
+          "txHash": "2df568b5317afe2f7f5c067082f1ba37cd122f0ef14468cb27f2e3b6f87bfd58"
+        },
+        {
+          "path": "/poctra.svg",
+          "contentType": "image/svg+xml",
+          "bytes": 695,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "460b8ab46b2d082733f577aa17ab314486c1d9fb9c425d1661ccfcb023b29bca",
+          "ou": 5000,
+          "txHash": "ac3b0cad028359ec6a37bb67f307d9ce7e8217cd1ed197312c1245da2aea7e08"
+        },
+        {
+          "path": "/runtime-config.json",
+          "contentType": "application/json; charset=utf-8",
+          "bytes": 159,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "8f9c21fd3193fdb4d0ab5983f927962636bb2fceda67989cbbe7b7b6a357d63f",
+          "ou": 5000,
+          "txHash": "84124f1da9b216c8369fa2591563b67494f1b0c6d64c767a9ba414c3ac9420b7"
+        },
+        {
+          "path": "/index.html",
+          "contentType": "text/html; charset=utf-8",
+          "bytes": 969,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "b43ed7ede92d3e9064894b335a5adde3d5cf9979866a51c7e6828d10eee6686e",
+          "ou": 5000,
+          "txHash": "1b9cf72ca3e1f26ed8d685618e2753ede60cf79f15b67860e2e848ef77d30c3e"
+        }
+      ],
+      "updatedAt": "2026-07-13T02:38:19.584Z"
+    },
+    {
+      "project": "octraid",
+      "network": "devnet",
+      "rpc": "http://165.227.225.79:8080",
+      "explorerHost": "https://devnet.octrascan.io",
+      "deployer": "oct5ZHUXnGVJwwZowQsQuVrEWmE6qqvDNgak9PorPYoctra",
+      "circleId": "oct2EPYSkqjD6f1zLuWhyP6G2rDGB8rZp1nNDirVCqp3drD",
+      "uri": "oct://oct2EPYSkqjD6f1zLuWhyP6G2rDGB8rZp1nNDirVCqp3drD/index.html",
+      "assets": [
+        {
+          "path": "/assets/fira_code_medium-DL69PIB5.ttf",
+          "contentType": "font/ttf",
+          "bytes": 283684,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "97091f90623661fb4f7979c10d188f30f4806d8ce326b0bc8d1acc79dcc20d8f",
+          "ou": 80000,
+          "txHash": "35270f509db0ab132d08936535c0ca20ff617239cd2552969ed267118d9f00ae"
+        },
+        {
+          "path": "/assets/fira_code_regular-CzoQJ4O7.ttf",
+          "contentType": "font/ttf",
+          "bytes": 289624,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "5992ab9640e2df491b2f609467b1de60e8bc39b2c28db184342a0592d98f6117",
+          "ou": 80000,
+          "txHash": "61120f821f716df34f7424083fed3bf7b1b966f93b48104e3d34e3ea761edabf"
+        },
+        {
+          "path": "/assets/fira_code_semibold-CssfnJAs.ttf",
+          "contentType": "font/ttf",
+          "bytes": 304248,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "500c74eec6249b06d49aef922dd3e8fc754c70c3b3f7791cd7b1a09ca9a26140",
+          "ou": 80000,
+          "txHash": "7155a0c7ce8c69daddd9f3873fd60116f4695bd20830f880546f41dc6edcd3d1"
+        },
+        {
+          "path": "/assets/index-C4MQXbYP.css",
+          "contentType": "text/css; charset=utf-8",
+          "bytes": 21108,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "828a7b844656d97341efc6007ee3b651bcddd19ab36b9481a13c2cbaf9049898",
+          "ou": 20000,
+          "txHash": "0d2fa3a39d04c81175ea74537568b114954caac6270e823906c9bcbc8cfda4c5"
+        },
+        {
+          "path": "/assets/index-D-YpVk4A.js",
+          "contentType": "application/javascript; charset=utf-8",
+          "bytes": 201930,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "f84d1700aed6176d336dfef805eab23c991585f1cb55c71e2dc376b03eaf6d92",
+          "ou": 80000,
+          "txHash": "5899f9da3363e7da60cad479f21b72a002445537bd355eb6a731e207412db976"
+        },
+        {
+          "path": "/favicon.svg",
+          "contentType": "image/svg+xml",
+          "bytes": 484,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "159116ebc373b0a15237bf69741feabf02b9a34cfcede4f2f6e0fa7c098f312e",
+          "ou": 5000,
+          "txHash": "b2bfd958d5814e257420aa1eac8306df12697890f218516f6deda4d3218536dd"
+        },
+        {
+          "path": "/octra-id.svg",
+          "contentType": "image/svg+xml",
+          "bytes": 484,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "159116ebc373b0a15237bf69741feabf02b9a34cfcede4f2f6e0fa7c098f312e",
+          "ou": 5000,
+          "txHash": "707230bd40fb3e68097a9f563881f516734874be6cfa17fe45cd1d5aac5400ba"
+        },
+        {
+          "path": "/poctra.svg",
+          "contentType": "image/svg+xml",
+          "bytes": 695,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "460b8ab46b2d082733f577aa17ab314486c1d9fb9c425d1661ccfcb023b29bca",
+          "ou": 5000,
+          "txHash": "8270358333a4b3174c639cf1111c9fbea2d25bf60bf300be09803b06fb43ab04"
+        },
+        {
+          "path": "/runtime-config.json",
+          "contentType": "application/json; charset=utf-8",
+          "bytes": 159,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "3c1287085393b01ff497082a467f01a5fef0bb047f4d421b7d6a9677dd579184",
+          "ou": 5000,
+          "txHash": "98443243a6dd26b635754649b68b6ae3d83d6e259b8e8628ce0393ef957b780b"
+        },
+        {
+          "path": "/index.html",
+          "contentType": "text/html; charset=utf-8",
+          "bytes": 969,
+          "keyId": null,
+          "paddingClass": null,
+          "plaintextHash": "c138611460b7c941239cad11471aaddafcb822cfb83387683744b45a7d2731c0",
+          "ou": 5000,
+          "txHash": "0e8984e8f4fca8ed9a7febb8f74382ebb0206092f0859ec340e3ff18bc90bbeb"
+        }
+      ],
+      "updatedAt": "2026-07-13T13:11:00.733Z"
+    },
+    {
+      "changedPaths": [
+        "/assets/index-Cn0KzzQj.js",
+        "/runtime-config.json",
+        "/index.html"
+      ],
+      "unchangedCount": 7,
+      "removedPaths": [
+        "/assets/index-D-YpVk4A.js"
+      ],
+      "manifestHash": "04e7083cf305b41d52c510e7e3052bfb6025165aa48a882758a6855279c92cf4",
+      "updatedAt": "2026-07-13T16:14:06.695Z"
+    },
+    {
+      "changedPaths": [
+        "/assets/index-CBwcWUDW.js",
+        "/assets/index-CuUdTvg5.css",
+        "/index.html"
+      ],
+      "unchangedCount": 7,
+      "removedPaths": [
+        "/assets/index-C4MQXbYP.css",
+        "/assets/index-Cn0KzzQj.js"
+      ],
+      "manifestHash": "e5f9d32c0cca7abb4eda73390d2de8663ae133c76af628f53da34a5f5075b264",
+      "updatedAt": "2026-07-13T16:36:21.824Z"
+    },
+    {
+      "changedPaths": [
+        "/assets/index-C_e69tLA.js",
+        "/assets/index-CGB_QlKS.css",
+        "/index.html"
+      ],
+      "unchangedCount": 7,
+      "removedPaths": [
+        "/assets/index-CBwcWUDW.js",
+        "/assets/index-CuUdTvg5.css"
+      ],
+      "manifestHash": "5603b40551e2ecb62bdf133a2ddc3802b403693fe669a43004b0f71fd93f7880",
+      "updatedAt": "2026-07-13T16:57:03.156Z"
+    },
+    {
+      "changedPaths": [
+        "/assets/index-Ceo0-oQn.js",
+        "/assets/index-DotIRC0_.css",
+        "/index.html"
+      ],
+      "unchangedCount": 7,
+      "removedPaths": [
+        "/assets/index-C_e69tLA.js",
+        "/assets/index-CGB_QlKS.css"
+      ],
+      "manifestHash": "7f7179dac6cad524d064a3c00f7c2b67b9119d65396b15bcad3b1f4fe054f43d",
+      "updatedAt": "2026-07-13T22:53:00.154Z"
+    },
+    {
+      "changedPaths": [
+        "/assets/index-B69eGsn3.css",
+        "/assets/index-CA4PjwL4.js",
+        "/index.html"
+      ],
+      "unchangedCount": 7,
+      "removedPaths": [
+        "/assets/index-Ceo0-oQn.js",
+        "/assets/index-DotIRC0_.css"
+      ],
+      "manifestHash": "12d852c85d32e0c0187eccc5dc693a1fbe7a9e8c1dbaf6493ecf38162266b46f",
+      "updatedAt": "2026-07-14T00:26:26.216Z"
+    },
+    {
+      "changedPaths": [
+        "/assets/index-CBOznhsj.css",
+        "/assets/index-Dt4BsMvG.js",
+        "/index.html"
+      ],
+      "unchangedCount": 7,
+      "removedPaths": [
+        "/assets/index-B69eGsn3.css",
+        "/assets/index-CA4PjwL4.js"
+      ],
+      "manifestHash": "d5fa4f88fb0924e5475e8b40a3a06db34e20ea4b09103f08e9e1719d3d5f35c4",
+      "updatedAt": "2026-07-14T01:15:45.264Z"
+    },
+    {
+      "changedPaths": [
+        "/assets/index-BZJAONcz.js",
+        "/index.html"
+      ],
+      "unchangedCount": 8,
+      "removedPaths": [
+        "/assets/index-Dt4BsMvG.js"
+      ],
+      "manifestHash": "f7d50780b77a8988f8ebfdf9b24203cc6daebc89723d08ca6a39c85b365290a1",
+      "updatedAt": "2026-07-14T01:21:41.288Z"
+    }
+  ],
+  "orphanedAssets": [
+    {
+      "path": "/assets/index-B69eGsn3.css",
+      "contentType": "text/css; charset=utf-8",
+      "bytes": 23285,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "c26c4190d2b71b31245f5fca8f95abc22cc8a5222357766deafe7d7c06e55c9b",
+      "ou": 20000,
+      "txHash": "7ae09bca26c2e154e9b51bb65c225e844fbdc5e98bdf9d0484a836e9ed724900"
+    },
+    {
+      "path": "/assets/index-C_e69tLA.js",
+      "contentType": "application/javascript; charset=utf-8",
+      "bytes": 203260,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "a6ff9dc482c310adf05ae068a13b0116280dd31bcb3fb37c0f627aadcdf46417",
+      "ou": 80000,
+      "txHash": "db95857b660e9da7a518f974cea393ce39f5df2dad46764340f2d62ca2cc3f67"
+    },
+    {
+      "path": "/assets/index-C4MQXbYP.css",
+      "contentType": "text/css; charset=utf-8",
+      "bytes": 21108,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "828a7b844656d97341efc6007ee3b651bcddd19ab36b9481a13c2cbaf9049898",
+      "ou": 20000,
+      "txHash": "0d2fa3a39d04c81175ea74537568b114954caac6270e823906c9bcbc8cfda4c5"
+    },
+    {
+      "path": "/assets/index-CA4PjwL4.js",
+      "contentType": "application/javascript; charset=utf-8",
+      "bytes": 203341,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "cb7a1085541dfc98cf22efbf432d9a009b8fd490c3b897ef31b01e275a6bf0e1",
+      "ou": 80000,
+      "txHash": "2b6181196d1a19e9f7f2780639534d8602f119104e0d319e543477b15ffe691a"
+    },
+    {
+      "path": "/assets/index-CBwcWUDW.js",
+      "contentType": "application/javascript; charset=utf-8",
+      "bytes": 203291,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "f516a8d3290dbf05456b112994f13b0fe75fbe583f05dacd34539c7ed1231af3",
+      "ou": 80000,
+      "txHash": "db779cd63b670b11c7fb7c02f228cda6d6594ed73a0ca9ae28cd7d44f76507d7"
+    },
+    {
+      "path": "/assets/index-Ceo0-oQn.js",
+      "contentType": "application/javascript; charset=utf-8",
+      "bytes": 203437,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "00ea48dc46050d0f60f0bc0f80b53a903dba869410cd76b4ebd71847762a950e",
+      "ou": 80000,
+      "txHash": "9a6c5bc42ea5c72645b1765f85fa0ee4e05ba6e04b4be0cf647d9d6feb6d2702"
+    },
+    {
+      "path": "/assets/index-CGB_QlKS.css",
+      "contentType": "text/css; charset=utf-8",
+      "bytes": 22436,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "f4daacd9d91f09de27e94502fbf8b12eb2b821b510b965786de6b7e6f303d606",
+      "ou": 20000,
+      "txHash": "a13a510a73621764bf52c4f3c6b13dca95d3ab9ad956de0c6c24ba2b87f34f72"
+    },
+    {
+      "path": "/assets/index-Cn0KzzQj.js",
+      "contentType": "application/javascript; charset=utf-8",
+      "bytes": 202093,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "370605a27604efb70622cfb960432ef00836f12d0d785f426902c5194bd0df0f",
+      "ou": 80000,
+      "txHash": "9d3c161d6104cc3482a0cc4bb164accc68a7ca1e28779c6e51efd48d1f61ed38"
+    },
+    {
+      "path": "/assets/index-CuUdTvg5.css",
+      "contentType": "text/css; charset=utf-8",
+      "bytes": 22405,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "b0bb0bae006883df7d282f11878826fb8fcc6c11c697e17905a85c36d20683c6",
+      "ou": 20000,
+      "txHash": "434a7a1bd87197fec853eb70802a5ca9624d4e35833560804baaefa5e4f1a72e"
+    },
+    {
+      "path": "/assets/index-D-YpVk4A.js",
+      "contentType": "application/javascript; charset=utf-8",
+      "bytes": 201930,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "f84d1700aed6176d336dfef805eab23c991585f1cb55c71e2dc376b03eaf6d92",
+      "ou": 80000,
+      "txHash": "5899f9da3363e7da60cad479f21b72a002445537bd355eb6a731e207412db976"
+    },
+    {
+      "path": "/assets/index-DotIRC0_.css",
+      "contentType": "text/css; charset=utf-8",
+      "bytes": 22989,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "8ba073029f18532e5489a94b4743cce8cf190804e6c83c1f2057218e1b4c1d16",
+      "ou": 20000,
+      "txHash": "50071003491e350ca4c5d1051e78e9b3001f900dd716ccb0206844033e127ac3"
+    },
+    {
+      "path": "/assets/index-Dt4BsMvG.js",
+      "contentType": "application/javascript; charset=utf-8",
+      "bytes": 203305,
+      "keyId": null,
+      "paddingClass": null,
+      "plaintextHash": "263a46ca1206cd5263f00a17889e3f49d7bfccc48212b2465ec793af2fca8fbf",
+      "ou": 80000,
+      "txHash": "1f2f597a8d55633b7c675fa4679e35cdbcd1bda96ae1165250706b1a359e1a91"
+    }
+  ],
+  "manifestHash": "f7d50780b77a8988f8ebfdf9b24203cc6daebc89723d08ca6a39c85b365290a1"
+}

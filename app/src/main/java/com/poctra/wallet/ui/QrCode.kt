@@ -2,7 +2,6 @@ package com.poctra.wallet.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -26,7 +25,6 @@ fun QrCodeView(
         modifier = modifier
             .clip(RoundedCornerShape(Radius.md))
             .background(SurfaceStrong)
-            .border(1.dp, BorderLine, RoundedCornerShape(Radius.md))
             .padding(14.dp),
     ) {
         Canvas(Modifier.size(220.dp)) {

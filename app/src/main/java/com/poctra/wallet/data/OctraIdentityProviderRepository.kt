@@ -120,8 +120,18 @@ class OctraIdentityProviderRepository(context: Context) {
         private const val KeyProviders = "providers"
         private const val DefaultMainnetProviderId = "identity-mainnet-octra-id"
         private const val DefaultDevnetProviderId = "identity-devnet-octra-id"
-        private val LegacyDevnetProviderContracts = setOf("octD5RqXkTbHMCpaMaw2QnMSTpHNu7LRdgidbVDNmkDCuzb", "octAuuNU6wRkTXY7H9JXquwtgpNeCJTRhE7DmQSWSfKQ5nb", "octCL7symfEG2YMtH9KTvY8u823xJ2a7azyVzw6jVTKD5JT", "oct94s4b1cN2Tn3YVdqeayitwQBYkNBL8SMDUEdoaVqNV95", "oct7HNMuQDUNhZWgAPBs1PnFeZUfqcYoWvFCAtd7UbNMT1Z")
+        private val LegacyDevnetProviderContracts = setOf(
+            "octD5RqXkTbHMCpaMaw2QnMSTpHNu7LRdgidbVDNmkDCuzb",
+            "octAuuNU6wRkTXY7H9JXquwtgpNeCJTRhE7DmQSWSfKQ5nb",
+            "octCL7symfEG2YMtH9KTvY8u823xJ2a7azyVzw6jVTKD5JT",
+            "oct94s4b1cN2Tn3YVdqeayitwQBYkNBL8SMDUEdoaVqNV95",
+            "oct7HNMuQDUNhZWgAPBs1PnFeZUfqcYoWvFCAtd7UbNMT1Z",
+            "oct8oCgpxvdEytE7tkfjyF8am3xvK28J6rJApkv3omRQnKH",
+            "octFNrZgNHk1vUt3DJrDrzB9mnezSt3PRkS2n83dP8dfjAW",
+            "octBxMhV4J2yhZjwCFHWSkiVKczW3aLPYf4nRXGhdkZnaeX",
+            "oct8jZAjF5u6GjRrachxe7mfHfKu6KjSEqazttSmkQSXjFC",
+        )
         private const val DefaultMainnetProviderContract = "octH1GEiwunjEZyiBMjp1ETy1VUJJKEEnsMRZ8P2AvTC3et"
-        private const val DefaultDevnetProviderContract = "oct8oCgpxvdEytE7tkfjyF8am3xvK28J6rJApkv3omRQnKH"
+        private const val DefaultDevnetProviderContract = "oct2Tdnmgh8qtvhC82W9VhoRJcLkAhNRCbnEEPhCUPX5b7m"
     }
 }

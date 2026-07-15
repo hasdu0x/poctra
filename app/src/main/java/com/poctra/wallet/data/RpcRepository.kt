@@ -1228,13 +1228,18 @@ class RpcRepository(context: Context) {
         )
     }
 
-    fun fetchSealedCircleAsset(circleId: String, path: String, passphrase: String): CircleAsset {
+    fun fetchSealedCircleAsset(
+        circleId: String,
+        path: String,
+        passphrase: String,
+        wallet: Wallet? = null,
+    ): CircleAsset {
         val cleanCircleId = circleId.trim()
         val cleanPath = normalizeCircleAssetPath(path)
         require(cleanCircleId.startsWith("oct") && cleanCircleId.length == 47) { "Enter a valid Octra circle address." }
         require(passphrase.isNotBlank()) { "Sealed read passphrase is required." }
 
-        val result = fetchCircleCiphertext(cleanCircleId, cleanPath)
+        val result = fetchCircleCiphertext(cleanCircleId, cleanPath, wallet)
         val ciphertextB64 = result.optString("ciphertext_b64")
         val keyId = result.optString("key_id")
         val plaintextHash = result.optString("plaintext_hash")
@@ -1257,8 +1262,27 @@ class RpcRepository(context: Context) {
         )
     }
 
-    private fun fetchCircleCiphertext(circleId: String, path: String): JSONObject {
+    private fun fetchCircleCiphertext(circleId: String, path: String, wallet: Wallet?): JSONObject {
         val resourceKey = circleResourceKey(circleId, path)
+        if (wallet != null) {
+            fetchAuthenticatedCircleCiphertext(
+                method = "octra_circleAssetCiphertextByResourceKeyAuth",
+                circleId = circleId,
+                value = resourceKey,
+                operation = "octra_circle_asset_ciphertext_by_resource_key",
+                subject = "resource_key|$resourceKey",
+                wallet = wallet,
+            )?.let { return it }
+            fetchAuthenticatedCircleCiphertext(
+                method = "octra_circleAssetCiphertextAuth",
+                circleId = circleId,
+                value = path,
+                operation = "octra_circle_asset_ciphertext",
+                subject = "path|$path",
+                wallet = wallet,
+            )?.let { return it }
+        }
+
         runCatching {
             val json = postRpc(
                 url = currentUrl(),
@@ -1287,6 +1311,38 @@ class RpcRepository(context: Context) {
         }
         return json.optJSONObject("result") ?: throw IllegalStateException("Circle sealed asset was not found.")
     }
+
+    private fun fetchAuthenticatedCircleCiphertext(
+        method: String,
+        circleId: String,
+        value: String,
+        operation: String,
+        subject: String,
+        wallet: Wallet,
+    ): JSONObject? = runCatching {
+        val (_, publicKey) = signingMaterial(wallet)
+        val signature = signMessage(wallet, "$operation|$circleId|${wallet.address}|$subject")
+        val json = postRpc(
+            url = currentUrl(),
+            payload = JSONObject()
+                .put("jsonrpc", "2.0")
+                .put("id", 1)
+                .put("method", method)
+                .put(
+                    "params",
+                    JSONArray()
+                        .put(circleId)
+                        .put(value)
+                        .put(wallet.address)
+                        .put(Base64.encodeToString(publicKey, Base64.NO_WRAP))
+                        .put(signature),
+                ),
+        )
+        json.optJSONObject("error")?.let { error ->
+            throw IllegalStateException(error.optString("message").ifBlank { "Authenticated Circle asset lookup failed." })
+        }
+        json.optJSONObject("result") ?: throw IllegalStateException("Circle sealed asset was not found.")
+    }.getOrNull()
 
     private fun decryptSealedCircleBytes(
         circleId: String,
@@ -1367,9 +1423,7 @@ class RpcRepository(context: Context) {
             .joinToString("") { byte -> "%02x".format(byte) }
 
     private fun isValidIdentityPath(value: String): Boolean {
-        val parts = value.split('.')
-        if (parts.isEmpty() || parts.size > 2) return false
-        return parts.all { it.matches(Regex("^[a-z0-9]{3,63}$")) }
+        return OctraIdentityName.isValidPath(value)
     }
 
     private fun normalizeCircleAssetPath(rawPath: String): String {

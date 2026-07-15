@@ -1,10 +1,18 @@
 package com.poctra.wallet
 
 import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.core.content.FileProvider
 import com.poctra.wallet.core.WalletCrypto
 import com.poctra.wallet.data.AssetRepository
 import com.poctra.wallet.data.AddressBookContact
@@ -23,6 +31,8 @@ import com.poctra.wallet.data.CircleAsset
 import com.poctra.wallet.data.ConsumerSettingsRepository
 import com.poctra.wallet.data.DAppSession
 import com.poctra.wallet.data.DAppSessionRepository
+import com.poctra.wallet.data.DAppCatalogEntry
+import com.poctra.wallet.data.DAppCatalogRepository
 import com.poctra.wallet.data.EvmAccountSnapshot
 import com.poctra.wallet.data.EvmGasEstimate
 import com.poctra.wallet.data.EvmNetwork
@@ -34,6 +44,7 @@ import com.poctra.wallet.data.EvmTransaction
 import com.poctra.wallet.data.OctraToken
 import com.poctra.wallet.data.OctraIdentityProvider
 import com.poctra.wallet.data.OctraIdentityProviderRepository
+import com.poctra.wallet.data.OctraIdentityName
 import com.poctra.wallet.data.OctPriceRepository
 import com.poctra.wallet.data.RpcRepository
 import com.poctra.wallet.data.RpcNetwork
@@ -88,7 +99,10 @@ import java.math.BigDecimal
 import java.math.BigInteger
 import java.math.RoundingMode
 import java.net.URLEncoder
+import java.io.File
+import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
+import java.util.Collections
 import javax.crypto.Cipher
 import org.json.JSONArray
 import org.json.JSONObject
@@ -286,6 +300,7 @@ class PoctraController(private val activity: Activity) {
     private val secureStore = SecureWalletStore(appContext)
     private val rpcRepository = RpcRepository(appContext)
     private val dAppSessionRepository = DAppSessionRepository(appContext)
+    private val dAppCatalogRepository = DAppCatalogRepository(appContext)
     private val addressBookRepository = AddressBookRepository(appContext)
     private val consumerSettingsRepository = ConsumerSettingsRepository(appContext)
     private val assetRepository = AssetRepository(appContext)
@@ -338,6 +353,12 @@ class PoctraController(private val activity: Activity) {
     )
         private set
     var dApps by mutableStateOf<List<DAppSession>>(emptyList())
+        private set
+    var dAppCatalog by mutableStateOf<List<DAppCatalogEntry>>(dAppCatalogRepository.cachedEntries())
+        private set
+    var dAppCatalogLoading by mutableStateOf(false)
+        private set
+    var dAppCatalogError by mutableStateOf<String?>(null)
         private set
     var addressBookContacts by mutableStateOf<List<AddressBookContact>>(emptyList())
         private set
@@ -633,6 +654,8 @@ class PoctraController(private val activity: Activity) {
     private var tradeQuoteRequestSerial = 0L
     private var circleResolveSerial = 0L
     private var dAppInputPreviewSerial = 0L
+    private var dAppCatalogRequestSerial = 0L
+    private var dAppCatalogFetchedAt = 0L
     private var approvalReviewRequestSerial = 0L
     private var portfolioRefreshSerial = 0L
     private var privacySyncSerial = 0L
@@ -646,6 +669,7 @@ class PoctraController(private val activity: Activity) {
     private var tradePendingEvmTransaction by mutableStateOf<EvmSendResult?>(null)
     private val circleResourceModeCache = ConcurrentHashMap<String, String>()
     private val circlePassphrases = ConcurrentHashMap<String, String>()
+    private val activeCircleDownloads = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
     private val tradeChartCache = mutableMapOf<String, TradeChartCacheEntry>()
 
     val biometricAvailable: Boolean
@@ -824,6 +848,8 @@ class PoctraController(private val activity: Activity) {
         privacyBalanceVisible = false
         privacyBalanceRaw = null
         privacyDecryptedCipher = null
+        circlePassphrases.clear()
+        circlePassphraseRequest = null
         if (!privacyInProgress) {
             clearPrivacyClaimSecrets()
             if (privacyOperation?.type == PrivacyOperationType.Claim) privacyOperation = null
@@ -4065,6 +4091,7 @@ class PoctraController(private val activity: Activity) {
     fun selectDashboardTab(tab: DashboardTab) {
         dashboardTab = tab
         if (tab == DashboardTab.Assets) refreshEvmDashboard()
+        if (tab == DashboardTab.Explore) refreshDAppCatalog()
         if (tab == DashboardTab.Privacy) {
             refreshPrivacy(force = false)
             refreshOctPrice()
@@ -4072,6 +4099,28 @@ class PoctraController(private val activity: Activity) {
         if (tab == DashboardTab.Trade) {
             refreshTrade()
             refreshTradeChart()
+        }
+    }
+
+    fun refreshDAppCatalog(force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (dAppCatalogLoading) return
+        if (!force && dAppCatalogFetchedAt > 0L && now - dAppCatalogFetchedAt < DAppCatalogRefreshMs) return
+        val requestSerial = ++dAppCatalogRequestSerial
+        dAppCatalogLoading = true
+        dAppCatalogError = null
+        scope.launch {
+            runCatching { dAppCatalogRepository.fetchEntries() }
+                .onSuccess { entries ->
+                    if (requestSerial != dAppCatalogRequestSerial) return@onSuccess
+                    dAppCatalog = entries
+                    dAppCatalogFetchedAt = System.currentTimeMillis()
+                }
+                .onFailure { error ->
+                    if (requestSerial != dAppCatalogRequestSerial) return@onFailure
+                    dAppCatalogError = error.message ?: "Unable to load dApps."
+                }
+            if (requestSerial == dAppCatalogRequestSerial) dAppCatalogLoading = false
         }
     }
 
@@ -4167,14 +4216,14 @@ class PoctraController(private val activity: Activity) {
 
     private fun openDAppBrowser(title: String, url: String, openInNewTab: Boolean) {
         val cleanUrl = url.trim()
-        val octraSpec = parseCircleInputSpec(cleanUrl)
-        if (cleanUrl.startsWith("oct://", ignoreCase = true) && octraSpec == null) {
+        val octraInput = normalizeOctraBrowserInput(cleanUrl)
+        if (cleanUrl.startsWith("oct://", ignoreCase = true) && octraInput == null) {
             showError("Enter a valid oct:// identity or Octra address.")
             return
         }
-        if (octraSpec != null) {
+        if (octraInput != null) {
             prepareDAppBrowserTab(openInNewTab)
-            openOctraCircleBrowser(title, cleanUrl)
+            openOctraCircleBrowser(title, octraInput)
             return
         }
         val browserUrl = runCatching { DAppUrlPolicy.normalizeBrowserUrl(cleanUrl) }.getOrElse { error ->
@@ -4308,8 +4357,16 @@ class PoctraController(private val activity: Activity) {
         }
     }
 
-    fun isOctraCircleInput(value: String): Boolean =
-        value.trim().startsWith("oct://", ignoreCase = true) && parseCircleInputSpec(value) != null
+    fun normalizeOctraBrowserInput(value: String): String? {
+        val raw = value.trim()
+        if (raw.isBlank()) return null
+        if (parseCircleInputSpec(raw) != null) return raw
+
+        val normalized = OctraIdentityName.fromWebUrl(raw) ?: return null
+        return normalized.takeIf { parseCircleInputSpec(it) != null }
+    }
+
+    fun isOctraCircleInput(value: String): Boolean = normalizeOctraBrowserInput(value) != null
 
     fun isCircleBrowserUrl(value: String): Boolean =
         value.startsWith("https://$CircleBrowserHost/", ignoreCase = true)
@@ -4328,7 +4385,8 @@ class PoctraController(private val activity: Activity) {
                 requestCirclePassphrase(circleId)
                 throw IllegalStateException("Enter the sealed read passphrase to open this circle.")
             }
-            return runCatching { rpcRepository.fetchSealedCircleAsset(circleId, path, passphrase) }
+            val activeWallet = wallet ?: throw IllegalStateException("Unlock poctra to open this sealed circle.")
+            return runCatching { rpcRepository.fetchSealedCircleAsset(circleId, path, passphrase, activeWallet) }
                 .onSuccess { maybeUpdateCircleBrowserTitle(circleId, path, it) }
                 .getOrElse { error ->
                     circlePassphrases.remove(cacheKey)
@@ -4338,6 +4396,175 @@ class PoctraController(private val activity: Activity) {
         }
         return rpcRepository.fetchCircleAsset(circleId, path)
             .also { maybeUpdateCircleBrowserTitle(circleId, path, it) }
+    }
+
+    fun downloadCircleAssets(
+        paths: List<String>,
+        fileName: String,
+        mimeType: String,
+        expectedSha256: String?,
+        onProgress: (Int, Int) -> Unit,
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit,
+    ) {
+        val target = selectedCircleTarget
+        if (target == null) {
+            onError("No active Circle app.")
+            return
+        }
+        val cleanPaths = runCatching { validateCircleDownloadPaths(paths) }.getOrElse {
+            onError(it.message ?: "Invalid Circle download paths.")
+            return
+        }
+        val safeName = sanitizeCircleDownloadName(fileName, cleanPaths.last())
+        val safeMime = mimeType.trim().lowercase().takeIf {
+            it.matches(Regex("^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$"))
+        } ?: "application/octet-stream"
+        val cleanSha256 = expectedSha256
+            ?.trim()
+            ?.lowercase()
+            ?.takeIf { it.matches(Regex("^[0-9a-f]{64}$")) }
+        val downloadKey = "${circleCacheKey(target.circleId)}:$safeName"
+        if (!activeCircleDownloads.add(downloadKey)) {
+            onError("This file is already downloading.")
+            return
+        }
+
+        showMessage("Downloading $safeName in background...")
+        scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    writeCircleDownload(
+                        circleId = target.circleId,
+                        paths = cleanPaths,
+                        fileName = safeName,
+                        mimeType = safeMime,
+                        expectedSha256 = cleanSha256,
+                        onProgress = onProgress,
+                    )
+                }
+            }.onSuccess { uri ->
+                activeCircleDownloads.remove(downloadKey)
+                showMessage("$safeName downloaded.")
+                onSuccess()
+                openCircleDownload(uri, safeMime, safeName)
+            }.onFailure { exception ->
+                activeCircleDownloads.remove(downloadKey)
+                val message = exception.message ?: "Circle download failed."
+                showError(message)
+                onError(message)
+            }
+        }
+    }
+
+    private fun validateCircleDownloadPaths(paths: List<String>): List<String> {
+        require(paths.isNotEmpty()) { "Download has no resources." }
+        require(paths.size <= MaxCircleDownloadParts) { "Download contains too many parts." }
+        return paths.map { rawPath ->
+            val clean = rawPath.trim().substringBefore('?').substringBefore('#')
+            require(clean.startsWith('/') && clean.length <= MaxCircleDownloadPathLength) {
+                "Invalid Circle download path."
+            }
+            require(clean.split('/').none { it == ".." }) { "Unsafe Circle download path." }
+            clean
+        }.distinct().also {
+            require(it.size == paths.size) { "Download contains duplicate parts." }
+        }
+    }
+
+    private fun sanitizeCircleDownloadName(fileName: String, fallbackPath: String): String {
+        val fallback = fallbackPath.substringAfterLast('/').substringBefore(".part").ifBlank { "circle-download" }
+        val clean = fileName
+            .trim()
+            .ifBlank { fallback }
+            .replace(Regex("[^A-Za-z0-9._ -]"), "_")
+            .trim('.', ' ')
+            .take(MaxCircleDownloadNameLength)
+        return clean.ifBlank { "circle-download" }
+    }
+
+    private fun writeCircleDownload(
+        circleId: String,
+        paths: List<String>,
+        fileName: String,
+        mimeType: String,
+        expectedSha256: String?,
+        onProgress: (Int, Int) -> Unit,
+    ): Uri {
+        val digest = MessageDigest.getInstance("SHA-256")
+        var totalBytes = 0L
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                put(MediaStore.Downloads.MIME_TYPE, mimeType)
+                put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/poctra")
+                put(MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val resolver = appContext.contentResolver
+            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: throw IllegalStateException("Unable to create the download file.")
+            try {
+                resolver.openOutputStream(uri, "w")?.use { output ->
+                    paths.forEachIndexed { index, path ->
+                        val bytes = fetchCircleAssetForBrowser(circleId, path).body
+                        totalBytes += bytes.size
+                        require(totalBytes <= MaxCircleDownloadBytes) { "Circle download is larger than 256 MB." }
+                        digest.update(bytes)
+                        output.write(bytes)
+                        onProgress(index + 1, paths.size)
+                    }
+                } ?: throw IllegalStateException("Unable to write the download file.")
+                verifyCircleDownloadHash(digest, expectedSha256)
+                resolver.update(uri, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null)
+                uri
+            } catch (exception: Exception) {
+                resolver.delete(uri, null, null)
+                throw exception
+            }
+        } else {
+            val directory = appContext.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+                ?: File(appContext.cacheDir, "circle-downloads")
+            require(directory.exists() || directory.mkdirs()) { "Unable to create the download directory." }
+            val destination = File(directory, fileName)
+            val temporary = File(directory, "$fileName.download")
+            try {
+                temporary.outputStream().buffered().use { output ->
+                    paths.forEachIndexed { index, path ->
+                        val bytes = fetchCircleAssetForBrowser(circleId, path).body
+                        totalBytes += bytes.size
+                        require(totalBytes <= MaxCircleDownloadBytes) { "Circle download is larger than 256 MB." }
+                        digest.update(bytes)
+                        output.write(bytes)
+                        onProgress(index + 1, paths.size)
+                    }
+                }
+                verifyCircleDownloadHash(digest, expectedSha256)
+                if (destination.exists()) destination.delete()
+                require(temporary.renameTo(destination)) { "Unable to finalize the download file." }
+                FileProvider.getUriForFile(appContext, "${appContext.packageName}.fileprovider", destination)
+            } catch (exception: Exception) {
+                temporary.delete()
+                throw exception
+            }
+        }
+    }
+
+    private fun verifyCircleDownloadHash(digest: MessageDigest, expectedSha256: String?) {
+        if (expectedSha256 == null) return
+        val actual = digest.digest().joinToString("") { "%02x".format(it) }
+        require(actual == expectedSha256) { "Downloaded file integrity check failed." }
+    }
+
+    private fun openCircleDownload(uri: Uri, mimeType: String, fileName: String) {
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, mimeType)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        try {
+            activity.startActivity(Intent.createChooser(intent, "Open $fileName"))
+        } catch (_: ActivityNotFoundException) {
+            showMessage("$fileName saved to Downloads/poctra.")
+        }
     }
 
     fun submitCirclePassphrase(passphrase: String) {
@@ -4491,7 +4718,8 @@ class PoctraController(private val activity: Activity) {
         val spec = parseCircleInputSpec(rawInput) ?: throw IllegalStateException("Enter foo.oct or an Octra circle address.")
         val circleId = resolveOctraInputAddress(spec)
         val displayUri = circleDisplayUri(spec, rawInput)
-        if (!isCircleAddress(circleId)) {
+        val resourceMode = circleResourceMode(circleId)
+        if (resourceMode.isNullOrBlank()) {
             val url = explorerAddressUrl(circleId)
                 ?: throw IllegalStateException("${spec.identityName ?: circleId} resolved to $circleId, but Explorer URL is not configured.")
             return OctraCircleOpenResult.ExplorerAddress(
@@ -4500,7 +4728,9 @@ class PoctraController(private val activity: Activity) {
                 displayUrl = spec.identityName ?: circleId,
             )
         }
-        val label = spec.identityName?.let { "$it (oct://)" } ?: shortAddress(circleId)
+        val label = previewCircleIndexTitle(circleId, resourceMode)
+            ?: spec.identityName?.let { "$it (oct://)" }
+            ?: shortAddress(circleId)
         return OctraCircleOpenResult.Circle(
             OctraCircleTarget(
                 input = rawInput,
@@ -7476,7 +7706,7 @@ class PoctraController(private val activity: Activity) {
 
     private fun dAppError(exception: Exception): Pair<Int, String> = when (exception) {
         is SecurityException -> 4100 to (exception.message ?: "Unauthorized")
-        is NoSuchMethodException -> -32601 to (exception.message ?: "Method not found")
+        is NoSuchMethodException -> 4200 to (exception.message ?: "Unsupported method")
         else -> -32000 to (exception.message ?: "poctra request failed")
     }
 
@@ -7610,15 +7840,7 @@ class PoctraController(private val activity: Activity) {
     private fun isOctraAddress(value: String): Boolean = value.startsWith("oct") && value.length == 47
 
     private fun isIdentityNameInput(value: String): Boolean {
-        val path = value
-            .removeSuffix(".oct")
-            .removeSuffix(".octra")
-            .removeSuffix(".id")
-        val parts = path.split('.')
-        return value.contains('.') &&
-            parts.isNotEmpty() &&
-            parts.size <= 2 &&
-            parts.all { it.matches(Regex("^[a-z0-9]{3,63}$")) }
+        return OctraIdentityName.isValidDomain(value)
     }
 
     private fun BalanceSnapshot.toTokenBalance(): TokenBalance = TokenBalance(
@@ -7725,12 +7947,17 @@ class PoctraController(private val activity: Activity) {
         private const val PrivacyConfirmationAttempts = 45
         private const val IdentityLookupBatchSize = 4
         private const val MaxCircleBridgePayloadBytes = 64_000
+        private const val MaxCircleDownloadParts = 32
+        private const val MaxCircleDownloadPathLength = 512
+        private const val MaxCircleDownloadNameLength = 128
+        private const val MaxCircleDownloadBytes = 256L * 1024L * 1024L
         private const val KeyBridgeHistory = "bridge_history"
         private const val MaxBridgeHistoryItems = 25
         private const val KeyPortfolioHoldings = "portfolio_holdings"
         private const val MicroUnits = 1_000_000L
         private const val BridgeFeeReserveOu = 10_000L
         private const val PriceRefreshMs = 60_000L
+        private const val DAppCatalogRefreshMs = 15 * 60_000L
         private const val TransactionConfirmationAttempts = 15
         private const val TransactionPollingIntervalMs = 2_000L
         private const val EvmSendReceiptAttempts = 80

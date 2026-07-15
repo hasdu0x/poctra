@@ -1,11 +1,9 @@
-package com.poctra.wallet.ui
+﻿package com.poctra.wallet.ui
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Arrangement
@@ -167,8 +165,7 @@ private fun PrivacyHeaderAction(loading: Boolean, onClick: () -> Unit) {
             .width(50.dp)
             .height(44.dp)
             .clip(RoundedCornerShape(Radius.md))
-            .background(SurfaceStrong)
-            .border(1.dp, BorderLine, RoundedCornerShape(Radius.md))
+            .background(SurfaceMuted.copy(alpha = 0.78f))
             .clickable(enabled = !loading, onClick = onClick)
             .padding(vertical = Space.x2),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -210,8 +207,7 @@ private fun PrivacyInitializationContent(controller: PoctraController) {
         Box(
             modifier = Modifier
                 .size(82.dp)
-                .background(PrivacyPrimary.copy(alpha = 0.13f), CircleShape)
-                .border(1.dp, PrivacyPrimary.copy(alpha = 0.30f), CircleShape),
+                .background(PrivacyPrimary.copy(alpha = 0.13f), CircleShape),
             contentAlignment = Alignment.Center,
         ) {
             GlyphIcon(activeGlyph, Modifier.size(34.dp), PrivacyPrimary)
@@ -239,8 +235,7 @@ private fun PrivacyInitializationStep(step: PrivacySyncStep) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(PrivacyPrimary.copy(alpha = 0.07f), RoundedCornerShape(Radius.md))
-            .padding(horizontal = Space.x5, vertical = Space.x4),
+            .padding(horizontal = Space.x2, vertical = Space.x3),
         verticalAlignment = Alignment.Top,
     ) {
         when (step.status) {
@@ -263,7 +258,6 @@ private fun PrivacyBalanceCard(controller: PoctraController) {
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(Space.x7)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -280,7 +274,7 @@ private fun PrivacyBalanceCard(controller: PoctraController) {
                     Text("Encrypted balance", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
                     Spacer(Modifier.height(Space.x2))
                     Text(
-                        if (controller.privacyBalanceVisible) "${controller.privacyBalanceText} OCT" else "•••••• OCT",
+                        if (controller.privacyBalanceVisible) "${controller.privacyBalanceText} OCT" else "\u2022\u2022\u2022\u2022\u2022\u2022 OCT",
                         color = TextTertiary,
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
@@ -290,7 +284,7 @@ private fun PrivacyBalanceCard(controller: PoctraController) {
                         if (controller.privacyBalanceVisible) {
                             privacyUsdEstimate(controller.privacyBalanceRaw, controller.octUsdPrice)
                         } else {
-                            "~ •••• USD"
+                            "~ \u2022\u2022\u2022\u2022 USD"
                         },
                         color = TextSecondary,
                         style = MaterialTheme.typography.labelSmall,
@@ -346,7 +340,6 @@ private fun PrivacyActionCard(
         colors = CardDefaults.cardColors(
             containerColor = if (available) PrivacyPrimary.copy(alpha = 0.055f) else SurfaceStrong,
         ),
-        border = BorderStroke(1.dp, if (available) PrivacyPrimary.copy(alpha = 0.28f) else BorderLine),
     ) {
         Column(Modifier.padding(Space.x6)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -385,7 +378,6 @@ private fun PrivacyResumeCard(operation: PrivacyOperationState, onResume: () -> 
         modifier = Modifier
             .fillMaxWidth()
             .background(PrivacyPrimary.copy(alpha = 0.09f), RoundedCornerShape(Radius.md))
-            .border(1.dp, PrivacyPrimary.copy(alpha = 0.22f), RoundedCornerShape(Radius.md))
             .clickable(onClick = onResume)
             .padding(Space.x5),
         verticalAlignment = Alignment.CenterVertically,
@@ -878,7 +870,6 @@ private fun PrivacyFeePanel(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(Space.x5)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -971,8 +962,7 @@ private fun PrivacyFeeOption(
         modifier = modifier
             .height(58.dp)
             .clip(RoundedCornerShape(Radius.md))
-            .background(if (selected) PrivacyPrimary.copy(alpha = 0.14f) else SurfaceBase)
-            .border(1.dp, if (selected) PrivacyPrimary else BorderLine, RoundedCornerShape(Radius.md))
+            .background(if (selected) PrivacyPrimary.copy(alpha = 0.14f) else SurfaceMuted.copy(alpha = 0.72f))
             .clickable(onClick = onClick)
             .padding(horizontal = Space.x2, vertical = Space.x3),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -1048,13 +1038,12 @@ private fun PrivacyReviewSheet(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(Radius.md),
             colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-            border = BorderStroke(1.dp, PrivacyPrimary.copy(alpha = 0.28f)),
         ) {
             Column(Modifier.padding(horizontal = Space.x5, vertical = Space.x3)) {
                 details.forEachIndexed { index, (label, value) ->
                     PrivacyReviewDetail(label, value)
                     if (index < details.lastIndex) {
-                        Box(Modifier.fillMaxWidth().height(1.dp).background(BorderLine.copy(alpha = 0.72f)))
+                        Spacer(Modifier.height(Space.x2))
                     }
                 }
             }
@@ -1113,10 +1102,18 @@ private fun PrivacyClaimLoading() {
 
 @Composable
 private fun PrivacyClaimState(text: String, error: Boolean = false, onRetry: (() -> Unit)? = null) {
+    val stateModifier = if (error || onRetry != null) {
+        Modifier.background(
+            (if (error) ErrorRed else PrivacyPrimary).copy(alpha = 0.07f),
+            RoundedCornerShape(Radius.md),
+        )
+    } else {
+        Modifier
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background((if (error) ErrorRed else PrivacyPrimary).copy(alpha = 0.07f), RoundedCornerShape(Radius.md))
+            .then(stateModifier)
             .padding(Space.x6),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -1274,7 +1271,6 @@ private fun PrivacyBottomSheet(onDismiss: () -> Unit, content: @Composable Colum
                         .navigationBarsPadding(),
                     shape = RoundedCornerShape(topStart = Radius.md, topEnd = Radius.md),
                     colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
-                    border = BorderStroke(1.dp, BorderLine),
                 ) {
                     Column(
                         modifier = Modifier
@@ -1331,7 +1327,6 @@ private fun PrivacyStepper(operation: PrivacyOperationState) {
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
         colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-        border = BorderStroke(1.dp, BorderLine),
     ) {
         Column(Modifier.padding(horizontal = Space.x5, vertical = Space.x4)) {
             labels.forEachIndexed { index, label ->
@@ -1348,7 +1343,6 @@ private fun PrivacyStepper(operation: PrivacyOperationState) {
                         else -> Box(
                             Modifier
                                 .size(10.dp)
-                                .border(1.dp, BorderLine, RoundedCornerShape(Radius.md)),
                         )
                     }
                     Spacer(Modifier.width(Space.x4))
@@ -1377,7 +1371,6 @@ private fun PrivacyClaimRow(
         modifier = Modifier
             .fillMaxWidth()
             .background(SurfaceBase, RoundedCornerShape(Radius.md))
-            .border(1.dp, BorderLine, RoundedCornerShape(Radius.md))
             .clickable(enabled = enabled, onClick = onClaim)
             .padding(Space.x5),
         verticalAlignment = Alignment.CenterVertically,

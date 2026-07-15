@@ -1,0 +1,12 @@
+{
+  "sourceDir": "dist",
+  "runtimeManifest": "runtime-config.json",
+  "privacyClass": "public",
+  "browserMode": "gateway_allowed",
+  "resourceMode": "public_resources",
+  "assetMode": "plain",
+  "buildScripts": {
+    "devnet": "build:circle:devnet",
+    "mainnet": "build:circle:mainnet"
+  }
+}

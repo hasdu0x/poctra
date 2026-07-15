@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "dapps": [
+    {
+      "title": "Octra Identity",
+      "description": "Register and manage Octra names, primary identity, ownership, and destinations.",
+      "dapp_link": "oct://dev-id.poctra.oct",
+      "logo_svg": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHBhdGggZmlsbD0iIzAwMDAwMCIgZD0iTTE0IDBINTBDNTcuNzMgMCA2NCA2LjI3IDY0IDE0VjUwQzY0IDU3LjczIDU3LjczIDY0IDUwIDY0SDE0QzYuMjcgNjQgMCA1Ny43MyAwIDUwVjE0QzAgNi4yNyA2LjI3IDAgMTQgMFoiLz48cGF0aCBmaWxsPSIjMDBGMjlCIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik0zMiAxMmMtMTEuNTEgMC0yMCA4LjE0LTIwIDIwczguNDkgMjAgMjAgMjAgMjAtOC4xNCAyMC0yMC04LjQ5LTIwLTIwLTIwWm0wIDcuMjVjNi44NCAwIDExLjM1IDUuMDMgMTEuMzUgMTIuNzVTMzguODQgNDQuNzUgMzIgNDQuNzUgMjAuNjUgMzkuNzIgMjAuNjUgMzIgMjUuMTYgMTkuMjUgMzIgMTkuMjVabTAgNi41NWMtMy4yNyAwLTUuMyAyLjM5LTUuMyA2LjJzMi4wMyA2LjIgNS4zIDYuMiA1LjMtMi4zOSA1LjMtNi4yLTIuMDMtNi4yLTUuMy02LjJaIi8+PC9zdmc+"
+    }
+  ]
+}

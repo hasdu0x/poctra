@@ -314,6 +314,22 @@ data class EvmGasEstimate(
     val label: String,
 )
 
+data class EvmDAppTransaction(
+    val from: String,
+    val to: String,
+    val valueWei: BigInteger = BigInteger.ZERO,
+    val dataHex: String = "0x",
+    val gasLimit: BigInteger? = null,
+    val gasPriceWei: BigInteger? = null,
+)
+
+data class EvmDAppTransactionReview(
+    val transaction: EvmDAppTransaction,
+    val gasLimit: BigInteger,
+    val gasPriceWei: BigInteger,
+    val feeWei: BigInteger,
+)
+
 data class EvmToken(
     val address: String,
     val name: String,
@@ -501,6 +517,7 @@ data class OctraIdentityProvider(
         .put("name", name)
         .put("contractAddress", contractAddress)
         .put("network", network)
+        .put("type", "contract")
 
     companion object {
         fun fromJson(json: JSONObject): OctraIdentityProvider = OctraIdentityProvider(

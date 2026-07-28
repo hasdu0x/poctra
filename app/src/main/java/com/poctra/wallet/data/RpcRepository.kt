@@ -2,7 +2,13 @@ package com.poctra.wallet.data
 
 import android.content.Context
 import android.util.Base64
+import com.poctra.wallet.dapp.circle.normalizeCircleAssetPath
+import com.poctra.wallet.dapp.circle.isTransientCircleFailure
+import com.poctra.wallet.dapp.circle.shouldFallbackCircleLookup
+import com.poctra.wallet.dapp.circle.withCircleReadRetry
 import com.poctra.wallet.privacy.PrivacyEncryptedBalance
+import com.poctra.wallet.privacy.PrivacyMigrationNetworkStatus
+import com.poctra.wallet.privacy.PrivacyKeyEncoding
 import com.poctra.wallet.core.Base58
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -41,6 +47,11 @@ data class CircleAsset(
     val sizeBytes: Long,
 )
 
+data class CircleDeploySubmission(
+    val circleId: String,
+    val result: SendResult,
+)
+
 private data class CircleReadCacheEntry(
     val expiresAtMs: Long,
     val value: Any?,
@@ -67,7 +78,8 @@ class RpcRepository(context: Context) {
     private val unsupportedCircleProgramViewUrls = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
     private val circleReadCache = ConcurrentHashMap<String, CircleReadCacheEntry>()
     private val circleReadLocks = ConcurrentHashMap<String, Any>()
-    private val registeredPvacKeys = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+    private val registeredPvacKeys = PrivacyRegistrationCache()
+    private val transactionDetailsCache = ConcurrentHashMap<String, TransactionHistoryItem>()
 
     fun currentUrl(): String = activeNetwork().url
 
@@ -91,7 +103,8 @@ class RpcRepository(context: Context) {
             }
         }.getOrDefault(emptyList())
         val seeded = prefs.getBoolean(KeyDefaultRpcSeeded, false)
-        val normalized = parsed.map(::normalizeDefaultNetwork)
+        val normalized = mergeNetworks(parsed.map(::normalizeDefaultNetwork))
+        val defaultsChanged = parsed != normalized
         val networks = if (normalized.isEmpty()) {
             mergeNetworks(defaultRpcNetworks() + defaultNetworkFromLegacy().takeIf { legacy ->
                 defaultRpcNetworks().none { it.url == legacy.url }
@@ -102,11 +115,14 @@ class RpcRepository(context: Context) {
             normalized
         }
 
-        if (normalized.isEmpty() || !seeded) {
+        if (normalized.isEmpty() || !seeded || defaultsChanged) {
             val legacy = defaultNetworkFromLegacy()
-            val activeId = prefs.getString(KeyActiveRpcId, null)
-                ?: networks.firstOrNull { it.id == DefaultMainnetId }?.id
+            val storedActiveId = prefs.getString(KeyActiveRpcId, null)
+            val storedActiveUrl = prefs.getString(KeyRpcUrl, null)?.trim()?.trimEnd('/').orEmpty()
+            val activeId = networks.firstOrNull { it.id == storedActiveId }?.id
+                ?: networks.firstOrNull { it.url.equals(storedActiveUrl, ignoreCase = true) }?.id
                 ?: networks.firstOrNull { it.url == legacy.url }?.id
+                ?: networks.firstOrNull { it.id == DefaultMainnetId }?.id
                 ?: networks.firstOrNull()?.id
             prefs.edit()
                 .putString(KeyActiveRpcId, activeId)
@@ -241,6 +257,7 @@ class RpcRepository(context: Context) {
         message: String?,
         feeOu: Long,
     ): SendResult = withContext(Dispatchers.IO) {
+        val rpcUrl = currentUrl()
         val recipient = recipientAddress.trim()
         require(recipient.startsWith("oct") && recipient.length == 47) {
             "Enter a valid Octra recipient address."
@@ -252,7 +269,7 @@ class RpcRepository(context: Context) {
             "Amount must be greater than zero."
         }
 
-        val snapshot = fetchBalance(wallet.address)
+        val snapshot = fetchBalance(wallet.address, rpcUrl)
         val maximumAmount = snapshot.balance - (feeOu.coerceAtLeast(1L) / MicroUnits.toDouble())
         require(amount <= maximumAmount + 0.000000001) {
             "Amount exceeds the available balance after network fee."
@@ -267,7 +284,7 @@ class RpcRepository(context: Context) {
         )
 
         val response = postRpc(
-            url = currentUrl(),
+            url = rpcUrl,
             payload = JSONObject()
                 .put("jsonrpc", "2.0")
                 .put("id", System.currentTimeMillis())
@@ -305,6 +322,7 @@ class RpcRepository(context: Context) {
         params: JSONArray,
         amountOu: String,
         feeOu: Long,
+        opType: String = "call",
         rpcUrl: String = currentUrl(),
     ): SendResult = withContext(Dispatchers.IO) {
         val contract = contractAddress.trim()
@@ -327,7 +345,7 @@ class RpcRepository(context: Context) {
             nonce = snapshot.nonce + 1,
             message = params.toString(),
             feeOu = feeOu,
-            opType = "call",
+            opType = opType,
             encryptedData = method,
         )
 
@@ -360,6 +378,116 @@ class RpcRepository(context: Context) {
                 finality = "rejected",
             )
             else -> SendResult(success = false, error = "Unknown contract call response.")
+        }
+    }
+
+    suspend fun sendCircleProgramCall(
+        wallet: Wallet,
+        circleId: String,
+        method: String,
+        params: JSONArray,
+        amountOu: String,
+        feeOu: Long,
+    ): SendResult = sendContractCall(
+        wallet = wallet,
+        contractAddress = circleId,
+        method = method,
+        params = params,
+        amountOu = amountOu,
+        feeOu = feeOu,
+        opType = "circle_call",
+    )
+
+    suspend fun deployPublicCircle(
+        wallet: Wallet,
+        feeOu: Long,
+    ): CircleDeploySubmission = withContext(Dispatchers.IO) {
+        val rpcUrl = currentUrl()
+        val snapshot = fetchBalance(wallet.address, rpcUrl)
+        val nonce = snapshot.nonce + 1
+        val payload = publicCircleDeployPayload()
+        val circleId = deriveCircleDeployId(wallet.address, nonce, payload)
+        val tx = createSignedTransactionRaw(
+            wallet = wallet,
+            recipientAddress = circleId,
+            amountRaw = "0",
+            nonce = nonce,
+            message = payload,
+            feeOu = feeOu,
+            opType = "deploy_circle",
+            encryptedData = null,
+        )
+        CircleDeploySubmission(
+            circleId = circleId,
+            result = submitCircleTransaction(tx, "Circle deployment", rpcUrl),
+        )
+    }
+
+    suspend fun putPublicCircleAsset(
+        wallet: Wallet,
+        circleId: String,
+        path: String,
+        contentType: String,
+        bodyBase64: String,
+        encoding: String?,
+        feeOu: Long,
+    ): SendResult = withContext(Dispatchers.IO) {
+        val rpcUrl = currentUrl()
+        val cleanCircleId = circleId.trim()
+        require(cleanCircleId.startsWith("oct") && cleanCircleId.length == 47) { "Enter a valid target Circle address." }
+        val cleanPath = validateCircleWritePath(path)
+        val cleanContentType = validateCircleContentType(contentType)
+        val cleanBody = validateCircleAssetBody(bodyBase64)
+        val cleanEncoding = encoding?.trim()?.lowercase()?.ifBlank { null }
+        require(cleanEncoding == null || cleanEncoding in setOf("identity", "gzip")) {
+            "Circle asset encoding must be identity or gzip."
+        }
+        val snapshot = fetchBalance(wallet.address, rpcUrl)
+        val message = JSONObject()
+            .put("path", cleanPath)
+            .put("content_type", cleanContentType)
+            .apply { cleanEncoding?.let { put("encoding", it) } }
+            .toString()
+        val tx = createSignedTransactionRaw(
+            wallet = wallet,
+            recipientAddress = cleanCircleId,
+            amountRaw = "0",
+            nonce = snapshot.nonce + 1,
+            message = message,
+            feeOu = feeOu,
+            opType = "circle_asset_put",
+            encryptedData = cleanBody,
+        )
+        submitCircleTransaction(tx, "Circle asset upload", rpcUrl)
+    }
+
+    private fun submitCircleTransaction(tx: JSONObject, label: String, rpcUrl: String): SendResult {
+        val response = postRpc(
+            url = rpcUrl,
+            payload = JSONObject()
+                .put("jsonrpc", "2.0")
+                .put("id", System.currentTimeMillis())
+                .put("method", "octra_submit")
+                .put("params", JSONArray().put(tx)),
+        )
+        response.optJSONObject("error")?.let { error ->
+            return SendResult(
+                success = false,
+                error = error.optString("message", error.optString("reason", "$label failed")),
+                finality = "rejected",
+            )
+        }
+        val result = response.optJSONObject("result") ?: JSONObject()
+        val status = result.optString("status").lowercase()
+        val hash = result.optString("tx_hash", result.optString("hash")).ifBlank { null }
+        return when {
+            status == "accepted" || hash != null -> SendResult(success = true, hash = hash, finality = "accepted")
+            status == "rejected" -> SendResult(
+                success = false,
+                error = result.optString("reason", "$label rejected"),
+                finality = "rejected",
+            )
+            else -> SendResult(success = false, error = "$label returned an unknown response.")
         }
     }
 
@@ -436,7 +564,11 @@ class RpcRepository(context: Context) {
                 .put("method", "octra_encryptedBalance")
                 .put("params", JSONArray().put(wallet.address).put(signature).put(publicKey)),
         )
-        if (response.has("error")) return@withContext null
+        response.optJSONObject("error")?.let { error ->
+            throw IllegalStateException(
+                error.optString("message", error.optString("reason", "Unable to read encrypted balance.")),
+            )
+        }
         val result = response.opt("result")
         val cipher = when (result) {
             is JSONObject -> result.optString("cipher")
@@ -446,42 +578,117 @@ class RpcRepository(context: Context) {
         normalizeEncryptedBalanceCipher(cipher)?.let(::PrivacyEncryptedBalance)
     }
 
-    suspend fun fetchPrivacyHistory(
+    suspend fun fetchPvacPublicKey(
         address: String,
-        limit: Int = 7,
         url: String = currentUrl(),
-    ): List<TransactionHistoryItem> = withContext(Dispatchers.IO) {
+    ): String? = withContext(Dispatchers.IO) {
         val response = postRpc(
             url = url,
             payload = JSONObject()
                 .put("jsonrpc", "2.0")
                 .put("id", System.currentTimeMillis())
-                .put("method", "octra_account")
-                .put("params", JSONArray().put(address).put(PrivacyHistoryQueryLimit)),
+                .put("method", "octra_pvacPubkey")
+                .put("params", JSONArray().put(address)),
+            connectTimeoutMs = 20_000,
+            readTimeoutMs = 120_000,
         )
-        val recent = response.optJSONObject("result")?.optJSONArray("recent_txs") ?: JSONArray()
-        buildList {
-            for (index in 0 until recent.length()) {
-                val item = recent.optJSONObject(index) ?: continue
-                val opType = item.optString("op_type").lowercase()
-                if (opType !in PrivacyOperationTypes) continue
-                val from = item.optString("from", address)
-                val to = item.optString("to", item.optString("to_", address))
-                add(
-                    TransactionHistoryItem(
-                        hash = item.optString("hash", item.optString("tx_hash")),
-                        from = from,
-                        to = to,
-                        amount = parseAmount(item.opt("amount_raw"), item.opt("amount")),
-                        timestamp = item.optDouble("timestamp", 0.0),
-                        status = item.optString("status", "confirmed"),
-                        type = if (from.equals(address, ignoreCase = true)) "sent" else "received",
-                        opType = opType,
-                    ),
-                )
-                if (size >= limit) break
+        response.optJSONObject("error")?.let { error ->
+            val message = error.optString("message", error.optString("reason"))
+            if (
+                message.contains("not found", ignoreCase = true) ||
+                message.contains("not registered", ignoreCase = true)
+            ) {
+                return@withContext null
             }
-        }.sortedByDescending { it.timestamp }
+            throw IllegalStateException(message.ifBlank { "Unable to read the registered Privacy key." })
+        }
+        val result = response.opt("result")
+        val key = when (result) {
+            is JSONObject -> result.optString("pvac_pubkey")
+            is String -> result
+            else -> ""
+        }.trim()
+        key.ifBlank { null }
+    }
+
+    suspend fun fetchPvacMigrationStatus(
+        address: String,
+        url: String = currentUrl(),
+    ): PrivacyMigrationNetworkStatus = withContext(Dispatchers.IO) {
+        val response = postRpc(
+            url = url,
+            payload = JSONObject()
+                .put("jsonrpc", "2.0")
+                .put("id", System.currentTimeMillis())
+                .put("method", "octra_pvacMigrationStatus")
+                .put("params", JSONArray().put(address)),
+            connectTimeoutMs = 10_000,
+            readTimeoutMs = 20_000,
+        )
+        response.optJSONObject("error")?.let { error ->
+            throw IllegalStateException(
+                error.optString("message", error.optString("reason", "Privacy migration status is unavailable.")),
+            )
+        }
+        val result = response.optJSONObject("result")
+            ?: throw IllegalStateException("Privacy migration status is unavailable.")
+        val replay = result.optJSONObject("legacy_public_replay") ?: JSONObject()
+        val replayReason = replay.optString("reason")
+        val resultReason = result.optString("reason")
+        val auditClass = replay.optString("audit_class", result.optString("audit_class")).ifBlank {
+            if (
+                replayReason == "legacy history needs hidden witness migration" ||
+                resultReason == "legacy history needs hidden witness migration"
+            ) {
+                "hidden_witness"
+            } else {
+                ""
+            }
+        }
+        val publicRaw = listOf("public_net_raw", "public_net")
+            .firstNotNullOfOrNull { key ->
+                replay.opt(key)
+                    ?.takeUnless { it == JSONObject.NULL }
+                    ?.toString()
+                    ?.toLongOrNull()
+            }
+        PrivacyMigrationNetworkStatus(
+            auditClass = auditClass,
+            reason = replayReason.ifBlank { resultReason },
+            cipherClass = result.optString("cipher_class"),
+            canPublicMigrate = replay.optBoolean("can_public_migrate", false) && publicRaw != null,
+            publicNetRaw = publicRaw,
+            commitmentNet = replay.optString("commitment_net").ifBlank { null },
+        )
+    }
+
+    suspend fun fetchPrivacyHistory(
+        address: String,
+        limit: Int = 7,
+        url: String = currentUrl(),
+    ): List<TransactionHistoryItem> = withContext(Dispatchers.IO) {
+        val confirmedJob = async {
+            runCatching {
+                fetchConfirmedAccountTransactions(
+                    address = address,
+                    resultLimit = limit,
+                    queryLimit = PrivacyHistoryQueryLimit,
+                    url = url,
+                ) { transaction ->
+                    transaction.opType.lowercase() in PrivacyOperationTypes
+                }
+            }.getOrDefault(emptyList())
+        }
+        val pendingJob = async {
+            runCatching {
+                fetchPendingTransactions(address, url)
+                    .filter { it.opType.lowercase() in PrivacyOperationTypes }
+            }.getOrDefault(emptyList())
+        }
+        (confirmedJob.await() + pendingJob.await())
+            .distinctBy { it.hash }
+            .sortedByDescending { it.timestamp }
+            .take(limit)
     }
 
     suspend fun fetchStealthOutputs(url: String = currentUrl()): JSONArray = withContext(Dispatchers.IO) {
@@ -538,11 +745,13 @@ class RpcRepository(context: Context) {
         pvacPublicKey: ByteArray,
         aesKat: ByteArray,
         url: String = currentUrl(),
+        matchesRegisteredKey: suspend (String) -> Boolean = {
+            PrivacyKeyEncoding.matches(it, pvacPublicKey)
+        },
     ) = withContext(Dispatchers.IO) {
         val pvacPublicKeyBase64 = Base64.encodeToString(pvacPublicKey, Base64.NO_WRAP)
         val publicKeyHash = MessageDigest.getInstance("SHA-256").digest(pvacPublicKey).toHex()
-        val cacheKey = "${url.trimEnd('/')}|${wallet.address}|$publicKeyHash"
-        if (cacheKey in registeredPvacKeys) return@withContext
+        if (registeredPvacKeys.contains(url, wallet.address, pvacPublicKey)) return@withContext
 
         val existingResponse = postRpc(
             url = url,
@@ -555,8 +764,8 @@ class RpcRepository(context: Context) {
         val existing = existingResponse.optJSONObject("result")?.optString("pvac_pubkey")
             ?.trim()
             .orEmpty()
-        if (existing == pvacPublicKeyBase64) {
-            registeredPvacKeys += cacheKey
+        if (existing.isNotBlank() && matchesRegisteredKey(existing)) {
+            registeredPvacKeys.remember(url, wallet.address, pvacPublicKey)
             return@withContext
         }
         require(existing.isBlank()) {
@@ -579,14 +788,29 @@ class RpcRepository(context: Context) {
                         .put(Base64.encodeToString(signingMaterial(wallet).second, Base64.NO_WRAP))
                         .put(aesKat.toHex()),
                 ),
-            connectTimeoutMs = 60_000,
-            readTimeoutMs = 60_000,
+            connectTimeoutMs = 30_000,
+            readTimeoutMs = 110_000,
         )
         val errorMessage = response.optJSONObject("error")?.optString("message").orEmpty()
         if (errorMessage.isNotBlank() && !errorMessage.contains("already registered", ignoreCase = true)) {
             throw IllegalStateException(errorMessage)
         }
-        registeredPvacKeys += cacheKey
+        registeredPvacKeys.remember(url, wallet.address, pvacPublicKey)
+    }
+
+    fun rememberVerifiedPvacRegistration(
+        address: String,
+        pvacPublicKey: ByteArray,
+        url: String = currentUrl(),
+    ) {
+        registeredPvacKeys.remember(url, address, pvacPublicKey)
+    }
+
+    fun invalidatePvacRegistration(
+        address: String,
+        url: String? = null,
+    ) {
+        registeredPvacKeys.invalidate(address, url)
     }
 
     suspend fun submitPrivacyTransaction(
@@ -643,54 +867,81 @@ class RpcRepository(context: Context) {
         }
     }
 
+    suspend fun submitPrivacyKeySwitch(
+        wallet: Wallet,
+        feeOu: Long,
+        encryptedData: String,
+        newPublicKey: ByteArray,
+        url: String = currentUrl(),
+    ): SendResult = withContext(Dispatchers.IO) {
+        val keyHash = MessageDigest.getInstance("SHA-256")
+            .digest(newPublicKey)
+            .take(8)
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        val snapshot = fetchBalanceStrict(wallet.address, url)
+        val transaction = createSignedTransactionRaw(
+            wallet = wallet,
+            recipientAddress = wallet.address,
+            amountRaw = "0",
+            nonce = snapshot.nonce + 1,
+            message = "encryption key switch | new_key:$keyHash",
+            feeOu = feeOu,
+            opType = "key_switch",
+            encryptedData = encryptedData,
+        )
+        val response = postRpc(
+            url = url,
+            payload = JSONObject()
+                .put("jsonrpc", "2.0")
+                .put("id", System.currentTimeMillis())
+                .put("method", "octra_submit")
+                .put("params", JSONArray().put(transaction)),
+            connectTimeoutMs = 20_000,
+            readTimeoutMs = 45_000,
+        )
+        response.optJSONObject("error")?.let { error ->
+            return@withContext SendResult(
+                success = false,
+                error = error.optString("message", error.optString("reason", "Privacy key switch failed.")),
+                finality = "rejected",
+            )
+        }
+        val result = response.optJSONObject("result") ?: JSONObject()
+        val status = result.optString("status").lowercase()
+        val hash = result.optString("tx_hash", result.optString("hash")).ifBlank { null }
+        if (status == "rejected") {
+            SendResult(false, error = result.optString("reason", "Privacy key switch was rejected."), finality = status)
+        } else if (status == "accepted" || hash != null) {
+            registeredPvacKeys.invalidate(wallet.address)
+            SendResult(true, hash = hash, finality = "accepted")
+        } else {
+            SendResult(false, error = "Unknown Privacy key switch response.")
+        }
+    }
+
     suspend fun fetchTransactionHistory(address: String, limit: Int = 11, url: String = currentUrl()): List<TransactionHistoryItem> =
         withContext(Dispatchers.IO) {
             val confirmedJob = async {
                 runCatching {
-                    val json = postRpc(
+                    fetchConfirmedAccountTransactions(
+                        address = address,
+                        resultLimit = limit,
+                        queryLimit = maxOf(limit * 4, HistoryDetailsBatchSize)
+                            .coerceAtMost(AccountHistoryQueryLimit),
                         url = url,
-                        payload = JSONObject()
-                            .put("jsonrpc", "2.0")
-                            .put("id", 1)
-                            .put("method", "octra_account")
-                            .put("params", JSONArray().put(address).put(limit)),
-                    )
-                    val result = json.optJSONObject("result") ?: return@runCatching emptyList()
-                    val recent = result.optJSONArray("recent_txs") ?: JSONArray()
-                    val items = buildList {
-                        for (index in 0 until recent.length()) {
-                            recent.optJSONObject(index)?.let { add(it) }
-                        }
-                    }
-                    items.chunked(HistoryDetailsBatchSize).flatMap { batch ->
-                        coroutineScope {
-                            batch.map { item ->
-                                async {
-                                    val hash = item.optString("hash", item.optString("tx_hash"))
-                                    if (hash.isBlank()) {
-                                        null
-                                    } else {
-                                        runCatching { fetchTransactionDetails(hash, address, url) }.getOrElse {
-                                            TransactionHistoryItem(
-                                                hash = hash,
-                                                from = item.optString("from", "unknown"),
-                                                to = item.optString("to", item.optString("to_", "unknown")),
-                                                amount = parseAmount(item.opt("amount_raw"), item.opt("amount")),
-                                                timestamp = item.optDouble("timestamp", 0.0),
-                                                status = "confirmed",
-                                                type = if (item.optString("from").equals(address, ignoreCase = true)) "sent" else "received",
-                                                opType = item.optString("op_type", "standard"),
-                                            )
-                                        }
-                                    }
-                                }
-                            }.awaitAll().filterNotNull()
-                        }
+                    ) { transaction ->
+                        val opType = transaction.opType.lowercase()
+                        opType != "unknown" && opType !in PrivacyOperationTypes
                     }
                 }.getOrDefault(emptyList())
             }
 
-            val pendingJob = async { runCatching { fetchPendingTransactions(address, url) }.getOrDefault(emptyList()) }
+            val pendingJob = async {
+                runCatching {
+                    fetchPendingTransactions(address, url)
+                        .filter { it.opType.lowercase() !in PrivacyOperationTypes }
+                }.getOrDefault(emptyList())
+            }
             val confirmed = confirmedJob.await()
             val pending = pendingJob.await()
             (confirmed + pending)
@@ -698,6 +949,61 @@ class RpcRepository(context: Context) {
                 .sortedByDescending { it.timestamp }
                 .take(limit)
         }
+
+    private suspend fun fetchConfirmedAccountTransactions(
+        address: String,
+        resultLimit: Int,
+        queryLimit: Int,
+        url: String,
+        include: (TransactionHistoryItem) -> Boolean,
+    ): List<TransactionHistoryItem> {
+        val json = postRpc(
+            url = url,
+            payload = JSONObject()
+                .put("jsonrpc", "2.0")
+                .put("id", 1)
+                .put("method", "octra_account")
+                .put("params", JSONArray().put(address).put(queryLimit)),
+        )
+        val recent = json.optJSONObject("result")?.optJSONArray("recent_txs") ?: JSONArray()
+        val candidates = buildList {
+            for (index in 0 until recent.length()) {
+                recent.optJSONObject(index)?.let(::add)
+            }
+        }
+        val matches = mutableListOf<TransactionHistoryItem>()
+        for (batch in candidates.chunked(HistoryDetailsBatchSize)) {
+            val detailsByHash = fetchTransactionDetailsBatch(
+                hashes = batch.mapNotNull { item ->
+                    item.optString("hash", item.optString("tx_hash")).ifBlank { null }
+                },
+                address = address,
+                url = url,
+            )
+            val details = batch.mapNotNull { item ->
+                val hash = item.optString("hash", item.optString("tx_hash"))
+                if (hash.isBlank()) {
+                    null
+                } else {
+                    detailsByHash[hash] ?: TransactionHistoryItem(
+                        hash = hash,
+                        from = item.optString("from", "unknown"),
+                        to = item.optString("to", item.optString("to_", "unknown")),
+                        amount = parseAmount(item.opt("amount_raw"), item.opt("amount")),
+                        timestamp = item.optDouble("timestamp", 0.0),
+                        status = "confirmed",
+                        type = if (item.optString("from").equals(address, ignoreCase = true)) "sent" else "received",
+                        opType = item.optString("op_type", "unknown"),
+                    )
+                }
+            }
+            matches += details.filter(include)
+            if (matches.size >= resultLimit) break
+        }
+        return matches
+            .sortedByDescending { it.timestamp }
+            .take(resultLimit)
+    }
 
     suspend fun fetchRecommendedFee(opType: String = "standard", url: String = currentUrl()): Long = withContext(Dispatchers.IO) {
         runCatching {
@@ -716,6 +1022,30 @@ class RpcRepository(context: Context) {
                 else -> null
             }?.takeIf { it > 0L } ?: feeFallback(opType)
         }.getOrDefault(feeFallback(opType))
+    }
+
+    suspend fun fetchRecommendedFeeStrict(
+        opType: String,
+        url: String = currentUrl(),
+    ): Long = withContext(Dispatchers.IO) {
+        val json = postRpc(
+            url = url,
+            payload = JSONObject()
+                .put("jsonrpc", "2.0")
+                .put("id", System.currentTimeMillis())
+                .put("method", "octra_recommendedFee")
+                .put("params", JSONArray().put(opType)),
+        )
+        json.optJSONObject("error")?.let { error ->
+            throw IllegalStateException(error.optString("message", "Unable to read the recommended fee."))
+        }
+        val recommended = json.optJSONObject("result")?.opt("recommended")
+        when (recommended) {
+            is Number -> recommended.toLong()
+            is String -> recommended.toLongOrNull()
+            else -> null
+        }?.takeIf { it > 0L }
+            ?: throw IllegalStateException("The network returned an invalid recommended fee.")
     }
 
     suspend fun fetchOctraTokens(walletAddress: String, savedAddresses: List<String>, url: String = currentUrl()): List<OctraToken> =
@@ -793,6 +1123,7 @@ class RpcRepository(context: Context) {
         label: String,
         walletAddress: String,
     ): String? = withContext(Dispatchers.IO) {
+        val rpcUrl = currentUrl()
         val cleanLabel = label.trim()
             .lowercase()
             .removeSuffix(".oct")
@@ -800,19 +1131,21 @@ class RpcRepository(context: Context) {
             .removeSuffix(".id")
         if (!isValidIdentityPath(cleanLabel)) return@withContext null
         val method = if (cleanLabel.contains('.')) "resolve_name" else "resolve"
-        val resolved = contractCall(
-            contractAddress = provider.contractAddress,
+        val resolved = identityProviderView(
+            provider = provider,
             method = method,
             params = JSONArray().put(cleanLabel),
             walletAddress = walletAddress,
+            rpcUrl = rpcUrl,
         ) ?: if (!cleanLabel.contains('.')) {
             null
         } else {
-            contractCall(
-                contractAddress = provider.contractAddress,
+            identityProviderView(
+                provider = provider,
                 method = "resolve",
                 params = JSONArray().put(cleanLabel),
                 walletAddress = walletAddress,
+                rpcUrl = rpcUrl,
             )
         }
         resolved?.takeIf { it.startsWith("oct") && it.length == 47 }
@@ -822,35 +1155,39 @@ class RpcRepository(context: Context) {
         provider: OctraIdentityProvider,
         walletAddress: String,
     ): String? = withContext(Dispatchers.IO) {
+        val rpcUrl = currentUrl()
         if (!walletAddress.startsWith("oct") || walletAddress.length != 47) return@withContext null
-        val primary = contractCall(
-            contractAddress = provider.contractAddress,
+        val primary = identityProviderView(
+            provider = provider,
             method = "primary_of",
             params = JSONArray().put(walletAddress),
             walletAddress = walletAddress,
+            rpcUrl = rpcUrl,
         )?.toIdentityDomain()
         if (primary != null) return@withContext primary
 
-        val total = contractCall(
-            contractAddress = provider.contractAddress,
+        val total = identityProviderView(
+            provider = provider,
             method = "owner_total",
             params = JSONArray().put(walletAddress),
             walletAddress = walletAddress,
+            rpcUrl = rpcUrl,
         )?.toIntOrNull() ?: 0
         if (total <= 0) return@withContext null
 
-        contractCall(
-            contractAddress = provider.contractAddress,
+        identityProviderView(
+            provider = provider,
             method = "owner_key_at",
             params = JSONArray().put(walletAddress).put(0),
             walletAddress = walletAddress,
+            rpcUrl = rpcUrl,
         )?.toIdentityDomain()
     }
 
     fun fetchCircleInfo(circleId: String): JSONObject {
         val cleanCircleId = circleId.trim()
         require(cleanCircleId.startsWith("oct") && cleanCircleId.length == 47) { "Enter a valid Octra circle address." }
-        val json = postRpc(
+        val json = postCircleReadRpc(
             url = currentUrl(),
             payload = JSONObject()
                 .put("jsonrpc", "2.0")
@@ -861,7 +1198,11 @@ class RpcRepository(context: Context) {
         json.optJSONObject("error")?.let { error ->
             throw IllegalStateException(error.optString("message").ifBlank { "Circle info lookup failed." })
         }
-        return json.optJSONObject("result") ?: throw IllegalStateException("Circle info was not found.")
+        val result = json.optJSONObject("result") ?: throw IllegalStateException("Circle info was not found.")
+        result.optString("circle_id").trim().takeIf(String::isNotBlank)?.let { returnedCircleId ->
+            require(returnedCircleId == cleanCircleId) { "Circle info address mismatch." }
+        }
+        return result
     }
 
     fun circleProgramView(address: String, method: String, params: JSONArray): Any? {
@@ -875,6 +1216,27 @@ class RpcRepository(context: Context) {
         return cachedCircleRead(circleProgramViewCacheKey(rpcUrl, cleanAddress, cleanMethod, params)) {
             executeCircleProgramView(rpcUrl, cleanAddress, cleanMethod, params)
         }
+    }
+
+    fun circleProgramInfo(address: String): JSONObject {
+        val cleanAddress = address.trim()
+        require(cleanAddress.startsWith("oct") && cleanAddress.length == 47) { "Enter a valid Octra circle address." }
+        val response = postCircleReadRpc(
+            url = currentUrl(),
+            payload = JSONObject()
+                .put("jsonrpc", "2.0")
+                .put("id", 1)
+                .put("method", "octra_circleProgramInfo")
+                .put("params", JSONArray().put(cleanAddress)),
+        )
+        val error = response.optJSONObject("error")
+        if (error == null) {
+            return response.optJSONObject("result") ?: throw IllegalStateException("Circle program info was not found.")
+        }
+        if (!isMethodNotFound(error.optString("message"))) {
+            throw IllegalStateException(error.optString("message").ifBlank { "Circle program info lookup failed." })
+        }
+        return fetchCircleInfo(cleanAddress)
     }
 
     fun circleReadRpc(method: String, params: JSONArray): Any? {
@@ -956,7 +1318,7 @@ class RpcRepository(context: Context) {
         params: JSONArray,
     ): Any? {
         if (!unsupportedCircleProgramViewUrls.contains(rpcUrl)) {
-            val direct = postRpc(
+            val direct = postCircleReadRpc(
                 url = rpcUrl,
                 payload = JSONObject()
                     .put("jsonrpc", "2.0")
@@ -981,6 +1343,28 @@ class RpcRepository(context: Context) {
             unsupportedCircleProgramViewUrls.add(rpcUrl)
         }
 
+        val circleView = postCircleReadRpc(
+            url = rpcUrl,
+            payload = JSONObject()
+                .put("jsonrpc", "2.0")
+                .put("id", 1)
+                .put("method", "octra_circleView")
+                .put(
+                    "params",
+                    JSONArray()
+                        .put(cleanAddress)
+                        .put(cleanMethod)
+                        .put(params)
+                        .put(JSONObject.NULL)
+                        .put(false),
+                ),
+        )
+        val circleViewError = circleView.optJSONObject("error")
+        if (circleViewError == null) return circleView.opt("result")
+        if (!isMethodNotFound(circleViewError.optString("message"))) {
+            throw IllegalStateException(circleViewError.optString("message").ifBlank { "Circle program view failed." })
+        }
+
         return executeContractCallView(rpcUrl, cleanAddress, cleanMethod, params)
     }
 
@@ -990,7 +1374,7 @@ class RpcRepository(context: Context) {
         cleanMethod: String,
         params: JSONArray,
     ): Any? {
-        val fallback = postRpc(
+        val fallback = postCircleReadRpc(
             url = rpcUrl,
             payload = JSONObject()
                 .put("jsonrpc", "2.0")
@@ -1014,7 +1398,7 @@ class RpcRepository(context: Context) {
             )
         }
 
-        val direct = postRpc(
+        val direct = postCircleReadRpc(
             url = rpcUrl,
             payload = JSONObject()
                 .put("jsonrpc", "2.0")
@@ -1036,7 +1420,7 @@ class RpcRepository(context: Context) {
             rawBatch.put(rawCircleRpcPayload(call, batchIndex + 1, useProgramView))
         }
 
-        val rawResponses = postRpcBatch(rpcUrl, rawBatch)
+        val rawResponses = postCircleReadRpcBatch(rpcUrl, rawBatch)
         val byId = jsonRpcResponsesById(rawResponses)
         val fallbackCalls = mutableListOf<CircleRpcBatchCall>()
 
@@ -1056,7 +1440,7 @@ class RpcRepository(context: Context) {
             fallbackCalls.forEachIndexed { batchIndex, call ->
                 fallbackBatch.put(rawCircleRpcPayload(call, batchIndex + 1, useProgramView = false))
             }
-            val fallbackResponses = jsonRpcResponsesById(postRpcBatch(rpcUrl, fallbackBatch))
+            val fallbackResponses = jsonRpcResponsesById(postCircleReadRpcBatch(rpcUrl, fallbackBatch))
             fallbackCalls.forEachIndexed { batchIndex, call ->
                 val rawResponse = fallbackResponses[batchIndex + 1] ?: JSONObject()
                     .put("error", JSONObject().put("code", -32000).put("message", "Missing circle RPC fallback response."))
@@ -1071,6 +1455,23 @@ class RpcRepository(context: Context) {
         val cleanMethod = method.trim()
         require(cleanMethod in CircleReadRpcMethods) { "Circle RPC method is not allowed: $cleanMethod" }
         require(params.length() <= MaxCircleRpcParams) { "Circle RPC params are too large." }
+        when (cleanMethod) {
+            "octra_circleProgramInfo" -> {
+                val address = params.optString(0)
+                require(params.length() == 1 && address.startsWith("oct") && address.length == 47) {
+                    "Enter a valid Circle program address."
+                }
+            }
+            "octra_circleView" -> {
+                val address = params.optString(0)
+                val viewMethod = params.optString(1)
+                require(params.length() in 3..5 && address.startsWith("oct") && address.length == 47) {
+                    "Enter a valid Circle view address."
+                }
+                require(viewMethod.matches(Regex("^[A-Za-z_][A-Za-z0-9_]{0,63}$"))) { "Enter a valid view method." }
+                require(params.optJSONArray(2) != null) { "Circle view params must be an array." }
+            }
+        }
         return cleanMethod
     }
 
@@ -1101,8 +1502,8 @@ class RpcRepository(context: Context) {
             return JSONObject()
                 .put("jsonrpc", "2.0")
                 .put("id", id)
-                .put("method", "contract_call")
-                .put("params", JSONArray().put(address).put(method).put(params))
+                .put("method", "octra_circleView")
+                .put("params", JSONArray().put(address).put(method).put(params).put(JSONObject.NULL).put(false))
         }
 
         return JSONObject()
@@ -1204,7 +1605,7 @@ class RpcRepository(context: Context) {
         val cleanCircleId = circleId.trim()
         val cleanPath = normalizeCircleAssetPath(path)
         require(cleanCircleId.startsWith("oct") && cleanCircleId.length == 47) { "Enter a valid Octra circle address." }
-        val json = postRpc(
+        val json = postCircleReadRpc(
             url = currentUrl(),
             payload = JSONObject()
                 .put("jsonrpc", "2.0")
@@ -1216,15 +1617,29 @@ class RpcRepository(context: Context) {
             throw IllegalStateException(error.optString("message").ifBlank { "Circle asset lookup failed." })
         }
         val result = json.optJSONObject("result") ?: throw IllegalStateException("Circle asset was not found.")
+        val returnedCircleId = result.optString("circle_id", cleanCircleId).trim()
+        require(returnedCircleId == cleanCircleId) { "Circle asset address mismatch." }
+        val canonicalPath = normalizeCircleAssetPath(result.optString("canonical_path", cleanPath))
+        require(canonicalPath == cleanPath) { "Circle asset path mismatch." }
+        require(result.has("body_b64") && !result.isNull("body_b64")) { "Circle asset body is missing." }
         val bodyB64 = result.optString("body_b64")
-        require(bodyB64.isNotBlank()) { "Circle asset body is empty." }
+        require(bodyB64.length % 4 == 0 && bodyB64.matches(Regex("^[A-Za-z0-9+/]*={0,2}$"))) {
+            "Circle asset body is not valid Base64."
+        }
         val body = Base64.decode(bodyB64, Base64.DEFAULT)
+        require(Base64.encodeToString(body, Base64.NO_WRAP) == bodyB64) { "Circle asset body is not canonical Base64." }
+        val declaredSize = result.opt("size_bytes")
+            ?.toString()
+            ?.takeIf(String::isNotBlank)
+            ?.toLongOrNull()
+            ?: body.size.toLong()
+        require(declaredSize == body.size.toLong()) { "Circle asset size mismatch." }
         return CircleAsset(
-            circleId = result.optString("circle_id", cleanCircleId),
-            canonicalPath = normalizeCircleAssetPath(result.optString("canonical_path", cleanPath)),
+            circleId = returnedCircleId,
+            canonicalPath = canonicalPath,
             contentType = result.optString("content_type", "application/octet-stream").ifBlank { "application/octet-stream" },
             body = body,
-            sizeBytes = result.optLong("size_bytes", body.size.toLong()),
+            sizeBytes = body.size.toLong(),
         )
     }
 
@@ -1246,6 +1661,11 @@ class RpcRepository(context: Context) {
         require(ciphertextB64.isNotBlank() && keyId.isNotBlank() && plaintextHash.isNotBlank()) {
             "Sealed asset metadata is incomplete."
         }
+        require(keyId.length <= 128 && keyId.none(Char::isISOControl)) { "Sealed asset key ID is invalid." }
+        require(plaintextHash.matches(Regex("^[0-9a-fA-F]{64}$"))) { "Sealed asset plaintext hash is invalid." }
+        require(ciphertextB64.length % 4 == 0 && ciphertextB64.matches(Regex("^[A-Za-z0-9+/]*={0,2}$"))) {
+            "Sealed asset ciphertext is not valid Base64."
+        }
         val body = decryptSealedCircleBytes(
             circleId = cleanCircleId,
             keyId = keyId,
@@ -1253,9 +1673,13 @@ class RpcRepository(context: Context) {
             ciphertextB64 = ciphertextB64,
             plaintextHash = plaintextHash,
         )
+        val returnedCircleId = result.optString("circle_id", cleanCircleId).trim()
+        require(returnedCircleId == cleanCircleId) { "Circle asset address mismatch." }
+        val canonicalPath = normalizeCircleAssetPath(result.optString("canonical_path", cleanPath))
+        require(canonicalPath == cleanPath) { "Circle asset path mismatch." }
         return CircleAsset(
-            circleId = result.optString("circle_id", cleanCircleId),
-            canonicalPath = normalizeCircleAssetPath(result.optString("canonical_path", cleanPath)),
+            circleId = returnedCircleId,
+            canonicalPath = canonicalPath,
             contentType = result.optString("content_type", "application/octet-stream").ifBlank { "application/octet-stream" },
             body = body,
             sizeBytes = body.size.toLong(),
@@ -1283,8 +1707,8 @@ class RpcRepository(context: Context) {
             )?.let { return it }
         }
 
-        runCatching {
-            val json = postRpc(
+        try {
+            val json = postCircleReadRpc(
                 url = currentUrl(),
                 payload = JSONObject()
                     .put("jsonrpc", "2.0")
@@ -1295,10 +1719,12 @@ class RpcRepository(context: Context) {
             json.optJSONObject("error")?.let { error ->
                 throw IllegalStateException(error.optString("message").ifBlank { "Circle sealed asset lookup failed." })
             }
-            json.optJSONObject("result") ?: throw IllegalStateException("Circle sealed asset was not found.")
-        }.getOrNull()?.let { return it }
+            return json.optJSONObject("result") ?: throw IllegalStateException("Circle sealed asset was not found.")
+        } catch (failure: Exception) {
+            if (!shouldFallbackCircleLookup(failure)) throw failure
+        }
 
-        val json = postRpc(
+        val json = postCircleReadRpc(
             url = currentUrl(),
             payload = JSONObject()
                 .put("jsonrpc", "2.0")
@@ -1319,10 +1745,10 @@ class RpcRepository(context: Context) {
         operation: String,
         subject: String,
         wallet: Wallet,
-    ): JSONObject? = runCatching {
+    ): JSONObject? = try {
         val (_, publicKey) = signingMaterial(wallet)
         val signature = signMessage(wallet, "$operation|$circleId|${wallet.address}|$subject")
-        val json = postRpc(
+        val json = postCircleReadRpc(
             url = currentUrl(),
             payload = JSONObject()
                 .put("jsonrpc", "2.0")
@@ -1342,7 +1768,9 @@ class RpcRepository(context: Context) {
             throw IllegalStateException(error.optString("message").ifBlank { "Authenticated Circle asset lookup failed." })
         }
         json.optJSONObject("result") ?: throw IllegalStateException("Circle sealed asset was not found.")
-    }.getOrNull()
+    } catch (failure: Exception) {
+        if (shouldFallbackCircleLookup(failure)) null else throw failure
+    }
 
     private fun decryptSealedCircleBytes(
         circleId: String,
@@ -1352,6 +1780,9 @@ class RpcRepository(context: Context) {
         plaintextHash: String,
     ): ByteArray {
         val envelope = Base64.decode(ciphertextB64, Base64.DEFAULT)
+        require(Base64.encodeToString(envelope, Base64.NO_WRAP) == ciphertextB64) {
+            "Sealed asset ciphertext is not canonical Base64."
+        }
         val magic = "OCRS1".toByteArray(Charsets.UTF_8)
         require(envelope.size > magic.size + 12 && envelope.copyOfRange(0, magic.size).contentEquals(magic)) {
             "Invalid sealed circle envelope."
@@ -1426,12 +1857,6 @@ class RpcRepository(context: Context) {
         return OctraIdentityName.isValidPath(value)
     }
 
-    private fun normalizeCircleAssetPath(rawPath: String): String {
-        val clean = rawPath.trim()
-        if (clean.isBlank()) return "/index.html"
-        return if (clean.startsWith("/")) clean else "/$clean"
-    }
-
     private fun String.toIdentityDomain(): String? {
         val clean = trim()
             .lowercase()
@@ -1441,6 +1866,20 @@ class RpcRepository(context: Context) {
         if (!isValidIdentityPath(clean)) return null
         return "$clean.oct"
     }
+
+    private fun identityProviderView(
+        provider: OctraIdentityProvider,
+        method: String,
+        params: JSONArray,
+        walletAddress: String,
+        rpcUrl: String,
+    ): String? = contractCall(
+        contractAddress = provider.contractAddress,
+        method = method,
+        params = params,
+        walletAddress = walletAddress,
+        url = rpcUrl,
+    )
 
     fun currentNetwork(): String = networkFor(currentUrl())
 
@@ -1524,6 +1963,8 @@ class RpcRepository(context: Context) {
     }
 
     private fun fetchTransactionDetails(hash: String, address: String, url: String = currentUrl()): TransactionHistoryItem {
+        val cacheKey = "$url|${address.lowercase()}|${hash.lowercase()}"
+        transactionDetailsCache[cacheKey]?.let { return it }
         val json = postRpc(
             url = url,
             payload = JSONObject()
@@ -1533,9 +1974,69 @@ class RpcRepository(context: Context) {
                 .put("params", JSONArray().put(hash)),
         )
         val data = json.optJSONObject("result") ?: throw IllegalStateException("Empty transaction result")
+        return parseTransactionDetails(data, hash, address).also { transaction ->
+            cacheTransactionDetails(cacheKey, transaction)
+        }
+    }
+
+    private fun fetchTransactionDetailsBatch(
+        hashes: List<String>,
+        address: String,
+        url: String,
+    ): Map<String, TransactionHistoryItem> {
+        val uniqueHashes = hashes.distinct()
+        val details = mutableMapOf<String, TransactionHistoryItem>()
+        val missing = mutableListOf<String>()
+        uniqueHashes.forEach { hash ->
+            val cacheKey = "$url|${address.lowercase()}|${hash.lowercase()}"
+            transactionDetailsCache[cacheKey]?.let { details[hash] = it } ?: missing.add(hash)
+        }
+        if (missing.isEmpty()) return details
+
+        val payload = JSONArray()
+        missing.forEachIndexed { index, hash ->
+            payload.put(
+                JSONObject()
+                    .put("jsonrpc", "2.0")
+                    .put("id", index + 1)
+                    .put("method", "octra_transaction")
+                    .put("params", JSONArray().put(hash)),
+            )
+        }
+        val responsesById = runCatching {
+            jsonRpcResponsesById(postRpcBatch(url, payload))
+        }.getOrNull()
+        if (responsesById != null) {
+            missing.forEachIndexed { index, hash ->
+                val data = responsesById[index + 1]?.optJSONObject("result") ?: return@forEachIndexed
+                runCatching { parseTransactionDetails(data, hash, address) }
+                    .getOrNull()
+                    ?.let { transaction ->
+                        details[hash] = transaction
+                        cacheTransactionDetails(
+                            "$url|${address.lowercase()}|${hash.lowercase()}",
+                            transaction,
+                        )
+                    }
+            }
+        }
+
+        missing.filterNot(details::containsKey).forEach { hash ->
+            runCatching { fetchTransactionDetails(hash, address, url) }
+                .getOrNull()
+                ?.let { details[hash] = it }
+        }
+        return details
+    }
+
+    private fun parseTransactionDetails(
+        data: JSONObject,
+        fallbackHash: String,
+        address: String,
+    ): TransactionHistoryItem {
         val from = data.optString("from")
         val to = data.optString("to", data.optString("to_"))
-        val txHash = data.optString("tx_hash", hash)
+        val txHash = data.optString("tx_hash", fallbackHash)
         val status = data.optString("status").lowercase()
         val stageStatus = data.optString("stage_status").lowercase()
         val normalizedStatus = when {
@@ -1556,6 +2057,15 @@ class RpcRepository(context: Context) {
             opType = data.optString("op_type", "standard"),
             message = data.optString("message").ifBlank { null },
         )
+    }
+
+    private fun cacheTransactionDetails(cacheKey: String, transaction: TransactionHistoryItem) {
+        if (transaction.status == "confirmed") {
+            if (transactionDetailsCache.size >= TransactionDetailsCacheLimit) {
+                transactionDetailsCache.keys.firstOrNull()?.let(transactionDetailsCache::remove)
+            }
+            transactionDetailsCache[cacheKey] = transaction
+        }
     }
 
     private fun fetchPendingTransactions(address: String, url: String = currentUrl()): List<TransactionHistoryItem> {
@@ -1637,19 +2147,45 @@ class RpcRepository(context: Context) {
         return value as? JSONArray ?: throw IllegalStateException("RPC batch response was not an array.")
     }
 
+    private fun postCircleReadRpc(
+        url: String,
+        payload: JSONObject,
+        connectTimeoutMs: Int = 10_000,
+        readTimeoutMs: Int = 10_000,
+    ): JSONObject = withCircleReadRetry {
+        postRpc(url, payload, connectTimeoutMs, readTimeoutMs).also { response ->
+            response.optJSONObject("error")?.let { error ->
+                val failure = IllegalStateException(error.optString("message").ifBlank { "Circle RPC failed." })
+                if (isTransientCircleFailure(failure)) throw failure
+            }
+        }
+    }
+
+    private fun postCircleReadRpcBatch(url: String, payload: JSONArray): JSONArray = withCircleReadRetry {
+        postRpcBatch(url, payload).also { responses ->
+            for (index in 0 until responses.length()) {
+                responses.optJSONObject(index)?.optJSONObject("error")?.let { error ->
+                    val failure = IllegalStateException(error.optString("message").ifBlank { "Circle RPC failed." })
+                    if (isTransientCircleFailure(failure)) throw failure
+                }
+            }
+        }
+    }
+
     private fun postRpcValue(
         url: String,
         payload: Any,
         connectTimeoutMs: Int = 10_000,
         readTimeoutMs: Int = 10_000,
     ): Any {
-        val rpcUrl = URL("${url.trim().trimEnd('/')}/rpc")
+        val rpcUrl = URL(octraRpcEndpoint(url))
         val connection = (rpcUrl.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = connectTimeoutMs
             readTimeout = readTimeoutMs
             doOutput = true
             setRequestProperty("Content-Type", "application/json")
+            setRequestProperty("User-Agent", PoctraUserAgent)
         }
 
         return try {
@@ -1713,7 +2249,7 @@ class RpcRepository(context: Context) {
         val type = if (url.lowercase().contains("devnet") || url.contains("165.227.225.79")) "devnet" else "mainnet"
         return when (url) {
             DefaultMainnetUrl -> defaultMainnetNetwork()
-            DefaultDevnetUrl -> defaultDevnetNetwork()
+            DefaultDevnetUrl, LegacyProxyDevnetUrl, LegacyDefaultDevnetUrl -> defaultDevnetNetwork()
             else -> RpcNetwork(
                 id = "rpc-legacy-${kotlin.math.abs(url.hashCode())}",
                 name = if (type == "devnet") "Custom Devnet" else "Custom Mainnet",
@@ -1724,7 +2260,8 @@ class RpcRepository(context: Context) {
         }
     }
 
-    private fun defaultRpcNetworks(): List<RpcNetwork> = listOf(defaultMainnetNetwork(), defaultDevnetNetwork())
+    private fun defaultRpcNetworks(): List<RpcNetwork> =
+        listOf(defaultMainnetNetwork(), defaultDevnetNetwork())
 
     private fun defaultMainnetNetwork(): RpcNetwork = RpcNetwork(
         id = "octra-mainnet",
@@ -1743,8 +2280,9 @@ class RpcRepository(context: Context) {
     )
 
     private fun normalizeDefaultNetwork(network: RpcNetwork): RpcNetwork = when {
-        network.id == "octra-mainnet" || network.url == DefaultMainnetUrl -> defaultMainnetNetwork()
-        network.id == "octra-devnet" || network.url == DefaultDevnetUrl -> defaultDevnetNetwork()
+        network.id == LegacyPublicDevnetId ||
+            network.url == LegacyProxyDevnetUrl ||
+            network.url == LegacyDefaultDevnetUrl -> defaultDevnetNetwork()
         else -> network
     }
 
@@ -1776,8 +2314,11 @@ class RpcRepository(context: Context) {
         val activeUrl = prefs.getString(KeyRpcUrl, null)?.trim()?.trimEnd('/').orEmpty()
         val shouldUseMainnet = activeId.isNullOrBlank() ||
             activeId == DefaultDevnetId ||
+            activeId == LegacyPublicDevnetId ||
             activeUrl.isBlank() ||
-            activeUrl == DefaultDevnetUrl
+            activeUrl == DefaultDevnetUrl ||
+            activeUrl == LegacyProxyDevnetUrl ||
+            activeUrl == LegacyDefaultDevnetUrl
         val mainnet = networks.firstOrNull { it.id == DefaultMainnetId }
         val editor = prefs.edit().putBoolean(KeyMainnetDefaultMigrated, true)
         if (shouldUseMainnet && mainnet != null) {
@@ -1791,7 +2332,7 @@ class RpcRepository(context: Context) {
     private fun feeFallback(opType: String): Long = when (opType) {
         "encrypt", "decrypt" -> 10000L
         "stealth", "claim" -> 5000L
-        "deploy", "upgrade" -> 200000L
+        "deploy", "deploy_circle", "upgrade" -> 200000L
         else -> 1000L
     }
 
@@ -1845,11 +2386,15 @@ class RpcRepository(context: Context) {
 
     companion object {
         const val DefaultMainnetUrl = "https://octra.network"
-        const val DefaultDevnetUrl = "http://165.227.225.79:8080"
+        const val DefaultDevnetUrl = "https://devnet.octrascan.io/rpc"
+        private const val LegacyProxyDevnetUrl = "https://rpc.xme.my.id/octra-devnet"
+        private const val LegacyDefaultDevnetUrl = "http://165.227.225.79:8080"
         const val DefaultMainnetExplorerUrl = "https://octrascan.io"
         const val DefaultDevnetExplorerUrl = "https://devnet.octrascan.io"
+        private const val PoctraUserAgent = "poctra-android"
         private const val DefaultMainnetId = "octra-mainnet"
         private const val DefaultDevnetId = "octra-devnet"
+        private const val LegacyPublicDevnetId = "octra-devnet-octrascan"
         private const val KeyRpcUrl = "rpc_url"
         private const val KeyRpcNetworks = "rpc_networks"
         private const val KeyActiveRpcId = "active_rpc_id"
@@ -1864,12 +2409,16 @@ class RpcRepository(context: Context) {
         private const val MaxCircleRpcBatchSize = 64
         private const val HistoryDetailsBatchSize = 6
         private const val OctraTokenLookupBatchSize = 4
-        private const val PrivacyHistoryQueryLimit = 50
-        private val PrivacyOperationTypes = setOf("encrypt", "decrypt", "stealth", "claim")
+        private const val PrivacyHistoryQueryLimit = 100
+        private const val AccountHistoryQueryLimit = 100
+        private const val TransactionDetailsCacheLimit = 512
+        private val PrivacyOperationTypes = setOf("encrypt", "decrypt", "stealth", "claim", "key_switch")
         private const val CircleReadCacheMillis = 8_000L
         private const val MaxCircleReadCacheEntries = 512
         private val CircleReadRpcMethods = setOf(
             "octra_callProgramView",
+            "octra_circleProgramInfo",
+            "octra_circleView",
             "contract_call",
             "circle_info",
             "circle_asset",
@@ -1883,6 +2432,8 @@ class RpcRepository(context: Context) {
         )
         private val CircleReadCacheMethods = setOf(
             "octra_callProgramView",
+            "octra_circleProgramInfo",
+            "octra_circleView",
             "contract_call",
             "circle_info",
             "circle_asset",
@@ -1903,6 +2454,12 @@ internal fun normalizeEncryptedBalanceCipher(value: String): String? {
         "Encrypted balance contains invalid Base64 data."
     }
     return cipher
+}
+
+internal fun octraRpcEndpoint(baseUrl: String): String {
+    val clean = baseUrl.trim().trimEnd('/')
+    require(clean.isNotBlank()) { "RPC URL is required." }
+    return if (clean.endsWith("/rpc")) clean else "$clean/rpc"
 }
 
 internal fun canonicalJsonQuote(value: String): String = buildString(value.length + 2) {
@@ -1956,3 +2513,123 @@ internal fun canonicalOctraTimestamp(epochMillis: Long): String {
         .toPlainString()
     return if ('.' in value) value else "$value.0"
 }
+
+internal fun publicCircleDeployPayload(): String =
+    "{\"runtime\":\"octb\",\"privacy_class\":\"public\",\"browser_mode\":\"gateway_allowed\",\"resource_mode\":\"public_resources\",\"code_b64\":null,\"policy_hash\":null,\"members_root\":null,\"export_policy\":null,\"limits\":{\"max_stable_bytes\":\"33554432\",\"max_assets_bytes\":\"33554432\",\"max_inline_value\":\"65536\",\"max_wasm_bytes\":\"33554432\"}}"
+
+internal fun deriveCircleDeployId(deployer: String, nonce: Long, payload: String): String {
+    require(deployer.startsWith("oct") && deployer.length == 47) { "Enter a valid Circle deployer address." }
+    require(nonce > 0L) { "Circle deployment nonce must be positive." }
+    val payloadHash = domainHash(
+        tag = "octra:circle_deploy_payload:v1",
+        parts = listOf(payload.toByteArray(Charsets.UTF_8)),
+    ).toHexString()
+    val nonceBytes = ByteArray(Long.SIZE_BYTES) { index ->
+        ((nonce ushr ((Long.SIZE_BYTES - index - 1) * 8)) and 0xff).toByte()
+    }
+    val seed = domainHash(
+        tag = "octra:circle_deploy_id:v1",
+        parts = listOf(
+            deployer.toByteArray(Charsets.UTF_8),
+            nonceBytes,
+            payloadHash.toByteArray(Charsets.UTF_8),
+        ),
+    )
+    val encoded = Base58.encode(seed)
+    val suffix = when {
+        encoded.length >= 44 -> encoded.take(44)
+        encoded.isEmpty() -> "1".repeat(44)
+        else -> buildString(44) {
+            append(encoded)
+            var index = 0
+            while (length < 44) {
+                append(encoded[index % encoded.length])
+                index += 1
+            }
+        }.take(44)
+    }
+    return "oct$suffix"
+}
+
+internal fun validateCircleWritePath(rawPath: String): String {
+    val raw = rawPath.trim()
+    require(raw.startsWith('/')) { "Circle asset path must start with /." }
+    require(raw.length <= 512) { "Circle asset path is too long." }
+    require(raw.none { it == '\u0000' || it == '\\' || it == '?' || it == '#' || it.code < 0x20 }) {
+        "Circle asset path contains unsupported characters."
+    }
+    val lower = raw.lowercase()
+    require("%2f" !in lower && "%5c" !in lower && "%00" !in lower && "%25" !in lower) {
+        "Circle asset path contains an encoded path separator."
+    }
+    val segments = raw.split('/').filter(String::isNotEmpty)
+    require(segments.none { it == "." || it == ".." || "%2e" in it.lowercase() }) {
+        "Circle asset path traversal is not allowed."
+    }
+    return if (segments.isEmpty()) "/" else "/${segments.joinToString("/")}"
+}
+
+internal fun validateCircleContentType(rawContentType: String): String {
+    val contentType = rawContentType.trim().lowercase()
+    require(contentType.length in 3..129 && CircleContentTypeRegex.matches(contentType)) {
+        "Enter a valid Circle asset content type."
+    }
+    return contentType
+}
+
+internal fun validateCircleAssetBody(rawBodyBase64: String): String {
+    val bodyBase64 = rawBodyBase64.trim()
+    require(bodyBase64.length <= MaxCircleAssetBodyBase64Chars) {
+        "Circle browser uploads are limited to 1 MiB per asset."
+    }
+    require(bodyBase64.length % 4 == 0 && (bodyBase64.isEmpty() || CircleBase64Regex.matches(bodyBase64))) {
+        "Circle asset body must be canonical Base64."
+    }
+    val bytes = runCatching { org.bouncycastle.util.encoders.Base64.decode(bodyBase64) }
+        .getOrElse { throw IllegalArgumentException("Circle asset body must be valid Base64.") }
+    require(String(org.bouncycastle.util.encoders.Base64.encode(bytes), Charsets.US_ASCII) == bodyBase64) {
+        "Circle asset body must use canonical Base64 padding."
+    }
+    require(bytes.size <= MaxCircleAssetBodyBytes) {
+        "Circle browser uploads are limited to 1 MiB per asset."
+    }
+    return bodyBase64
+}
+
+internal fun circleAssetFeeOu(base64Length: Int): Long {
+    require(base64Length >= 0) { "Circle asset size cannot be negative." }
+    val decodedUpperBound = (base64Length.toLong() * 3L + 3L) / 4L
+    return when {
+        decodedUpperBound <= 4_096L -> 5_000L
+        decodedUpperBound <= 16_384L -> 10_000L
+        decodedUpperBound <= 32_768L -> 20_000L
+        decodedUpperBound <= 131_072L -> 40_000L
+        decodedUpperBound <= 524_288L -> 80_000L
+        decodedUpperBound <= 2_097_152L -> 160_000L
+        decodedUpperBound <= 8_388_608L -> 320_000L
+        else -> 640_000L
+    }
+}
+
+private fun domainHash(tag: String, parts: List<ByteArray>): ByteArray {
+    val bytes = ByteArrayOutputStream().apply {
+        write(tag.toByteArray(Charsets.UTF_8))
+        write(0)
+        parts.forEach { part ->
+            val size = part.size
+            write((size ushr 24) and 0xff)
+            write((size ushr 16) and 0xff)
+            write((size ushr 8) and 0xff)
+            write(size and 0xff)
+            write(part)
+        }
+    }.toByteArray()
+    return MessageDigest.getInstance("SHA-256").digest(bytes)
+}
+
+private fun ByteArray.toHexString(): String = joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+
+private const val MaxCircleAssetBodyBytes = 1_048_576
+private const val MaxCircleAssetBodyBase64Chars = 1_398_104
+private val CircleContentTypeRegex = Regex("^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$")
+private val CircleBase64Regex = Regex("^[A-Za-z0-9+/]*={0,2}$")

@@ -1,15 +1,25 @@
-﻿package com.poctra.wallet.ui
+package com.poctra.wallet.ui
 
 import android.annotation.SuppressLint
+import android.annotation.TargetApi
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.graphics.Paint
 import android.graphics.Typeface
+import android.net.Uri
 import android.os.Build
 import android.util.Base64
+import android.util.Log
+import android.view.ViewGroup
 import android.webkit.CookieManager
-import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
+import android.webkit.SafeBrowsingResponse
 import android.webkit.WebSettings
 import android.webkit.WebChromeClient
+import android.webkit.WebChromeClient.FileChooserParams
+import android.webkit.ValueCallback
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -24,8 +34,12 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -63,6 +77,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.IconButton
@@ -75,11 +90,14 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -87,12 +105,15 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -114,7 +135,21 @@ import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
+import com.poctra.wallet.dapp.POCTRA_PROVIDER_HOMEPAGE
+import com.poctra.wallet.dapp.POCTRA_PROVIDER_ICON
+import com.poctra.wallet.dapp.POCTRA_PROVIDER_NAME
+import com.poctra.wallet.dapp.POCTRA_PROVIDER_RDNS
+import com.poctra.wallet.dapp.POCTRA_PROVIDER_UUID
+import com.poctra.wallet.dapp.POCTRA_PROVIDER_VERSION
+import com.poctra.wallet.dapp.isRfcO1InpageProviderRequest
+import com.poctra.wallet.dapp.requiresNavigationLifecycleProvider
+import com.poctra.wallet.dapp.rfcO1InpageProviderPath
+import com.poctra.wallet.dapp.replaceProviderIconMetadata
 import androidx.compose.ui.zIndex
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
@@ -164,8 +199,15 @@ import com.poctra.wallet.data.TransactionFinality
 import com.poctra.wallet.data.TransactionHistoryItem
 import com.poctra.wallet.data.Wallet
 import com.poctra.wallet.data.WalletType
-import com.poctra.wallet.data.canonicalizeOrigin
+import com.poctra.wallet.dapp.browser.PoctraProviderBridge
+import com.poctra.wallet.dapp.browser.BrowserResourceHandler
+import com.poctra.wallet.dapp.browser.routeBrowserResource
+import com.poctra.wallet.dapp.circle.resolveCircleContentType
+import com.poctra.wallet.dapp.circle.isTransientCircleFailure
+import com.poctra.wallet.dapp.DAppOriginBinding
+import com.poctra.wallet.dapp.walletBrowserUserAgent
 import com.poctra.wallet.security.DeviceSecurity
+import com.poctra.wallet.security.DAppSslPolicy
 import com.poctra.wallet.security.DAppUrlPolicy
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -174,12 +216,10 @@ import java.io.ByteArrayInputStream
 import java.math.BigDecimal
 import java.math.BigInteger
 import java.math.RoundingMode
-import java.net.HttpURLConnection
-import java.net.URL
 import java.net.URLEncoder
-import java.nio.charset.Charset
 import java.util.UUID
 import kotlin.math.abs
+import com.poctra.wallet.BuildConfig
 
 private const val FullWidthDialogFraction = 0.96f
 private const val ScrimMotionMillis = 220
@@ -190,6 +230,20 @@ private val OverviewHeaderHeight = 48.dp
 
 @Composable
 fun PoctraApp(activity: Activity, controller: PoctraController) {
+    var launchAnimationComplete by rememberSaveable { mutableStateOf(false) }
+    var automaticUnlockEnabled by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        delay(PoctraLaunchDisplayMillis)
+        launchAnimationComplete = true
+    }
+    val launchVisible = !launchAnimationComplete || controller.route == AppRoute.Loading
+    LaunchedEffect(launchVisible) {
+        if (!launchVisible && !automaticUnlockEnabled) {
+            delay(PoctraLaunchExitMillis)
+            automaticUnlockEnabled = true
+        }
+    }
+
     Surface(color = SurfaceBase, modifier = Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize()) {
             when (controller.route) {
@@ -197,12 +251,17 @@ fun PoctraApp(activity: Activity, controller: PoctraController) {
                 AppRoute.Welcome -> WelcomeScreen(controller)
                 AppRoute.ImportWallet -> ImportWalletScreen(controller)
                 AppRoute.SecuritySetup -> SecuritySetupScreen(activity, controller)
-                AppRoute.Unlock -> UnlockScreen(activity, controller)
+                AppRoute.Unlock -> UnlockScreen(
+                    activity = activity,
+                    controller = controller,
+                    automaticUnlockEnabled = automaticUnlockEnabled,
+                )
                 AppRoute.Dashboard -> DashboardScreen(controller)
                 AppRoute.PrivacyEncrypt -> PrivacyEncryptScreen(controller)
                 AppRoute.PrivacyDecrypt -> PrivacyDecryptScreen(controller)
                 AppRoute.PrivacyStealth -> PrivacyStealthScreen(controller)
                 AppRoute.PrivacyClaim -> PrivacyClaimScreen(controller)
+                AppRoute.PrivacySettings -> PrivacySettingsScreen(controller)
                 AppRoute.Settings -> SettingsScreen(controller)
                 AppRoute.RpcManagement -> RpcManagementScreen(controller)
                 AppRoute.RpcAddNetwork -> AddRpcNetworkScreen(controller)
@@ -281,9 +340,23 @@ fun PoctraApp(activity: Activity, controller: PoctraController) {
             controller.pendingDAppRequest?.let { request ->
                 DAppApprovalDialog(
                     request = request,
+                    identityName = controller.wallet?.address?.let(controller::walletIdentityDomain),
+                    walletAddress = controller.wallet?.address,
                     onApprove = controller::approvePendingDAppRequest,
                     onReject = controller::rejectPendingDAppRequest,
                 )
+            }
+
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                AnimatedVisibility(
+                    visible = launchVisible,
+                    exit = fadeOut(animationSpec = tween(PoctraLaunchExitMillis.toInt())),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .zIndex(10_000f),
+                ) {
+                    PoctraLaunchScreen()
+                }
             }
         }
     }
@@ -292,12 +365,16 @@ fun PoctraApp(activity: Activity, controller: PoctraController) {
 @Composable
 private fun DAppApprovalDialog(
     request: PendingDAppRequest,
+    identityName: String?,
+    walletAddress: String?,
     onApprove: () -> Unit,
     onReject: () -> Unit,
 ) {
+    LaunchedEffect(request) {
+        if (BuildConfig.DEBUG) Log.d("PoctraDApp", "approval composable visible title=${request.title} origin=${request.origin}")
+    }
     val largeRequest = request.details.size > 4 || request.details.sumOf { it.value.length } > 220
-    var sheetVisible by remember(request) { mutableStateOf(false) }
-    LaunchedEffect(request) { sheetVisible = true }
+    val sheetVisible = true
     val scrimAlpha by animateFloatAsState(
         targetValue = if (sheetVisible) 0.52f else 0f,
         animationSpec = tween(ScrimMotionMillis),
@@ -333,7 +410,7 @@ private fun DAppApprovalDialog(
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(max = sheetMaxHeight)
+                        .heightIn(min = 280.dp, max = sheetMaxHeight)
                         .clickable(onClick = {})
                         .navigationBarsPadding(),
                     shape = RoundedCornerShape(topStart = Radius.md, topEnd = Radius.md),
@@ -342,6 +419,8 @@ private fun DAppApprovalDialog(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .heightIn(max = sheetMaxHeight)
+                            .verticalScroll(rememberScrollState())
                             .padding(horizontal = Space.x7, vertical = Space.x6),
                     ) {
                         Box(
@@ -394,7 +473,12 @@ private fun DAppApprovalDialog(
                                         .padding(horizontal = Space.x5, vertical = Space.x3),
                                 ) {
                                     request.details.forEachIndexed { index, item ->
-                                        DAppRequestDetailRow(item.label, item.value)
+                                        DAppRequestDetailRow(
+                                            label = item.label,
+                                            value = item.value,
+                                            identityName = identityName,
+                                            walletAddress = walletAddress,
+                                        )
                                         if (index != request.details.lastIndex) DetailSeparator()
                                     }
                                 }
@@ -438,7 +522,17 @@ private fun DAppApprovalDialog(
 }
 
 @Composable
-private fun DAppRequestDetailRow(label: String, value: String) {
+private fun DAppRequestDetailRow(
+    label: String,
+    value: String,
+    identityName: String? = null,
+    walletAddress: String? = null,
+) {
+    val warning = label.equals("Security warning", ignoreCase = true)
+    val displaysActiveWallet = label.lowercase() in setOf("wallet", "from", "owner") &&
+        !identityName.isNullOrBlank() &&
+        !walletAddress.isNullOrBlank() &&
+        value.trim().equals(walletAddress.trim(), ignoreCase = true)
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -447,19 +541,31 @@ private fun DAppRequestDetailRow(label: String, value: String) {
     ) {
         Text(
             label,
-            color = TextSecondary,
+            color = if (warning) Warning else TextSecondary,
             style = MaterialTheme.typography.labelSmall,
             modifier = Modifier.width(82.dp),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
         Spacer(Modifier.width(Space.x4))
-        Text(
-            value.ifBlank { "-" },
-            color = TextTertiary,
-            style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.weight(1f),
-        )
+        Column(modifier = Modifier.weight(1f)) {
+            if (displaysActiveWallet) {
+                Text(
+                    text = identityName.orEmpty(),
+                    color = SurfaceRaised,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(2.dp))
+            }
+            Text(
+                value.ifBlank { "-" },
+                color = if (warning) Warning else TextTertiary,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
     }
 }
 
@@ -577,7 +683,7 @@ private fun TransactionResultDialog(
                     Text(description, color = TextSecondary, textAlign = TextAlign.Center)
                     Spacer(Modifier.height(Space.x7))
                     TransactionProgressStepper(transaction = transaction, polling = polling)
-                    transaction.hash?.let { hash ->
+                    transaction.hash?.takeIf { it.isNotBlank() }?.let { hash ->
                         Spacer(Modifier.height(Space.x7))
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Text(
@@ -586,17 +692,21 @@ private fun TransactionResultDialog(
                                 style = MaterialTheme.typography.labelSmall,
                                 modifier = Modifier.weight(1f),
                             )
-                            if (transaction.status == TransactionFinality.Confirmed) {
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(Radius.sm))
+                                    .clickable(onClick = onViewTransaction)
+                                    .padding(horizontal = Space.x4, vertical = Space.x2),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
                                 Text(
                                     "View",
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(Radius.sm))
-                                        .clickable(onClick = onViewTransaction)
-                                        .padding(horizontal = Space.x4, vertical = Space.x2),
                                     color = SurfaceRaised,
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.SemiBold,
                                 )
+                                Spacer(Modifier.width(Space.x2))
+                                GlyphIcon(Glyph.External, Modifier.size(14.dp), SurfaceRaised)
                             }
                         }
                         Spacer(Modifier.height(Space.x2))
@@ -761,6 +871,22 @@ private fun EvmSendReviewContent(
             Text(evmSendAssetLabel(controller), color = TextSecondary, style = MaterialTheme.typography.labelSmall)
         }
     }
+    val account = controller.evmAccount
+    ReviewProcessFlow(
+        source = ReviewFlowEndpoint(
+            label = "From",
+            address = account?.address.orEmpty(),
+            identityName = account?.ensName,
+        ),
+        destination = ReviewFlowEndpoint(
+            label = "To",
+            address = controller.evmSendDialogRecipient,
+            identityName = controller.evmSendDialogRecipientIdentity,
+        ),
+        actionLabel = "Send",
+        actionGlyph = Glyph.Go,
+        modifier = Modifier.padding(top = Space.x5),
+    )
     Spacer(Modifier.height(Space.x6))
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -768,10 +894,6 @@ private fun EvmSendReviewContent(
         colors = CardDefaults.cardColors(containerColor = SurfaceBase),
     ) {
         Column(Modifier.padding(horizontal = Space.x6, vertical = Space.x3)) {
-            DetailLine("From", controller.evmAccount?.address ?: "Current EVM account")
-            DetailSeparator()
-            DetailLine("To", controller.evmSendDialogRecipient)
-            DetailSeparator()
             DetailLine("Asset", evmSendAssetLabel(controller))
             DetailSeparator()
             DetailLine("Amount", evmSendAmountLabel(controller))
@@ -924,13 +1046,14 @@ private fun EvmSendProgressContent(
             DetailLine("Amount", evmSendAmountLabel(controller))
             DetailSeparator()
             DetailLine("Network", controller.evmNetworkLabel())
-            transaction?.hash?.let { hash ->
+            transaction?.hash?.takeIf { it.isNotBlank() }?.let { hash ->
                 DetailSeparator()
                 DetailLine(
                     "Tx Hash",
                     hash,
-                    actionLabel = if (completed) "View" else null,
-                    onAction = if (completed) controller::openEvmSendExplorerTx else null,
+                    actionLabel = "View",
+                    actionGlyph = Glyph.External,
+                    onAction = controller::openEvmSendExplorerTx,
                 )
             }
             transaction?.reason?.takeIf { it.isNotBlank() }?.let { reason ->
@@ -944,17 +1067,6 @@ private fun EvmSendProgressContent(
         StateBanner("Preparing transaction...", isError = false, compact = true)
     } else {
         TransactionProgressStepper(transaction = transaction, polling = controller.transactionStatusPolling)
-    }
-    transaction?.hash?.takeIf { failed }?.let {
-        Spacer(Modifier.height(Space.x5))
-        PoctraButton(
-            text = "View on Explorer",
-            onClick = controller::openEvmSendExplorerTx,
-            modifier = Modifier.fillMaxWidth(),
-            variant = ButtonVariant.Ghost,
-            compact = true,
-            leadingGlyph = Glyph.External,
-        )
     }
     if (controller.evmSendCanSpeedUp) {
         Spacer(Modifier.height(Space.x5))
@@ -1095,12 +1207,6 @@ private fun TransactionProgressStepper(transaction: SubmittedTransaction, pollin
 
 @Composable
 private fun TxProgressStepRow(step: TxProgressStep, showLine: Boolean) {
-    val color = when (step.visual) {
-        TxStepVisual.Done -> SurfaceRaised
-        TxStepVisual.Active -> SurfaceRaised
-        TxStepVisual.Error -> ErrorRed
-        TxStepVisual.Pending -> TextSecondary
-    }
     val indicatorScale by animateFloatAsState(
         targetValue = if (step.visual == TxStepVisual.Active) 1.08f else 1f,
         animationSpec = tween(ScrimMotionMillis, easing = FastOutSlowInEasing),
@@ -1730,34 +1836,61 @@ private fun isWeakPin(pin: String): Boolean {
 }
 
 @Composable
-private fun UnlockScreen(activity: Activity, controller: PoctraController) {
+private fun UnlockScreen(
+    activity: Activity,
+    controller: PoctraController,
+    automaticUnlockEnabled: Boolean,
+) {
     val method = controller.currentSecurityMethod
     val lifecycleOwner = activity as? LifecycleOwner
     var pin by remember { mutableStateOf("") }
     var pinError by remember { mutableStateOf<String?>(null) }
     var biometricPromptActive by remember { mutableStateOf(false) }
+    var lifecycleStartRequest by remember { mutableIntStateOf(0) }
+    val biometricPromptGate = remember { com.poctra.wallet.security.BiometricPromptGate() }
+    val automaticPromptGate = remember { com.poctra.wallet.security.BiometricPromptGate() }
 
-    fun autoStartBiometricUnlock() {
-        if (method != SecurityMethod.Biometric || !controller.biometricAvailable || controller.busy || biometricPromptActive) return
+    fun startBiometricUnlock(): Boolean {
+        if (method != SecurityMethod.Biometric || !controller.biometricAvailable || controller.busy) return false
+        if (!biometricPromptGate.tryStart()) return false
         biometricPromptActive = true
         startUnlockBiometric(activity, controller) {
+            biometricPromptGate.finish()
             biometricPromptActive = false
         }
+        return true
     }
 
-    LaunchedEffect(method, controller.biometricAvailable, controller.busy) {
+    fun autoStartBiometricUnlock() {
+        if (!automaticUnlockEnabled) return
+        if (!automaticPromptGate.tryStart()) return
+        if (!startBiometricUnlock()) automaticPromptGate.finish()
+    }
+
+    LaunchedEffect(
+        method,
+        controller.biometricAvailable,
+        controller.busy,
+        automaticUnlockEnabled,
+        lifecycleStartRequest,
+    ) {
         if (lifecycleOwner?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.STARTED) == true) {
+            // Let the unlock content complete layout and draw before showing the system prompt.
+            withFrameNanos { }
+            withFrameNanos { }
             autoStartBiometricUnlock()
         }
     }
 
-    DisposableEffect(lifecycleOwner, method, controller.biometricAvailable) {
+    DisposableEffect(lifecycleOwner, method, controller.biometricAvailable, automaticUnlockEnabled) {
         if (lifecycleOwner == null) {
             onDispose { }
         } else {
             val observer = LifecycleEventObserver { _, event ->
-                if (event == Lifecycle.Event.ON_START) {
-                    autoStartBiometricUnlock()
+                when (event) {
+                    Lifecycle.Event.ON_START -> lifecycleStartRequest += 1
+                    Lifecycle.Event.ON_STOP -> automaticPromptGate.finish()
+                    else -> Unit
                 }
             }
             lifecycleOwner.lifecycle.addObserver(observer)
@@ -1798,10 +1931,10 @@ private fun UnlockScreen(activity: Activity, controller: PoctraController) {
                 Spacer(Modifier.height(Space.x6))
                 PoctraButton(
                     text = "Try Fingerprint Again",
-                    onClick = { startUnlockBiometric(activity, controller) },
+                    onClick = { startBiometricUnlock() },
                     modifier = Modifier.fillMaxWidth(),
                     loading = controller.busy,
-                    enabled = controller.biometricAvailable && !controller.busy,
+                    enabled = controller.biometricAvailable && !controller.busy && !biometricPromptActive,
                     leadingGlyph = Glyph.Fingerprint,
                 )
                 if (!controller.biometricAvailable) {
@@ -2951,6 +3084,7 @@ private fun MiniHeaderAction(
 private fun EvmAccountCard(controller: PoctraController) {
     val account = controller.evmAccount
     val network = controller.activeEvmNetwork
+    val derivedAddress = controller.currentEvmAddress()
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -2975,7 +3109,7 @@ private fun EvmAccountCard(controller: PoctraController) {
             Column(Modifier.weight(1f)) {
                 Text("EVM Account", color = TextTertiary, fontWeight = FontWeight.SemiBold)
                 Text(
-                    text = account?.address?.let(::shortAddress) ?: "Derived from active wallet",
+                    text = derivedAddress?.let(::shortAddress) ?: "EVM address unavailable",
                     color = TextSecondary,
                     style = MaterialTheme.typography.bodyMedium,
                     maxLines = 1,
@@ -3005,6 +3139,29 @@ private fun TradeContent(controller: PoctraController) {
     var showReview by remember { mutableStateOf(false) }
     var openedReviewKey by remember { mutableStateOf<String?>(null) }
     var dismissedReviewKey by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(controller.activeEvmNetwork?.id, controller.tradeAssets) {
+        val available = controller.tradeAssets
+        if (available.isEmpty()) return@LaunchedEffect
+        val nextFrom = available.firstOrNull { it.key == fromAsset.key }
+            ?: available.firstOrNull(TradeAsset::isWOct)
+            ?: available.first()
+        val outputs = tradeOutputAssets(nextFrom, available)
+        val nextTo = outputs.firstOrNull { it.key == toAsset.key }
+            ?: outputs.firstOrNull()
+            ?: available.firstOrNull { it.key != nextFrom.key }
+            ?: nextFrom
+        if (nextFrom.key != fromAsset.key || nextTo.key != toAsset.key) {
+            fromAsset = nextFrom
+            toAsset = nextTo
+            amount = ""
+            localError = null
+            controller.clearTradeQuote()
+        } else {
+            fromAsset = nextFrom
+            toAsset = nextTo
+        }
+    }
 
     LaunchedEffect(fromAsset, toAsset, amount, slippageBps) {
         val clean = amount.replace(",", ".").trim()
@@ -3062,7 +3219,7 @@ private fun TradeContent(controller: PoctraController) {
             localError = localError,
             onFromAssetChange = { selected ->
                 fromAsset = selected
-                toAsset = normalizeTradeToAsset(selected, toAsset)
+                toAsset = normalizeTradeToAsset(selected, toAsset, controller.tradeAssets)
                 amount = ""
                 localError = null
                 controller.clearTradeQuote()
@@ -3094,6 +3251,7 @@ private fun TradeContent(controller: PoctraController) {
                 localError = null
                 controller.clearTradeQuote()
             },
+            onAddAsset = controller::openEvmAddTokenFromTrade,
             onSubmit = {
                 val validation = when {
                     controller.tradeLoading -> "Wait until balances finish syncing."
@@ -3441,6 +3599,7 @@ private fun TradeSwapCard(
     onMax: () -> Unit,
     onSwapPair: () -> Unit,
     onSlippageChange: (Int) -> Unit,
+    onAddAsset: () -> Unit,
     onSubmit: () -> Unit,
 ) {
     Card(
@@ -3469,8 +3628,9 @@ private fun TradeSwapCard(
                 asset = fromAsset,
                 amount = amount,
                 balance = controller.tradeBalances.formatted(fromAsset),
-                selectableAssets = listOf(TradeAsset.WOCT, TradeAsset.ETH, TradeAsset.USDT),
+                selectableAssets = controller.tradeAssets,
                 onAssetChange = onFromAssetChange,
+                onAddAsset = onAddAsset,
                 onAmountChange = onAmountChange,
                 onMax = onMax,
                 enabled = !controller.tradeBusy,
@@ -3484,8 +3644,9 @@ private fun TradeSwapCard(
                 asset = toAsset,
                 amount = controller.tradeQuote?.amountOut ?: "",
                 balance = controller.tradeBalances.formatted(toAsset),
-                selectableAssets = if (fromAsset == TradeAsset.WOCT) listOf(TradeAsset.ETH, TradeAsset.USDT) else listOf(TradeAsset.WOCT),
+                selectableAssets = tradeOutputAssets(fromAsset, controller.tradeAssets),
                 onAssetChange = onToAssetChange,
+                onAddAsset = onAddAsset,
                 enabled = !controller.tradeBusy,
             )
             if (localError != null) {
@@ -3665,7 +3826,7 @@ private fun TradeReviewContent(
             Text("${fromAsset.symbol} -> ${toAsset.symbol}", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
         }
     }
-    Spacer(Modifier.height(Space.x6))
+    Spacer(Modifier.height(Space.x5))
     TradeReviewSummaryCard(
         controller = controller,
         fromAsset = fromAsset,
@@ -3810,10 +3971,8 @@ private fun TradeReviewKeyValue(label: String, value: String) {
     }
 }
 
-private fun compactTradeApprovalLabel(fromAsset: TradeAsset): String = when (fromAsset) {
-    TradeAsset.ETH -> "Not required"
-    else -> "ERC20 + Permit2 if needed"
-}
+private fun compactTradeApprovalLabel(fromAsset: TradeAsset): String =
+    if (fromAsset.isNative) "Not required" else "ERC20 + Permit2 if needed"
 
 @Composable
 private fun TradeReviewGasPanel(
@@ -4071,7 +4230,7 @@ private data class TradeUiStep(
 )
 
 private fun tradeUiSteps(fromAsset: TradeAsset): List<TradeUiStep> = buildList {
-    if (fromAsset != TradeAsset.ETH) {
+    if (!fromAsset.isNative) {
         add(TradeUiStep(TradeStep.TokenApproval, "Approve token", "Allow Permit2 to spend ${fromAsset.symbol}."))
         add(TradeUiStep(TradeStep.PermitApproval, "Approve route", "Allow Uniswap router to use this amount."))
     }
@@ -4094,10 +4253,9 @@ private fun tradeReviewSlippageLabel(slippageBps: Int): String {
     return "$whole.$fraction%"
 }
 
-private fun tradeReviewApprovalLabel(fromAsset: TradeAsset): String = when (fromAsset) {
-    TradeAsset.ETH -> "No ERC20 approval required"
-    else -> "ERC20 approval and Permit2 may be submitted if allowance is low"
-}
+private fun tradeReviewApprovalLabel(fromAsset: TradeAsset): String =
+    if (fromAsset.isNative) "No ERC20 approval required"
+    else "ERC20 approval and Permit2 may be submitted if allowance is low"
 
 @Composable
 private fun TradeAssetInputRow(
@@ -4107,6 +4265,7 @@ private fun TradeAssetInputRow(
     balance: String,
     selectableAssets: List<TradeAsset>,
     onAssetChange: (TradeAsset) -> Unit,
+    onAddAsset: () -> Unit,
     onAmountChange: (String) -> Unit,
     onMax: () -> Unit,
     enabled: Boolean,
@@ -4155,6 +4314,7 @@ private fun TradeAssetInputRow(
                     asset = asset,
                     selectableAssets = selectableAssets,
                     onSelect = onAssetChange,
+                    onAddAsset = onAddAsset,
                     enabled = enabled,
                     modifier = Modifier.width(128.dp),
                 )
@@ -4290,6 +4450,7 @@ private fun TradeAssetOutputRow(
     balance: String,
     selectableAssets: List<TradeAsset>,
     onAssetChange: (TradeAsset) -> Unit,
+    onAddAsset: () -> Unit,
     enabled: Boolean,
 ) {
     Card(
@@ -4319,6 +4480,7 @@ private fun TradeAssetOutputRow(
                     asset = asset,
                     selectableAssets = selectableAssets,
                     onSelect = onAssetChange,
+                    onAddAsset = onAddAsset,
                     enabled = enabled,
                     modifier = Modifier.width(128.dp),
                 )
@@ -4332,6 +4494,7 @@ private fun TradeAssetSelector(
     asset: TradeAsset,
     selectableAssets: List<TradeAsset>,
     onSelect: (TradeAsset) -> Unit,
+    onAddAsset: () -> Unit,
     enabled: Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -4362,7 +4525,7 @@ private fun TradeAssetSelector(
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    asset.displayName,
+                    tradeAssetSecondaryLabel(asset),
                     color = TextSecondary,
                     style = MaterialTheme.typography.labelSmall.copy(fontSize = 8.sp, lineHeight = 9.sp),
                     maxLines = 1,
@@ -4377,7 +4540,24 @@ private fun TradeAssetSelector(
         ) {
             selectableAssets.forEach { option ->
                 DropdownMenuItem(
-                    text = { Text(tradeAssetLabel(option), color = TextTertiary) },
+                    text = {
+                        Column {
+                            Text(
+                                tradeAssetLabel(option),
+                                color = TextTertiary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            if (!option.isNative) {
+                                Text(
+                                    shortAddress(option.address),
+                                    color = TextSecondary,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1,
+                                )
+                            }
+                        }
+                    },
                     leadingIcon = { TradeAssetIcon(option) },
                     onClick = {
                         onSelect(option)
@@ -4385,6 +4565,20 @@ private fun TradeAssetSelector(
                     },
                 )
             }
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        "Add asset",
+                        color = SurfaceRaised,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                },
+                leadingIcon = { GlyphIcon(Glyph.Plus, modifier = Modifier.size(16.dp), color = SurfaceRaised) },
+                onClick = {
+                    expanded = false
+                    onAddAsset()
+                },
+            )
         }
     }
 }
@@ -4395,31 +4589,41 @@ private fun TradeAssetIcon(asset: TradeAsset) {
         modifier = Modifier
             .size(24.dp)
             .clip(RoundedCornerShape(Radius.sm))
-            .background(if (asset == TradeAsset.WOCT) SurfaceRaised.copy(alpha = 0.18f) else SurfaceMuted),
+            .background(if (asset.isWOct) SurfaceRaised.copy(alpha = 0.18f) else SurfaceMuted),
         contentAlignment = Alignment.Center,
     ) {
-        if (asset == TradeAsset.WOCT) {
+        when {
+            asset.isWOct -> {
             Image(
                 painter = painterResource(com.poctra.wallet.R.drawable.octra_logo),
                 contentDescription = "wOCT",
                 modifier = Modifier.size(14.dp),
             )
-        } else {
+            }
+            asset.isNative -> {
             Image(
-                painter = painterResource(tradeAssetIconRes(asset)),
+                painter = painterResource(com.poctra.wallet.R.drawable.ic_eth),
                 contentDescription = asset.symbol,
                 modifier = Modifier.size(15.dp),
             )
+            }
+            asset.isUsdt -> {
+                Image(
+                    painter = painterResource(com.poctra.wallet.R.drawable.ic_usdt),
+                    contentDescription = asset.symbol,
+                    modifier = Modifier.size(15.dp),
+                )
+            }
+            else -> GlyphIcon(Glyph.Assets, modifier = Modifier.size(14.dp), color = SurfaceRaised)
         }
     }
 }
 
 private fun tradeAssetLabel(asset: TradeAsset): String = "${asset.symbol} (${asset.displayName})"
 
-private fun tradeAssetIconRes(asset: TradeAsset): Int = when (asset) {
-    TradeAsset.WOCT -> com.poctra.wallet.R.drawable.octra_logo
-    TradeAsset.ETH -> com.poctra.wallet.R.drawable.ic_eth
-    TradeAsset.USDT -> com.poctra.wallet.R.drawable.ic_usdt
+private fun tradeAssetSecondaryLabel(asset: TradeAsset): String = when {
+    asset.isNative || asset.isWOct || asset.isUsdt -> asset.displayName
+    else -> shortAddress(asset.address)
 }
 
 @Composable
@@ -4557,13 +4761,21 @@ private fun TradeInfoHint(
     }
 }
 
-private fun normalizeTradeToAsset(fromAsset: TradeAsset, currentTo: TradeAsset): TradeAsset {
-    if (fromAsset == TradeAsset.WOCT && currentTo != TradeAsset.WOCT) return currentTo
-    return if (fromAsset == TradeAsset.WOCT) TradeAsset.ETH else TradeAsset.WOCT
+private fun tradeOutputAssets(fromAsset: TradeAsset, availableAssets: List<TradeAsset>): List<TradeAsset> {
+    return availableAssets.filter { it.key != fromAsset.key }
+}
+
+private fun normalizeTradeToAsset(
+    fromAsset: TradeAsset,
+    currentTo: TradeAsset,
+    availableAssets: List<TradeAsset>,
+): TradeAsset {
+    val outputs = tradeOutputAssets(fromAsset, availableAssets)
+    return outputs.firstOrNull { it.key == currentTo.key } ?: outputs.firstOrNull() ?: currentTo
 }
 
 private fun tradeReviewKey(fromAsset: TradeAsset, toAsset: TradeAsset, amount: String, slippageBps: Int): String =
-    "${fromAsset.symbol}:${toAsset.symbol}:${amount.replace(",", ".").trim()}:$slippageBps"
+    "${fromAsset.key}:${toAsset.key}:${amount.replace(",", ".").trim()}:$slippageBps"
 
 @Composable
 private fun ExploreDAppsContent(controller: PoctraController) {
@@ -4693,7 +4905,6 @@ private fun CustomDAppLauncher(controller: PoctraController) {
             },
             label = "dApp URL",
             placeholder = "circle address, octra identity or dApp URL",
-            modifier = Modifier.height(54.dp),
             keyboardType = KeyboardType.Uri,
             leadingContent = if (showOctProtocol) {
                 { OctProtocolBadge() }
@@ -4723,6 +4934,7 @@ private fun CustomDAppLauncher(controller: PoctraController) {
             }
         }
     }
+
 }
 
 @Composable
@@ -4831,6 +5043,15 @@ private fun BrowserToolbarButton(
 
 @Composable
 private fun BrowserDisplayUrl(displayUrl: String) {
+    if (displayUrl.isBlank()) {
+        Text(
+            "Search or enter an address",
+            color = TextSecondary,
+            style = MaterialTheme.typography.labelSmall,
+            maxLines = 1,
+        )
+        return
+    }
     val isOctra = displayUrl.startsWith("oct://", ignoreCase = true)
     if (!isOctra) {
         Text(displayUrl, color = TextSecondary, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -4854,6 +5075,129 @@ private fun BrowserDisplayUrl(displayUrl: String) {
 }
 
 @Composable
+private fun DAppBrowserNewTab(controller: PoctraController) {
+    var destination by remember { mutableStateOf("") }
+    val shortcuts = controller.dAppCatalog.take(4)
+    LaunchedEffect(Unit) { controller.refreshDAppCatalog() }
+    val openDestination = {
+        val clean = destination.trim()
+        if (clean.isBlank()) {
+            controller.showError("Enter a Circle address, Octra Identity, or dApp URL.")
+        } else {
+            controller.openDAppBrowser(browserTabFallbackTitle(clean), clean)
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = Space.x7, vertical = Space.x8),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Spacer(Modifier.height(Space.x8))
+        Image(
+            painter = painterResource(com.poctra.wallet.R.drawable.poctra_logo),
+            contentDescription = "poctra",
+            modifier = Modifier.size(58.dp),
+        )
+        Spacer(Modifier.height(Space.x5))
+        Text("poctra", color = TextTertiary, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+        Text("Open Circle apps and dApps", color = TextSecondary, style = MaterialTheme.typography.bodySmall)
+        Spacer(Modifier.height(Space.x8))
+        PoctraTextField(
+            value = destination,
+            onValueChange = { destination = it },
+            label = "Search or enter address",
+            placeholder = "foo.oct, oct:// or https://",
+            keyboardType = KeyboardType.Uri,
+            singleLine = true,
+            leadingContent = {
+                GlyphIcon(Glyph.Explore, modifier = Modifier.size(16.dp), color = TextSecondary)
+            },
+            trailingContent = {
+                UrlGoButton(onClick = openDestination, enabled = destination.isNotBlank())
+            },
+        )
+        Spacer(Modifier.height(Space.x5))
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(Radius.md))
+                .background(SurfaceMuted.copy(alpha = 0.62f))
+                .padding(horizontal = Space.x5, vertical = Space.x3),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            GlyphIcon(Glyph.Wifi, modifier = Modifier.size(14.dp), color = SurfaceRaised)
+            Spacer(Modifier.width(Space.x3))
+            Text(
+                controller.activeRpcNetwork?.networkType?.replaceFirstChar { it.uppercase() } ?: "Network unavailable",
+                color = TextSecondary,
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
+        if (shortcuts.isNotEmpty()) {
+            Spacer(Modifier.height(Space.x8))
+            Text(
+                "Shortcuts",
+                modifier = Modifier.fillMaxWidth(),
+                color = TextTertiary,
+                style = MaterialTheme.typography.titleSmall,
+            )
+            Spacer(Modifier.height(Space.x5))
+            shortcuts.chunked(2).forEach { rowSites ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(Space.x4),
+                ) {
+                    rowSites.forEach { site ->
+                        DAppNewTabShortcut(
+                            site = site,
+                            onClick = { controller.openDAppBrowser(site.title, site.dappLink) },
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    if (rowSites.size == 1) Spacer(Modifier.weight(1f))
+                }
+                Spacer(Modifier.height(Space.x4))
+            }
+        }
+    }
+}
+
+@Composable
+private fun DAppNewTabShortcut(
+    site: DAppCatalogEntry,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .height(64.dp)
+            .clip(RoundedCornerShape(Radius.md))
+            .background(SurfaceMuted.copy(alpha = 0.72f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = Space.x4),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        DAppLogoView(
+            logoSvg = site.logoSvg,
+            contentDescription = "${site.title} logo",
+            size = 30.dp,
+        )
+        Spacer(Modifier.width(Space.x4))
+        Text(
+            site.title,
+            modifier = Modifier.weight(1f),
+            color = TextTertiary,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
 private fun OctProtocolLeftBadge() {
     val shape = RoundedCornerShape(
         topStart = Radius.sm,
@@ -4872,26 +5216,102 @@ private fun OctProtocolLeftBadge() {
     }
 }
 
+private class DAppBrowserWebViewSession(
+    val tabId: String,
+    initialUrl: String,
+) {
+    val bridgeToken: String = UUID.randomUUID().toString()
+    val originBinding = DAppOriginBinding(initialUrl)
+    var requestedUrl: String = initialUrl
+    var loadedRequestUrl: String = ""
+    var rendererGeneration by mutableStateOf(0)
+    var webView by mutableStateOf<WebView?>(null)
+    var pageLoading by mutableStateOf(initialUrl.isNotBlank())
+    var interactionLoading by mutableStateOf(false)
+    var interactionNonce by mutableStateOf(0)
+    var pageError by mutableStateOf<String?>(null)
+
+    fun destroy() {
+        val view = webView ?: return
+        webView = null
+        (view.parent as? ViewGroup)?.removeView(view)
+        runCatching { view.removeJavascriptInterface("PoctraAndroid") }
+        runCatching { view.stopLoading() }
+        runCatching { view.clearFormData() }
+        runCatching { view.clearHistory() }
+        runCatching { view.clearSslPreferences() }
+        runCatching { view.destroy() }
+    }
+}
+
 @Composable
 @SuppressLint("SetJavaScriptEnabled")
 @Suppress("DEPRECATION")
 private fun DAppBrowserScreen(controller: PoctraController) {
-    val url = controller.selectedDAppUrl.ifBlank { "https://octra.org" }
+    val url = controller.selectedDAppUrl
+    val isNewTab = url.isBlank()
+    val activeTabId = controller.activeDAppTabId
     val displayUrl = controller.circleDisplayUrl()
-    val bridgeToken = remember(url) { UUID.randomUUID().toString() }
-    var browserView by remember(url) { mutableStateOf<WebView?>(null) }
-    var pageLoading by remember(url) { mutableStateOf(true) }
-    var pageError by remember(url) { mutableStateOf<String?>(null) }
-    val currentBrowserView by rememberUpdatedState(browserView)
+    val browserSessions = remember(controller) { mutableMapOf<String, DAppBrowserWebViewSession>() }
+    val activeSession = activeTabId
+        ?.takeIf { !isNewTab }
+        ?.let { tabId -> browserSessions.getOrPut(tabId) { DAppBrowserWebViewSession(tabId, url) } }
+    var fileChooserCallback by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
+    val fileChooserLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        fileChooserCallback?.onReceiveValue(uris.takeIf { it.isNotEmpty() }?.toTypedArray())
+        fileChooserCallback = null
+    }
+    LaunchedEffect(activeTabId, activeSession?.interactionNonce) {
+        val session = activeSession ?: return@LaunchedEffect
+        val nonce = session.interactionNonce
+        if (nonce <= 0) return@LaunchedEffect
+        session.interactionLoading = true
+        delay(900)
+        if (session.interactionNonce == nonce) session.interactionLoading = false
+    }
 
-    DisposableEffect(url) {
-        onDispose {
-            currentBrowserView?.run {
-                runCatching { removeJavascriptInterface("PoctraAndroid") }
-                runCatching { stopLoading() }
-                runCatching { destroy() }
-            }
+    LaunchedEffect(controller.dAppBrowserTabs.map { it.id }) {
+        val openTabIds = controller.dAppBrowserTabs.mapTo(mutableSetOf()) { it.id }
+        browserSessions.keys.filterNot { it in openTabIds }.forEach { closedTabId ->
+            browserSessions.remove(closedTabId)?.destroy()
         }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            fileChooserCallback?.onReceiveValue(null)
+            fileChooserCallback = null
+            browserSessions.values.forEach(DAppBrowserWebViewSession::destroy)
+            browserSessions.clear()
+        }
+    }
+
+    DisposableEffect(activeTabId) {
+        activeSession?.webView?.onResume()
+        onDispose { activeSession?.webView?.onPause() }
+    }
+
+    val activeWalletAddress = controller.wallet?.address
+    val activeOctraNetworkId = controller.activeRpcNetwork?.id
+    LaunchedEffect(activeTabId, activeSession?.webView, activeWalletAddress, activeOctraNetworkId) {
+        val view = activeSession?.webView ?: return@LaunchedEffect
+        if (activeWalletAddress.isNullOrBlank()) return@LaunchedEffect
+        view.evaluateJavascript(
+            """
+            (function () {
+              try {
+                if (window.octra && typeof window.octra.request === 'function') {
+                  window.octra.request({ method: 'octra_accounts' }).catch(function () {});
+                }
+                var evm = window.poctraEthereum || (window.ethereum && window.ethereum.isPoctra ? window.ethereum : null);
+                if (evm && typeof evm.request === 'function') {
+                  evm.request({ method: 'eth_accounts' }).catch(function () {});
+                }
+              } catch (_) {}
+            })();
+            """.trimIndent(),
+            null,
+        )
     }
 
     Column(
@@ -4917,18 +5337,36 @@ private fun DAppBrowserScreen(controller: PoctraController) {
                     Text(controller.selectedDAppTitle.ifBlank { "dApp" }, color = TextTertiary, fontWeight = FontWeight.SemiBold, maxLines = 1)
                     BrowserDisplayUrl(displayUrl)
                 }
-                Spacer(Modifier.width(Space.x4))
-                BrowserToolbarButton(
-                    Glyph.Refresh,
-                    "Refresh",
-                    onClick = {
-                        pageLoading = true
-                        pageError = null
-                        browserView?.reload()
-                    },
-                )
+                Spacer(Modifier.width(Space.x3))
+                BrowserToolbarButton(Glyph.Plus, "New tab", controller::openDAppBrowserNewTab)
+                if (!isNewTab) {
+                    Spacer(Modifier.width(Space.x2))
+                    BrowserToolbarButton(
+                        Glyph.Refresh,
+                        "Refresh",
+                        onClick = {
+                            controller.invalidateActiveCircleAssetCache()
+                            activeSession?.pageLoading = true
+                            activeSession?.pageError = null
+                            activeSession?.webView?.reload()
+                        },
+                    )
+                }
             }
             DAppBrowserTabStrip(controller)
+            AnimatedVisibility(
+                visible = activeSession?.let { it.pageLoading || it.interactionLoading } == true,
+                enter = fadeIn(animationSpec = tween(ScrimMotionMillis)),
+                exit = fadeOut(animationSpec = tween(ScrimMotionMillis)),
+            ) {
+                LinearProgressIndicator(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(2.dp),
+                    color = SurfaceRaised,
+                    trackColor = Color.Transparent,
+                )
+            }
         }
         Box(
             modifier = Modifier
@@ -4936,14 +5374,56 @@ private fun DAppBrowserScreen(controller: PoctraController) {
                 .weight(1f)
                 .background(SurfaceBase),
         ) {
-            key(url) {
+            if (isNewTab) {
+                DAppBrowserNewTab(controller)
+            } else if (activeSession != null) key(activeTabId, activeSession.rendererGeneration) {
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
                     factory = { context ->
-                        WebView(context).apply {
-                            browserView = this
-                            setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                        (activeSession.webView ?: WebView(context).apply {
+                            activeSession.webView = this
                             webChromeClient = object : WebChromeClient() {
+                                override fun onShowFileChooser(
+                                    webView: WebView?,
+                                    filePathCallback: ValueCallback<Array<Uri>>?,
+                                    fileChooserParams: FileChooserParams?,
+                                ): Boolean {
+                                    if (filePathCallback == null) return false
+                                    fileChooserCallback?.onReceiveValue(null)
+                                    fileChooserCallback = filePathCallback
+                                    val accepted = fileChooserParams
+                                        ?.acceptTypes
+                                        ?.map(String::trim)
+                                        ?.filter { it.contains('/') && !it.contains(';') }
+                                        ?.distinct()
+                                        ?.takeIf { it.isNotEmpty() }
+                                        ?.toTypedArray()
+                                        ?: arrayOf("*/*")
+                                    return runCatching {
+                                        fileChooserLauncher.launch(accepted)
+                                        true
+                                    }.getOrElse {
+                                        fileChooserCallback?.onReceiveValue(null)
+                                        fileChooserCallback = null
+                                        false
+                                    }
+                                }
+
+                                override fun onReceivedTitle(view: WebView?, title: String?) {
+                                    super.onReceivedTitle(view, title)
+                                    controller.updateDAppBrowserPageTitle(title, activeSession.tabId)
+                                }
+
+                                override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage): Boolean {
+                                    if (BuildConfig.DEBUG) {
+                                        Log.d(
+                                            "PoctraDApp",
+                                            "console ${consoleMessage.messageLevel()} ${consoleMessage.sourceId()}:${consoleMessage.lineNumber()} ${consoleMessage.message()}",
+                                        )
+                                    }
+                                    return true
+                                }
+
                                 override fun onCreateWindow(
                                     view: WebView,
                                     isDialog: Boolean,
@@ -4982,71 +5462,37 @@ private fun DAppBrowserScreen(controller: PoctraController) {
                                     return true
                                 }
                             }
-                            webViewClient = object : WebViewClient() {
-                                override fun shouldOverrideUrlLoading(
-                                    view: WebView,
-                                    request: android.webkit.WebResourceRequest,
-                                ): Boolean {
-                                    val nextUrl = request.url?.toString().orEmpty()
-                                    val octraInput = controller.normalizeOctraBrowserInput(nextUrl)
-                                    if (octraInput != null) {
-                                        controller.openDAppBrowser("oct://", octraInput)
-                                        return true
+                            webViewClient = createDAppWebViewClient(
+                                controller = controller,
+                                bridgeToken = activeSession.bridgeToken,
+                                onNavigationStarted = activeSession.originBinding::onNavigationStarted,
+                                onPageCommitted = activeSession.originBinding::onPageCommitted,
+                                onLoadingChanged = { activeSession.pageLoading = it },
+                                onError = { activeSession.pageError = it },
+                                onRendererGone = { failedView, didCrash ->
+                                    if (activeSession.webView === failedView) activeSession.webView = null
+                                    runCatching { failedView.removeJavascriptInterface("PoctraAndroid") }
+                                    (failedView.parent as? ViewGroup)?.removeView(failedView)
+                                    runCatching { failedView.destroy() }
+                                    activeSession.loadedRequestUrl = ""
+                                    activeSession.rendererGeneration += 1
+                                    activeSession.pageLoading = false
+                                    activeSession.pageError = if (didCrash) {
+                                        "The dApp renderer stopped unexpectedly. Reload to continue."
+                                    } else {
+                                        "The dApp renderer was reclaimed. Reload to continue."
                                     }
-                                    if (request.isForMainFrame && controller.selectedCircleTarget != null && !controller.isCircleBrowserUrl(nextUrl)) {
-                                        controller.openDAppBrowserTab(browserTabFallbackTitle(nextUrl), nextUrl)
-                                        return true
-                                    }
-                                    if (request.isForMainFrame) {
-                                        val allowed = runCatching { DAppUrlPolicy.normalizeBrowserUrl(nextUrl) }.isSuccess
-                                        if (!allowed) {
-                                            pageLoading = false
-                                            pageError = "This dApp URL is blocked by Phishing Guard."
-                                            return true
-                                        }
-                                    }
-                                    return false
-                                }
-
-                                override fun shouldInterceptRequest(
-                                    view: WebView,
-                                    request: android.webkit.WebResourceRequest,
-                                ): WebResourceResponse? {
-                                    return dAppWebResourceResponse(controller, request, bridgeToken)
-                                }
-
-                                override fun onPageStarted(view: WebView, pageUrl: String?, favicon: android.graphics.Bitmap?) {
-                                    super.onPageStarted(view, pageUrl, favicon)
-                                    schedulePoctraProviderInjection(view, bridgeToken)
-                                    pageLoading = true
-                                    pageError = null
-                                }
-
-                                override fun onPageCommitVisible(view: WebView, pageUrl: String?) {
-                                    super.onPageCommitVisible(view, pageUrl)
-                                    schedulePoctraProviderInjection(view, bridgeToken)
-                                }
-
-                                override fun onPageFinished(view: WebView, pageUrl: String?) {
-                                    super.onPageFinished(view, pageUrl)
-                                    schedulePoctraProviderInjection(view, bridgeToken)
-                                    pageLoading = false
-                                }
-
-                                override fun onReceivedError(
-                                    view: WebView,
-                                    request: android.webkit.WebResourceRequest,
-                                    error: android.webkit.WebResourceError,
-                                ) {
-                                    super.onReceivedError(view, request, error)
-                                    if (request.isForMainFrame) {
-                                        pageLoading = false
-                                        pageError = error.description?.toString() ?: "Unable to load dApp."
-                                    }
-                                }
-                            }
+                                },
+                            )
                             settings.javaScriptEnabled = true
                             settings.domStorageEnabled = true
+                            settings.databaseEnabled = true
+                            settings.userAgentString = walletBrowserUserAgent(
+                                settings.userAgentString,
+                                BuildConfig.VERSION_NAME,
+                            )
+                            settings.setGeolocationEnabled(false)
+                            settings.saveFormData = false
                             settings.javaScriptCanOpenWindowsAutomatically = true
                             settings.setSupportMultipleWindows(true)
                             settings.allowFileAccess = false
@@ -5058,37 +5504,69 @@ private fun DAppBrowserScreen(controller: PoctraController) {
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                                 settings.safeBrowsingEnabled = true
                             }
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                                settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-                                CookieManager.getInstance().setAcceptThirdPartyCookies(this, false)
+                            settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                            // Modern wallet selectors commonly use embedded auth/session
+                            // frames. TLS, mixed content, and local file access stay strict.
+                            CookieManager.getInstance().setAcceptCookie(true)
+                            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                            if (BuildConfig.DEBUG) {
+                                Log.d("PoctraDApp", "wallet user-agent=${settings.userAgentString}")
                             }
                             addJavascriptInterface(
                                 PoctraProviderBridge(
                                     controller = controller,
-                                    currentOrigin = { canonicalizeOrigin(this.url ?: url) },
-                                    expectedToken = { bridgeToken },
+                                    currentOrigin = { activeSession.originBinding.resolve(this.url) },
+                                    expectedOrigin = {
+                                        activeSession.originBinding.trustedOrigin().ifBlank { activeSession.requestedUrl }
+                                    },
+                                    expectedToken = { activeSession.bridgeToken },
+                                    onPageInteraction = {
+                                        post { activeSession.interactionNonce += 1 }
+                                    },
+                                    writeClipboard = { value ->
+                                        runCatching {
+                                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                            clipboard.setPrimaryClip(ClipData.newPlainText("Circle app", value))
+                                            true
+                                        }.getOrDefault(false)
+                                    },
                                     evaluate = { script -> post { evaluateJavascript(script, null) } },
                                 ),
                                 "PoctraAndroid",
                             )
+                            installDocumentStartProvider(this, activeSession.bridgeToken, url)
+                            activeSession.requestedUrl = url
+                            activeSession.loadedRequestUrl = url
                             loadUrl(url)
+                        }).also { webView ->
+                            (webView.parent as? ViewGroup)?.removeView(webView)
+                            webView.onResume()
                         }
                     },
                     update = { webView ->
-                        browserView = webView
+                        activeSession.webView = webView
+                        activeSession.requestedUrl = url
+                        webView.onResume()
+                        if (activeSession.loadedRequestUrl != url) {
+                            activeSession.loadedRequestUrl = url
+                            activeSession.pageLoading = true
+                            activeSession.pageError = null
+                            webView.loadUrl(url)
+                        }
                     },
                 )
             }
-            if (pageLoading) {
-                DAppBrowserLoadingOverlay(title = controller.selectedDAppTitle.ifBlank { "dApp" }, url = displayUrl)
+            if (!isNewTab && activeSession?.pageLoading == true) {
+                DAppBrowserLoadingOverlay()
             }
-            pageError?.let { message ->
+            if (!isNewTab) activeSession?.pageError?.let { message ->
                 DAppBrowserErrorOverlay(
                     message = message,
                     onRetry = {
-                        pageLoading = true
-                        pageError = null
-                        browserView?.reload()
+                        controller.invalidateActiveCircleAssetCache()
+                        activeSession.pageLoading = true
+                        activeSession.pageError = null
+                        activeSession.webView?.reload()
                     },
                 )
             }
@@ -5102,12 +5580,200 @@ private fun DAppBrowserScreen(controller: PoctraController) {
             onSubmit = { passphrase ->
                 controller.submitCirclePassphrase(passphrase)
                 if (controller.circlePassphraseRequest == null) {
-                    pageLoading = true
-                    pageError = null
-                    browserView?.reload()
+                    activeSession?.pageLoading = true
+                    activeSession?.pageError = null
+                    activeSession?.webView?.reload()
                 }
             },
         )
+    }
+}
+
+private fun createDAppWebViewClient(
+    controller: PoctraController,
+    bridgeToken: String,
+    onNavigationStarted: (String?) -> Unit,
+    onPageCommitted: (String?) -> Unit,
+    onLoadingChanged: (Boolean) -> Unit,
+    onError: (String?) -> Unit,
+    onRendererGone: (WebView, Boolean) -> Unit,
+): WebViewClient = when {
+    Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1 -> PoctraDAppWebViewClientApi27(
+        controller,
+        bridgeToken,
+        onNavigationStarted,
+        onPageCommitted,
+        onLoadingChanged,
+        onError,
+        onRendererGone,
+    )
+    Build.VERSION.SDK_INT >= Build.VERSION_CODES.O -> PoctraDAppWebViewClientApi26(
+        controller,
+        bridgeToken,
+        onNavigationStarted,
+        onPageCommitted,
+        onLoadingChanged,
+        onError,
+        onRendererGone,
+    )
+    else -> PoctraDAppWebViewClient(
+        controller,
+        bridgeToken,
+        onNavigationStarted,
+        onPageCommitted,
+        onLoadingChanged,
+        onError,
+    )
+}
+
+private open class PoctraDAppWebViewClient(
+    private val controller: PoctraController,
+    private val bridgeToken: String,
+    private val onNavigationStarted: (String?) -> Unit,
+    private val onPageCommitted: (String?) -> Unit,
+    private val onLoadingChanged: (Boolean) -> Unit,
+    private val onError: (String?) -> Unit,
+) : WebViewClient() {
+    override fun shouldOverrideUrlLoading(
+        view: WebView,
+        request: android.webkit.WebResourceRequest,
+    ): Boolean {
+        val nextUrl = request.url?.toString().orEmpty()
+        val octraInput = controller.normalizeOctraBrowserInput(nextUrl)
+        if (octraInput != null) {
+            controller.openDAppBrowser("oct://", octraInput)
+            return true
+        }
+        if (request.isForMainFrame && controller.selectedCircleTarget != null && !controller.isCircleBrowserUrl(nextUrl)) {
+            controller.openDAppBrowserTab(browserTabFallbackTitle(nextUrl), nextUrl)
+            return true
+        }
+        if (request.isForMainFrame && runCatching { DAppUrlPolicy.normalizeBrowserUrl(nextUrl) }.isFailure) {
+            onLoadingChanged(false)
+            onError("This dApp URL is blocked by Phishing Guard.")
+            return true
+        }
+        if (request.isForMainFrame) onNavigationStarted(nextUrl)
+        return false
+    }
+
+    override fun shouldInterceptRequest(
+        view: WebView,
+        request: android.webkit.WebResourceRequest,
+    ): WebResourceResponse? {
+        // This native main-frame URL is available before document-start
+        // JavaScript executes, including after an HTTP redirect.
+        if (request.isForMainFrame) onNavigationStarted(request.url?.toString())
+        return dAppWebResourceResponse(view.context, controller, request, bridgeToken)
+    }
+
+    override fun onPageStarted(view: WebView, pageUrl: String?, favicon: android.graphics.Bitmap?) {
+        super.onPageStarted(view, pageUrl, favicon)
+        if (BuildConfig.DEBUG) Log.d("PoctraDApp", "page started url=${pageUrl ?: view.url}")
+        onNavigationStarted(pageUrl ?: view.url)
+        schedulePoctraProviderInjection(view, bridgeToken, pageUrl ?: view.url)
+        onLoadingChanged(true)
+        onError(null)
+    }
+
+    override fun onPageCommitVisible(view: WebView, pageUrl: String?) {
+        super.onPageCommitVisible(view, pageUrl)
+        if (BuildConfig.DEBUG) Log.d("PoctraDApp", "page committed url=${pageUrl ?: view.url}")
+        onPageCommitted(pageUrl ?: view.url)
+        schedulePoctraProviderInjection(view, bridgeToken, pageUrl ?: view.url)
+    }
+
+    override fun onPageFinished(view: WebView, pageUrl: String?) {
+        super.onPageFinished(view, pageUrl)
+        if (BuildConfig.DEBUG) Log.d("PoctraDApp", "page finished url=${pageUrl ?: view.url}")
+        onPageCommitted(pageUrl ?: view.url)
+        schedulePoctraProviderInjection(view, bridgeToken, pageUrl ?: view.url)
+        onLoadingChanged(isCircleLoadingBrowserUrl(pageUrl ?: view.url))
+    }
+
+    override fun onReceivedError(
+        view: WebView,
+        request: android.webkit.WebResourceRequest,
+        error: android.webkit.WebResourceError,
+    ) {
+        super.onReceivedError(view, request, error)
+        if (request.isForMainFrame) {
+            if (BuildConfig.DEBUG) Log.d("PoctraDApp", "page error url=${request.url} message=${error.description}")
+            onLoadingChanged(false)
+            onError(error.description?.toString() ?: "Unable to load dApp.")
+        }
+    }
+
+    override fun onReceivedSslError(
+        view: WebView,
+        handler: android.webkit.SslErrorHandler,
+        error: android.net.http.SslError,
+    ) {
+        handler.cancel()
+        val affectsVisiblePage = DAppSslPolicy.affectsVisiblePage(view.url, error.url)
+        if (BuildConfig.DEBUG) {
+            Log.d(
+                "PoctraDApp",
+                "ssl error page=${view.url} failed=${error.url} primary=${error.primaryError} visible=$affectsVisiblePage",
+            )
+        }
+        if (affectsVisiblePage) {
+            onLoadingChanged(false)
+            onError("The dApp certificate could not be verified.")
+        }
+    }
+}
+
+@TargetApi(Build.VERSION_CODES.O)
+private open class PoctraDAppWebViewClientApi26(
+    controller: PoctraController,
+    bridgeToken: String,
+    onNavigationStarted: (String?) -> Unit,
+    onPageCommitted: (String?) -> Unit,
+    onLoadingChanged: (Boolean) -> Unit,
+    onError: (String?) -> Unit,
+    private val onRendererGone: (WebView, Boolean) -> Unit,
+) : PoctraDAppWebViewClient(
+    controller,
+    bridgeToken,
+    onNavigationStarted,
+    onPageCommitted,
+    onLoadingChanged,
+    onError,
+) {
+    override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+        onRendererGone(view, detail.didCrash())
+        return true
+    }
+}
+
+@TargetApi(Build.VERSION_CODES.O_MR1)
+private class PoctraDAppWebViewClientApi27(
+    controller: PoctraController,
+    bridgeToken: String,
+    onNavigationStarted: (String?) -> Unit,
+    onPageCommitted: (String?) -> Unit,
+    private val onLoadingChanged: (Boolean) -> Unit,
+    private val onError: (String?) -> Unit,
+    onRendererGone: (WebView, Boolean) -> Unit,
+) : PoctraDAppWebViewClientApi26(
+    controller,
+    bridgeToken,
+    onNavigationStarted,
+    onPageCommitted,
+    onLoadingChanged,
+    onError,
+    onRendererGone,
+) {
+    override fun onSafeBrowsingHit(
+        view: WebView,
+        request: android.webkit.WebResourceRequest,
+        threatType: Int,
+        callback: SafeBrowsingResponse,
+    ) {
+        callback.backToSafety(true)
+        onLoadingChanged(false)
+        onError("Safe Browsing blocked this dApp.")
     }
 }
 
@@ -5314,20 +5980,35 @@ private fun circleWebResourceResponse(
 ): WebResourceResponse? {
     val requestUri = request.url ?: return null
     val host = requestUri.host.orEmpty()
-    if (!host.equals(PoctraController.CircleBrowserHost, ignoreCase = true)) {
-        return if (controller.selectedCircleTarget != null && !request.isForMainFrame) {
+    val normalizedHost = host.lowercase()
+    val isDirectCircleUri = requestUri.scheme.equals("oct", ignoreCase = true) &&
+        host.startsWith("oct") && host.length == 47
+    val isCircleHost = normalizedHost == PoctraController.CircleBrowserHost ||
+        normalizedHost.endsWith(".${PoctraController.CircleBrowserHost}")
+    if (!isCircleHost && !isDirectCircleUri) {
+        return if (
+            controller.selectedCircleTarget != null &&
+            !request.isForMainFrame &&
+            !controller.activeCircleAllowsGatewayRequests()
+        ) {
             emptyCircleResponse()
         } else {
             null
         }
     }
 
+    if (isDirectCircleUri) {
+        val assetPath = requestUri.path?.takeIf { it.isNotBlank() && it != "/" } ?: "/index.html"
+        return runCatching {
+            circleAssetResponse(controller.fetchCircleAssetForBrowser(host, assetPath), bridgeToken, request)
+        }.getOrElse { exception ->
+            circleResourceErrorResponse(exception, request.isForMainFrame)
+        }
+    }
+
     val segments = requestUri.pathSegments.orEmpty()
     if (segments.firstOrNull() == "loading") {
-        return circleHtmlResponse(
-            title = "Resolving oct://",
-            message = "Resolving Octra Identity and circle resource...",
-        )
+        return circleLoadingHtmlResponse()
     }
     if (segments.firstOrNull() == "error") {
         return circleHtmlResponse(
@@ -5336,11 +6017,29 @@ private fun circleWebResourceResponse(
         )
     }
 
+    if (segments.take(3) == listOf("api", "circle", "asset")) {
+        val circleId = requestUri.getQueryParameter("circle_id")
+            ?.trim()
+            ?.takeIf { it.startsWith("oct") && it.length == 47 }
+            ?: activeTargetCircleId(controller)
+            ?: return circleJsonErrorResponse("Circle address is required.", 400, "Bad Request")
+        val assetPath = requestUri.getQueryParameter("path")?.takeIf { it.isNotBlank() } ?: "/index.html"
+        return runCatching {
+            circleAssetJsonResponse(controller.fetchCircleAssetForBrowser(circleId, assetPath), request)
+        }.getOrElse { exception ->
+            if (isTransientCircleFailure(exception)) {
+                circleJsonErrorResponse(exception.message ?: "Circle RPC is temporarily unavailable.", 503, "Service Unavailable")
+            } else {
+                circleJsonErrorResponse(exception.message ?: "Circle asset was not found.", 404, "Not Found")
+            }
+        }
+    }
+
     val explicitCircleId = segments.takeIf { it.firstOrNull() == "oct" && it.size >= 2 }?.getOrNull(1)
     val activeTarget = controller.selectedCircleTarget
     val circleId = explicitCircleId ?: activeTarget?.circleId ?: return circleHtmlResponse(
-        title = "Resolving oct://",
-        message = "Waiting for circle target...",
+        title = "Circle unavailable",
+        message = "No active Circle target is available.",
     )
     val path = if (explicitCircleId != null) {
         val assetSegments = segments.drop(2)
@@ -5350,227 +6049,231 @@ private fun circleWebResourceResponse(
     }
 
     return runCatching {
-        circleAssetResponse(controller.fetchCircleAssetForBrowser(circleId, path), bridgeToken)
+        circleAssetResponse(controller.fetchCircleAssetForBrowser(circleId, path), bridgeToken, request)
     }.getOrElse { exception ->
-        circleHtmlResponse(
+        circleResourceErrorResponse(exception, request.isForMainFrame)
+    }
+}
+
+private fun circleResourceErrorResponse(exception: Throwable, isMainFrame: Boolean): WebResourceResponse {
+    val message = exception.message ?: "Unable to load oct:// resource."
+    if (isMainFrame) {
+        return circleHtmlResponse(
             title = "Circle resource unavailable",
-            message = exception.message ?: "Unable to load oct:// resource.",
-            statusCode = if (request.isForMainFrame) 200 else 404,
-            reasonPhrase = if (request.isForMainFrame) "OK" else "Not Found",
+            message = message,
+            statusCode = 200,
+            reasonPhrase = "OK",
         )
     }
+    val transient = isTransientCircleFailure(exception)
+    val body = message.toByteArray(Charsets.UTF_8)
+    return WebResourceResponse(
+        "text/plain",
+        "UTF-8",
+        if (transient) 503 else 404,
+        if (transient) "Service Unavailable" else "Not Found",
+        buildMap {
+            put("Cache-Control", "no-store")
+            put("Content-Length", body.size.toString())
+            put("X-Content-Type-Options", "nosniff")
+            if (transient) put("Retry-After", "1")
+        },
+        ByteArrayInputStream(body),
+    )
 }
 
 private fun dAppWebResourceResponse(
+    context: Context,
     controller: PoctraController,
     request: android.webkit.WebResourceRequest,
     bridgeToken: String,
-): WebResourceResponse? {
-    circleWebResourceResponse(controller, request, bridgeToken)?.let { return it }
-    if (controller.selectedCircleTarget != null) return null
-    if (!request.isForMainFrame) return null
-    if (!request.method.equals("GET", ignoreCase = true)) return null
-
-    val requestUri = request.url ?: return null
-    val scheme = requestUri.scheme.orEmpty()
-    if (!scheme.equals("http", ignoreCase = true) && !scheme.equals("https", ignoreCase = true)) return null
-    if (requestUri.host.equals(PoctraController.CircleBrowserHost, ignoreCase = true)) return null
-
-    runCatching { DAppUrlPolicy.normalizeBrowserUrl(requestUri.toString()) }.getOrElse { error ->
-        return circleHtmlResponse(
-            title = "Blocked dApp URL",
-            message = error.message ?: "This dApp URL is blocked by Phishing Guard.",
-            statusCode = 403,
-            reasonPhrase = "Forbidden",
-        )
-    }
-
-    return runCatching {
-        injectedDAppDocumentResponse(
-            url = requestUri.toString(),
-            requestHeaders = request.requestHeaders.orEmpty(),
-            bridgeToken = bridgeToken,
-        )
-    }.getOrNull()
+): WebResourceResponse? = when (
+    routeBrowserResource(
+        url = request.url.toString(),
+        method = request.method,
+        bridgeToken = bridgeToken,
+        circleBrowserHost = PoctraController.CircleBrowserHost,
+        hasActiveCircle = controller.selectedCircleTarget != null,
+        isMainFrame = request.isForMainFrame,
+        activeCircleAllowsGatewayRequests = controller.activeCircleAllowsGatewayRequests(),
+    )
+) {
+    BrowserResourceHandler.OctraRfc -> rfcO1InpageProviderResponse(context, request, bridgeToken)
+    BrowserResourceHandler.Circle -> circleWebResourceResponse(controller, request, bridgeToken)
+    BrowserResourceHandler.CommonWeb -> null
 }
 
-private fun injectedDAppDocumentResponse(
-    url: String,
-    requestHeaders: Map<String, String>,
+private fun rfcO1InpageProviderResponse(
+    context: Context,
+    request: android.webkit.WebResourceRequest,
     bridgeToken: String,
 ): WebResourceResponse? {
-    val connection = (URL(url).openConnection() as HttpURLConnection).apply {
-        instanceFollowRedirects = false
-        connectTimeout = 10_000
-        readTimeout = 15_000
-        requestMethod = "GET"
-        setRequestProperty("Accept-Encoding", "identity")
-        if (requestHeaders.none { it.key.equals("Accept", ignoreCase = true) }) {
-            setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-        }
-        if (requestHeaders.none { it.key.equals("User-Agent", ignoreCase = true) }) {
-            setRequestProperty(
-                "User-Agent",
-                "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36 Poctra/0.1",
-            )
-        }
-        requestHeaders.forEach { (key, value) ->
-            if (
-                key.isNotBlank() &&
-                value.isNotBlank() &&
-                !key.equals("Host", ignoreCase = true) &&
-                !key.equals("Accept-Encoding", ignoreCase = true) &&
-                !key.equals("Content-Length", ignoreCase = true) &&
-                !key.equals("Cookie", ignoreCase = true)
-            ) {
-                setRequestProperty(key, value)
-            }
-        }
-        CookieManager.getInstance().getCookie(url)?.takeIf { it.isNotBlank() }?.let {
-            setRequestProperty("Cookie", it)
-        }
-    }
-
-    return try {
-        val statusCode = connection.responseCode.takeIf { it >= 100 } ?: 200
-        val reasonPhrase = connection.responseMessage?.takeIf { it.isNotBlank() } ?: "OK"
-        if (statusCode in 300..399) {
-            dAppRedirectResponse(url, connection.getHeaderField("Location"))
-        } else {
-            val contentType = connection.contentType.orEmpty()
-            val mimeType = contentType.substringBefore(';').trim().ifBlank { "text/html" }
-            val charsetName = responseCharset(contentType)
-            val source = if (statusCode >= 400) connection.errorStream else connection.inputStream
-            val body = source?.use { it.readBytes() } ?: ByteArray(0)
-            val headers = filteredWebHeaders(connection.headerFields)
-
-            if (mimeType.equals("text/html", ignoreCase = true) || mimeType.equals("application/xhtml+xml", ignoreCase = true)) {
-                val charset = runCatching { Charset.forName(charsetName) }.getOrDefault(Charsets.UTF_8)
-                val html = body.toString(charset)
-                val injected = injectDAppProviderRuntime(html, bridgeToken).toByteArray(charset)
-                WebResourceResponse(
-                    mimeType,
-                    charsetName,
-                    statusCode,
-                    reasonPhrase,
-                    headers + mapOf("Cache-Control" to "no-store"),
-                    ByteArrayInputStream(injected),
-                )
-            } else {
-                WebResourceResponse(
-                    mimeType,
-                    charsetName,
-                    statusCode,
-                    reasonPhrase,
-                    headers,
-                    ByteArrayInputStream(body),
-                )
-            }
-        }
-    } finally {
-        connection.disconnect()
-    }
+    if (!request.method.equals("GET", ignoreCase = true)) return null
+    if (!isRfcO1InpageProviderRequest(request.url.toString(), bridgeToken)) return null
+    val rawProviderSource = context.assets.open("poctra-rfc-o1-inpage.js").bufferedReader().use { it.readText() }
+    val providerSource = replaceProviderIconMetadata(rawProviderSource)
+    val body = buildString {
+        if (BuildConfig.DEBUG) append("window.__poctraRfcO1Debug = true;\n")
+        append(providerSource)
+    }.toByteArray(Charsets.UTF_8)
+    if (BuildConfig.DEBUG) Log.d("PoctraDApp", "serving extension-compatible RFC-O-1 inpage provider")
+    return WebResourceResponse(
+        "application/javascript",
+        "UTF-8",
+        200,
+        "OK",
+        mapOf(
+            "Cache-Control" to "no-store",
+            "Content-Length" to body.size.toString(),
+            "X-Content-Type-Options" to "nosniff",
+        ),
+        ByteArrayInputStream(body),
+    )
 }
 
-private fun dAppRedirectResponse(baseUrl: String, location: String?): WebResourceResponse {
-    val targetUrl = location
-        ?.takeIf { it.isNotBlank() }
-        ?.let { runCatching { URL(URL(baseUrl), it).toString() }.getOrNull() }
-    val safeTargetUrl = targetUrl?.let {
-        runCatching { DAppUrlPolicy.normalizeBrowserUrl(it) }.getOrNull()
+private fun activeTargetCircleId(controller: PoctraController): String? =
+    controller.selectedCircleTarget?.circleId
+
+private fun circleAssetJsonResponse(
+    asset: CircleAsset,
+    request: android.webkit.WebResourceRequest,
+): WebResourceResponse {
+    val contentType = resolveCircleContentType(asset.contentType, asset.canonicalPath)
+    val payload = JSONObject()
+        .put("circle_id", asset.circleId)
+        .put("canonical_path", asset.canonicalPath)
+        .put("content_type", contentType.value)
+        .put("encoding", "identity")
+        .put("size_bytes", asset.sizeBytes.toString())
+        .put("body_b64", Base64.encodeToString(asset.body, Base64.NO_WRAP))
+        .toString()
+        .toByteArray(Charsets.UTF_8)
+    val body = if (request.method.equals("HEAD", ignoreCase = true)) ByteArray(0) else payload
+    return WebResourceResponse(
+        "application/json",
+        "UTF-8",
+        200,
+        "OK",
+        mapOf(
+            "Cache-Control" to "no-store",
+            "Content-Length" to payload.size.toString(),
+            "Access-Control-Allow-Origin" to "*",
+            "X-Content-Type-Options" to "nosniff",
+        ),
+        ByteArrayInputStream(body),
+    )
+}
+
+private fun circleJsonErrorResponse(message: String, statusCode: Int, reason: String): WebResourceResponse {
+    val body = JSONObject().put("error", message).toString().toByteArray(Charsets.UTF_8)
+    return WebResourceResponse(
+        "application/json",
+        "UTF-8",
+        statusCode,
+        reason,
+        mapOf("Cache-Control" to "no-store", "Content-Length" to body.size.toString()),
+        ByteArrayInputStream(body),
+    )
+}
+
+private fun circleAssetResponse(
+    asset: CircleAsset,
+    bridgeToken: String,
+    request: android.webkit.WebResourceRequest,
+): WebResourceResponse {
+    val contentType = resolveCircleContentType(asset.contentType, asset.canonicalPath)
+    if (request.isForMainFrame && !contentType.isHtml) {
+        return circleStandaloneAssetResponse(asset, contentType)
     }
-    if (safeTargetUrl.isNullOrBlank()) {
+    val mimeType = contentType.mediaType
+    val charset = contentType.charset
+    val fullBody = if (contentType.isHtml) {
+        injectCircleRuntime(asset, bridgeToken).toByteArray(Charsets.UTF_8)
+    } else {
+        asset.body
+    }
+    val range = request.requestHeaders["Range"]
+        ?.takeIf { !mimeType.equals("text/html", ignoreCase = true) }
+        ?.let { parseCircleByteRange(it, fullBody.size) }
+    val responseBody = range?.let { fullBody.copyOfRange(it.first, it.last + 1) } ?: fullBody
+    val isHead = request.method.equals("HEAD", ignoreCase = true)
+    val statusCode = if (range != null) 206 else 200
+    val headers = mutableMapOf(
+        "Cache-Control" to "no-store",
+        "X-Content-Type-Options" to "nosniff",
+        "Access-Control-Allow-Origin" to "*",
+        "Accept-Ranges" to "bytes",
+        "Content-Length" to responseBody.size.toString(),
+    )
+    if (range != null) headers["Content-Range"] = "bytes ${range.first}-${range.last}/${fullBody.size}"
+    return WebResourceResponse(
+        mimeType,
+        charset,
+        statusCode,
+        if (range != null) "Partial Content" else "OK",
+        headers,
+        ByteArrayInputStream(if (isHead) ByteArray(0) else responseBody),
+    )
+}
+
+private fun circleStandaloneAssetResponse(
+    asset: CircleAsset,
+    contentType: com.poctra.wallet.dapp.circle.CircleContentType,
+): WebResourceResponse {
+    val fileName = asset.canonicalPath.substringAfterLast('/').ifBlank { asset.canonicalPath }
+    if (!contentType.isPreviewable) {
         return circleHtmlResponse(
-            title = "Blocked dApp redirect",
-            message = "This dApp tried to redirect to a URL blocked by Phishing Guard.",
-            statusCode = 403,
-            reasonPhrase = "Forbidden",
+            title = "Preview unavailable",
+            message = "$fileName (${contentType.value}, ${asset.sizeBytes} bytes) cannot be previewed safely. Use a Circle download link to save the original file.",
         )
     }
-
+    val bodyContent = if (contentType.isImagePreview) {
+        val data = Base64.encodeToString(asset.body, Base64.NO_WRAP)
+        "<div class=\"image-preview\"><img src=\"data:${escapeHtml(contentType.value)};base64,$data\" alt=\"${escapeHtml(fileName)}\"></div>"
+    } else {
+        "<pre>${escapeHtml(asset.body.toString(Charsets.UTF_8))}</pre>"
+    }
     val html = """
-        <!doctype html>
-        <html>
-        <head>
-          <meta name="viewport" content="width=device-width, initial-scale=1" />
-          <meta http-equiv="refresh" content="0; url=${escapeHtml(safeTargetUrl)}" />
-        </head>
-        <body>
-          <script>window.location.replace(${JSONObject.quote(safeTargetUrl)});</script>
-        </body>
-        </html>
-    """.trimIndent()
+        <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+        <title>${escapeHtml(fileName)}</title><style>
+        :root{color-scheme:dark;background:#080b09;color:#f4f7f5;font-family:monospace}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#080b09}
+        main{padding:20px;max-width:1120px;margin:auto}header{display:flex;gap:10px;justify-content:space-between;align-items:baseline;margin-bottom:18px}small{color:#8e9b93}
+        pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.55;font-size:13px}.image-preview{min-height:calc(100vh - 80px);display:grid;place-items:center}.image-preview img{max-width:100%;max-height:calc(100vh - 80px);object-fit:contain}
+        </style></head><body><main><header><strong>${escapeHtml(fileName)}</strong><small>${escapeHtml(contentType.value)}</small></header>$bodyContent</main></body></html>
+    """.trimIndent().toByteArray(Charsets.UTF_8)
     return WebResourceResponse(
         "text/html",
         "UTF-8",
         200,
         "OK",
-        mapOf("Cache-Control" to "no-store", "X-Content-Type-Options" to "nosniff"),
-        ByteArrayInputStream(html.toByteArray(Charsets.UTF_8)),
-    )
-}
-
-private fun filteredWebHeaders(raw: Map<String?, List<String>>): Map<String, String> {
-    val blocked = setOf(
-        "content-length",
-        "content-encoding",
-        "content-security-policy",
-        "content-security-policy-report-only",
-    )
-    return raw.mapNotNull { (key, values) ->
-        val cleanKey = key?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-        if (cleanKey.lowercase() in blocked) return@mapNotNull null
-        val value = values.firstOrNull { it.isNotBlank() } ?: return@mapNotNull null
-        cleanKey to value
-    }.toMap()
-}
-
-private fun responseCharset(contentType: String): String =
-    contentType
-        .split(';')
-        .map { it.trim() }
-        .firstOrNull { it.startsWith("charset=", ignoreCase = true) }
-        ?.substringAfter('=')
-        ?.trim()
-        ?.ifBlank { null }
-        ?: "UTF-8"
-
-private fun injectDAppProviderRuntime(html: String, bridgeToken: String): String {
-    val script = "<script>${poctraProviderScript(bridgeToken)}</script>"
-    val head = Regex("<head[^>]*>", RegexOption.IGNORE_CASE).find(html)
-    return if (head != null) {
-        html.substring(0, head.range.last + 1) + script + html.substring(head.range.last + 1)
-    } else {
-        script + html
-    }
-}
-
-private fun circleAssetResponse(asset: CircleAsset, bridgeToken: String): WebResourceResponse {
-    val mimeType = asset.contentType.substringBefore(';').trim().ifBlank { "application/octet-stream" }
-    val charset = asset.contentType
-        .split(';')
-        .map { it.trim() }
-        .firstOrNull { it.startsWith("charset=", ignoreCase = true) }
-        ?.substringAfter('=')
-        ?.trim()
-        ?: if (mimeType.startsWith("text/") || mimeType.contains("json") || mimeType.contains("javascript")) "UTF-8" else null
-    val body = if (mimeType.equals("text/html", ignoreCase = true)) {
-        injectCircleRuntime(asset, bridgeToken).toByteArray(Charsets.UTF_8)
-    } else {
-        asset.body
-    }
-    return WebResourceResponse(
-        mimeType,
-        charset,
-        200,
-        "OK",
         mapOf(
             "Cache-Control" to "no-store",
+            "Content-Length" to html.size.toString(),
             "X-Content-Type-Options" to "nosniff",
-            "Access-Control-Allow-Origin" to "*",
         ),
-        ByteArrayInputStream(body),
+        ByteArrayInputStream(html),
     )
+}
+
+internal fun parseCircleByteRange(raw: String, size: Int): IntRange? {
+    if (size <= 0) return null
+    val match = Regex("^bytes=(\\d*)-(\\d*)$", RegexOption.IGNORE_CASE).matchEntire(raw.trim()) ?: return null
+    val startText = match.groupValues[1]
+    val endText = match.groupValues[2]
+    if (startText.isBlank() && endText.isBlank()) return null
+    val start: Int
+    val end: Int
+    if (startText.isBlank()) {
+        val suffix = endText.toLongOrNull()?.coerceAtMost(size.toLong())?.toInt() ?: return null
+        if (suffix <= 0) return null
+        start = size - suffix
+        end = size - 1
+    } else {
+        start = startText.toLongOrNull()?.takeIf { it < size }?.toInt() ?: return null
+        end = endText.toLongOrNull()?.coerceAtMost((size - 1).toLong())?.toInt() ?: (size - 1)
+        if (end < start) return null
+    }
+    return start..end
 }
 
 private fun injectCircleRuntime(asset: CircleAsset, bridgeToken: String): String {
@@ -5592,6 +6295,106 @@ private fun injectCircleRuntime(asset: CircleAsset, bridgeToken: String): String
           var pendingCircleDownloads = {};
           var pendingRpcFetches = [];
           var rpcFetchTimer = 0;
+          function installCircleTransactionSheetCompatibility() {
+            if (!document || !document.documentElement || window.__poctraCircleTransactionSheetCompatibilityInstalled) return;
+            window.__poctraCircleTransactionSheetCompatibilityInstalled = true;
+            var repairScheduled = false;
+            function repairTransactionSheet() {
+              var sheet = document.querySelector('.tx-progress-sheet');
+              if (!sheet) return;
+              var backdrop = sheet.closest('.tx-progress-backdrop') || sheet.parentElement;
+              var viewport = window.visualViewport;
+              var viewportLeft = viewport ? viewport.offsetLeft : 0;
+              var viewportTop = viewport ? viewport.offsetTop : 0;
+              var viewportWidth = viewport ? viewport.width : window.innerWidth;
+              var viewportHeight = viewport ? viewport.height : window.innerHeight;
+              var reportedBottomInset = Math.max(0, Math.round(window.innerHeight - (viewportTop + viewportHeight)));
+              var bottomReserve = Math.max(16, reportedBottomInset);
+              var maxHeight = Math.max(280, Math.floor(viewportHeight * 0.88));
+
+              if (backdrop) {
+                backdrop.style.setProperty('position', 'fixed', 'important');
+                backdrop.style.setProperty('inset', '0px', 'important');
+                backdrop.style.setProperty('width', Math.round(viewportWidth) + 'px', 'important');
+                backdrop.style.setProperty('height', Math.round(viewportHeight) + 'px', 'important');
+                backdrop.style.setProperty('min-height', Math.round(viewportHeight) + 'px', 'important');
+                backdrop.style.setProperty('max-height', Math.round(viewportHeight) + 'px', 'important');
+                backdrop.style.setProperty('display', 'flex', 'important');
+                backdrop.style.setProperty('align-items', 'flex-end', 'important');
+                backdrop.style.setProperty('justify-content', 'center', 'important');
+                backdrop.style.setProperty('padding', '0px', 'important');
+                backdrop.style.setProperty('overflow', 'hidden', 'important');
+                backdrop.style.setProperty('z-index', '2147482999', 'important');
+              }
+
+              sheet.style.setProperty('position', 'fixed', 'important');
+              sheet.style.setProperty('left', Math.round(viewportLeft) + 'px', 'important');
+              sheet.style.setProperty('right', 'auto', 'important');
+              sheet.style.setProperty('top', 'auto', 'important');
+              sheet.style.setProperty('bottom', Math.round(bottomReserve) + 'px', 'important');
+              sheet.style.setProperty('width', Math.round(viewportWidth) + 'px', 'important');
+              sheet.style.setProperty('max-width', Math.round(viewportWidth) + 'px', 'important');
+              sheet.style.setProperty('min-width', '0px', 'important');
+              sheet.style.setProperty('height', 'auto', 'important');
+              sheet.style.setProperty('min-height', '0px', 'important');
+              sheet.style.setProperty('max-height', maxHeight + 'px', 'important');
+              sheet.style.setProperty('transform', 'none', 'important');
+              sheet.style.setProperty('animation', 'none', 'important');
+              sheet.style.setProperty('overflow-y', 'auto', 'important');
+              sheet.style.setProperty('box-sizing', 'border-box', 'important');
+              sheet.style.setProperty('z-index', '2147483000', 'important');
+              sheet.setAttribute('data-poctra-circle-sheet-compat', 'true');
+
+              // WebView can report a collapsed intrinsic height for a portal
+              // during its first layout. Re-read after neutralizing the sheet
+              // transform, then provide a conservative floor only if needed.
+              sheet.getBoundingClientRect();
+              var measuredHeight = Math.max(sheet.scrollHeight || 0, sheet.offsetHeight || 0);
+              if (measuredHeight < 180) {
+                var hasResultActions = !!sheet.querySelector('.tx-modal-link, .tx-modal-action');
+                var heightFloor = Math.min(maxHeight, Math.floor(viewportHeight * (hasResultActions ? 0.62 : 0.50)));
+                sheet.style.setProperty('height', Math.max(300, heightFloor) + 'px', 'important');
+              }
+              if (${BuildConfig.DEBUG}) {
+                var rect = sheet.getBoundingClientRect();
+                try {
+                  console.log('[PoctraCircle] transaction sheet repaired rect=' +
+                    Math.round(rect.left) + ',' + Math.round(rect.top) + ',' +
+                    Math.round(rect.width) + 'x' + Math.round(rect.height) +
+                    ' scroll=' + sheet.scrollHeight + '/' + sheet.clientHeight);
+                } catch (_) {}
+              }
+            }
+            function scheduleRepair() {
+              if (repairScheduled) return;
+              repairScheduled = true;
+              var run = function () {
+                repairScheduled = false;
+                repairTransactionSheet();
+                window.setTimeout(repairTransactionSheet, 80);
+                window.setTimeout(repairTransactionSheet, 240);
+              };
+              if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(run);
+              else window.setTimeout(run, 16);
+            }
+            var observer = new MutationObserver(function (mutations) {
+              for (var index = 0; index < mutations.length; index++) {
+                if (mutations[index].addedNodes.length || mutations[index].removedNodes.length || mutations[index].type === 'characterData') {
+                  scheduleRepair();
+                  break;
+                }
+              }
+            });
+            observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+            document.addEventListener('click', scheduleRepair, true);
+            window.addEventListener('resize', scheduleRepair);
+            if (window.visualViewport) {
+              window.visualViewport.addEventListener('resize', scheduleRepair);
+              window.visualViewport.addEventListener('scroll', scheduleRepair);
+            }
+            scheduleRepair();
+          }
+          installCircleTransactionSheetCompatibility();
           function rejectNativeBridge(message) {
             return Promise.reject(new Error(message || 'OctraCircle native bridge is not available.'));
           }
@@ -5599,12 +6402,14 @@ private fun injectCircleRuntime(asset: CircleAsset, bridgeToken: String): String
             var entry = pendingCircleRequests[id];
             if (!entry) return;
             delete pendingCircleRequests[id];
+            clearTimeout(entry.timeout);
             entry.resolve(result);
           };
           window.__poctraCircleReject = function (id, code, message) {
             var entry = pendingCircleRequests[id];
             if (!entry) return;
             delete pendingCircleRequests[id];
+            clearTimeout(entry.timeout);
             var error = new Error(message || 'Circle request failed.');
             error.code = code;
             entry.reject(error);
@@ -5629,13 +6434,33 @@ private fun injectCircleRuntime(asset: CircleAsset, bridgeToken: String): String
             entry.link.removeAttribute('aria-disabled');
             try { console.error(message || 'Circle download failed.'); } catch (_) {}
           };
+          window.__poctraCircleClipboardResolve = function (id) {
+            var entry = pendingCircleRequests[id];
+            if (!entry) return;
+            delete pendingCircleRequests[id];
+            clearTimeout(entry.timeout);
+            entry.resolve();
+          };
+          window.__poctraCircleClipboardReject = function (id, message) {
+            var entry = pendingCircleRequests[id];
+            if (!entry) return;
+            delete pendingCircleRequests[id];
+            clearTimeout(entry.timeout);
+            entry.reject(new Error(message || 'Unable to copy text.'));
+          };
           function circleRequest(method, payload) {
             if (!window.PoctraAndroid || !window.PoctraAndroid.circleRequest) {
               return rejectNativeBridge();
             }
             return new Promise(function (resolve, reject) {
               var id = 'circle_' + String(++nextCircleRequestId);
-              pendingCircleRequests[id] = { resolve: resolve, reject: reject };
+              var timeout = setTimeout(function () {
+                delete pendingCircleRequests[id];
+                var error = new Error('Circle request timed out. Check the wallet approval dialog and retry.');
+                error.code = -32001;
+                reject(error);
+              }, 300000);
+              pendingCircleRequests[id] = { resolve: resolve, reject: reject, timeout: timeout };
               try {
                 window.PoctraAndroid.circleRequest(JSON.stringify({
                   id: id,
@@ -5647,6 +6472,7 @@ private fun injectCircleRuntime(asset: CircleAsset, bridgeToken: String): String
                 }));
               } catch (error) {
                 delete pendingCircleRequests[id];
+                clearTimeout(timeout);
                 reject(error);
               }
             });
@@ -5663,13 +6489,19 @@ private fun injectCircleRuntime(asset: CircleAsset, bridgeToken: String): String
             var value = typeof input === 'string'
               ? input
               : (input && input.url ? String(input.url) : '');
-            return value === rpcUrl ||
+            if (value === rpcUrl ||
               value === rpcUrl + '/rpc' ||
               value.indexOf(rpcUrl + '/') === 0 ||
               value === '/rpc' ||
               value === './rpc' ||
               value === window.RPC_URL ||
-              value === window.OCTRA_RPC_URL;
+              value === window.OCTRA_RPC_URL) return true;
+            try {
+              var parsed = new URL(value, window.location.href);
+              return /(?:^|\/)rpc\/?${'$'}/i.test(parsed.pathname || '');
+            } catch (_) {
+              return false;
+            }
           }
           function jsonRpcResponse(payload) {
             return new Response(JSON.stringify(payload), {
@@ -5741,6 +6573,32 @@ private fun injectCircleRuntime(asset: CircleAsset, bridgeToken: String): String
             })
           });
           try {
+            Object.defineProperty(navigator, 'clipboard', {
+              configurable: true,
+              enumerable: true,
+              value: Object.freeze({
+                writeText: function (value) {
+                  if (!window.PoctraAndroid || !window.PoctraAndroid.circleClipboardWrite) {
+                    return Promise.reject(new Error('Circle clipboard bridge is unavailable.'));
+                  }
+                  var id = 'clipboard_' + String(++nextCircleRequestId);
+                  return new Promise(function (resolve, reject) {
+                    var timeout = setTimeout(function () {
+                      delete pendingCircleRequests[id];
+                      reject(new Error('Clipboard write timed out.'));
+                    }, 15000);
+                    pendingCircleRequests[id] = { resolve: resolve, reject: reject, timeout: timeout };
+                    window.PoctraAndroid.circleClipboardWrite(JSON.stringify({
+                      id: id,
+                      bridgeToken: bridgeToken,
+                      text: String(value == null ? '' : value)
+                    }));
+                  });
+                }
+              })
+            });
+          } catch (_) {}
+          try {
             Object.defineProperty(window, 'RPC_URL', { configurable: true, value: rpcUrl });
             Object.defineProperty(window, 'OCTRA_RPC_URL', { configurable: true, value: rpcUrl });
           } catch (_) {
@@ -5755,26 +6613,172 @@ private fun injectCircleRuntime(asset: CircleAsset, bridgeToken: String): String
               }
               var options = init || {};
               var body = options.body;
-              if (input && typeof input !== 'string' && input.body && body == null) {
-                body = input.body;
-              }
-              return bodyText(body).then(function (text) {
+              var textPromise = body != null
+                ? bodyText(body)
+                : (input && typeof input.clone === 'function'
+                    ? input.clone().text()
+                    : Promise.resolve(''));
+              return textPromise.then(function (text) {
                 var payload = text ? JSON.parse(text) : {};
                 return rpcResponse(payload);
               });
             };
           }
-          function canonicalDownloadPath(raw) {
-            if (!raw || raw === '#') return '';
+          if (window.XMLHttpRequest) {
+            var NativeXMLHttpRequest = window.XMLHttpRequest;
+            function CircleXMLHttpRequest() {
+              this._native = null;
+              this._method = 'GET';
+              this._url = '';
+              this._headers = {};
+              this._responseHeaders = {};
+              this.readyState = 0;
+              this.status = 0;
+              this.statusText = '';
+              this.responseType = '';
+              this.response = null;
+              this.responseText = '';
+              this.responseURL = '';
+              this.timeout = 0;
+              this.withCredentials = false;
+              this._listeners = {};
+            }
+            CircleXMLHttpRequest.UNSENT = 0;
+            CircleXMLHttpRequest.OPENED = 1;
+            CircleXMLHttpRequest.HEADERS_RECEIVED = 2;
+            CircleXMLHttpRequest.LOADING = 3;
+            CircleXMLHttpRequest.DONE = 4;
+            CircleXMLHttpRequest.prototype.addEventListener = function (name, listener) {
+              if (typeof listener !== 'function') return;
+              (this._listeners[name] || (this._listeners[name] = [])).push(listener);
+            };
+            CircleXMLHttpRequest.prototype.removeEventListener = function (name, listener) {
+              this._listeners[name] = (this._listeners[name] || []).filter(function (entry) { return entry !== listener; });
+            };
+            CircleXMLHttpRequest.prototype._emit = function (name) {
+              var event = new Event(name);
+              var handler = this['on' + name];
+              if (typeof handler === 'function') try { handler.call(this, event); } catch (_) {}
+              (this._listeners[name] || []).slice().forEach(function (listener) {
+                try { listener.call(this, event); } catch (_) {}
+              }, this);
+            };
+            CircleXMLHttpRequest.prototype._syncNative = function () {
+              var native = this._native;
+              if (!native) return;
+              this.readyState = native.readyState;
+              this.status = native.status;
+              this.statusText = native.statusText;
+              this.response = native.response;
+              this.responseText = native.responseType && native.responseType !== 'text' ? '' : native.responseText;
+              this.responseURL = native.responseURL;
+            };
+            CircleXMLHttpRequest.prototype.open = function (method, url, async, user, password) {
+              this._method = String(method || 'GET').toUpperCase();
+              this._url = String(url || '');
+              if (!isCircleRpcTarget(this._url)) {
+                var native = this._native = new NativeXMLHttpRequest();
+                var self = this;
+                ['readystatechange', 'load', 'error', 'abort', 'timeout', 'loadend', 'progress'].forEach(function (name) {
+                  native.addEventListener(name, function () { self._syncNative(); self._emit(name); });
+                });
+                native.open(method, url, async !== false, user, password);
+                this.readyState = native.readyState;
+              } else {
+                this.readyState = 1;
+                this._emit('readystatechange');
+              }
+            };
+            CircleXMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+              if (this._native) this._native.setRequestHeader(name, value);
+              else this._headers[String(name)] = String(value);
+            };
+            CircleXMLHttpRequest.prototype.getResponseHeader = function (name) {
+              return this._native ? this._native.getResponseHeader(name) : (this._responseHeaders[String(name).toLowerCase()] || null);
+            };
+            CircleXMLHttpRequest.prototype.getAllResponseHeaders = function () {
+              if (this._native) return this._native.getAllResponseHeaders();
+              return Object.keys(this._responseHeaders).map(function (key) { return key + ': ' + this._responseHeaders[key]; }, this).join('\r\n');
+            };
+            CircleXMLHttpRequest.prototype.overrideMimeType = function (value) {
+              if (this._native) this._native.overrideMimeType(value);
+            };
+            CircleXMLHttpRequest.prototype.abort = function () {
+              if (this._native) this._native.abort();
+              this.readyState = 0;
+              this._emit('abort');
+              this._emit('loadend');
+            };
+            CircleXMLHttpRequest.prototype.send = function (body) {
+              if (this._native) {
+                this._native.responseType = this.responseType;
+                this._native.timeout = this.timeout;
+                this._native.withCredentials = this.withCredentials;
+                this._native.send(body);
+                return;
+              }
+              var self = this;
+              window.fetch(this._url, { method: this._method, headers: this._headers, body: body }).then(function (response) {
+                self.status = response.status;
+                self.statusText = response.statusText;
+                self.responseURL = self._url;
+                self._responseHeaders = { 'content-type': response.headers.get('content-type') || 'application/json' };
+                self.readyState = 2;
+                self._emit('readystatechange');
+                return response.text();
+              }).then(function (text) {
+                self.readyState = 4;
+                self.responseText = text;
+                if (self.responseType === 'json') {
+                  try { self.response = JSON.parse(text); } catch (_) { self.response = null; }
+                } else {
+                  self.response = text;
+                }
+                self._emit('readystatechange');
+                self._emit('load');
+                self._emit('loadend');
+              }).catch(function () {
+                self.readyState = 4;
+                self.status = 0;
+                self._emit('readystatechange');
+                self._emit('error');
+                self._emit('loadend');
+              });
+            };
+            window.XMLHttpRequest = CircleXMLHttpRequest;
+          }
+          function canonicalDownloadResource(raw) {
+            if (!raw || raw === '#') return null;
             try {
               var parsed = new URL(raw, window.location.href);
+              if (parsed.protocol === 'oct:') {
+                return {
+                  circleId: parsed.hostname,
+                  path: parsed.pathname && parsed.pathname !== '/' ? parsed.pathname : '/index.html'
+                };
+              }
+              var segments = (parsed.pathname || '').split('/').filter(Boolean).map(function (segment) {
+                try { return decodeURIComponent(segment); } catch (_) { return segment; }
+              });
+              if (segments[0] === 'oct' && segments.length >= 2) {
+                return {
+                  circleId: segments[1],
+                  path: segments.length > 2 ? '/' + segments.slice(2).join('/') : '/index.html'
+                };
+              }
               var path = parsed.pathname || '';
               var prefix = '/oct/' + context.circle_id;
               if (path === prefix) path = context.path || '/index.html';
               if (path.indexOf(prefix + '/') === 0) path = path.slice(prefix.length);
-              return path.charAt(0) === '/' ? path : '/' + path;
+              return {
+                circleId: context.circle_id,
+                path: path.charAt(0) === '/' ? path : '/' + path
+              };
             } catch (_) {
-              return raw.charAt(0) === '/' ? raw : '/' + raw;
+              return {
+                circleId: context.circle_id,
+                path: raw.charAt(0) === '/' ? raw : '/' + raw
+              };
             }
           }
           function downloadMime(fileName, explicitMime) {
@@ -5788,19 +6792,19 @@ private fun injectCircleRuntime(asset: CircleAsset, bridgeToken: String): String
           function circleDownloadSpec(link) {
             var declared = link.getAttribute('data-circle-download-parts') || '';
             var href = link.getAttribute('href') || '';
-            var parts = declared.split(/[\n,]+/).map(function (item) {
-              return canonicalDownloadPath(item.trim());
+            var resources = declared.split(/[\n,]+/).map(function (item) {
+              return canonicalDownloadResource(item.trim());
             }).filter(Boolean);
-            if (!parts.length) {
-              var directPath = canonicalDownloadPath(href);
+            if (!resources.length) {
+              var directResource = canonicalDownloadResource(href);
               var isDownload = link.hasAttribute('download') || /\.(apk|exe|msi|pdf|zip|7z|rar|dmg|deb|rpm|tar|gz|csv|docx?|xlsx?|pptx?)(?:$|[?#])/i.test(href);
-              if (!isDownload || !directPath) return null;
-              parts = [directPath];
+              if (!isDownload || !directResource) return null;
+              resources = [directResource];
             }
-            var fallback = parts[parts.length - 1].split('/').pop().replace(/\.part\d+$/i, '');
+            var fallback = resources[resources.length - 1].path.split('/').pop().replace(/\.part\d+$/i, '');
             var fileName = link.getAttribute('data-circle-download-name') || link.getAttribute('download') || fallback || 'circle-download';
             return {
-              paths: parts,
+              resources: resources,
               fileName: fileName,
               mimeType: downloadMime(fileName, link.getAttribute('data-circle-download-type') || link.getAttribute('type') || ''),
               sha256: link.getAttribute('data-circle-download-sha256') || ''
@@ -5816,12 +6820,12 @@ private fun injectCircleRuntime(asset: CircleAsset, bridgeToken: String): String
             if (!window.PoctraAndroid || !window.PoctraAndroid.circleDownload) return;
             var id = 'download_' + String(++nextCircleRequestId);
             pendingCircleDownloads[id] = { link: link, originalHtml: link.innerHTML };
-            link.textContent = 'Preparing 0/' + spec.paths.length;
+            link.textContent = 'Preparing 0/' + spec.resources.length;
             link.setAttribute('aria-disabled', 'true');
             window.PoctraAndroid.circleDownload(JSON.stringify({
               id: id,
               bridgeToken: bridgeToken,
-              paths: spec.paths,
+              resources: spec.resources,
               fileName: spec.fileName,
               mimeType: spec.mimeType,
               sha256: spec.sha256
@@ -5869,6 +6873,28 @@ private fun circleHtmlResponse(
     )
 }
 
+private fun circleLoadingHtmlResponse(): WebResourceResponse {
+    val body = """
+        <!doctype html>
+        <html><head><meta name="viewport" content="width=device-width, initial-scale=1" />
+        <style>html,body{margin:0;min-height:100%;background:#0f100e}</style></head><body></body></html>
+    """.trimIndent().toByteArray(Charsets.UTF_8)
+    return WebResourceResponse(
+        "text/html",
+        "UTF-8",
+        200,
+        "OK",
+        mapOf("Cache-Control" to "no-store", "Content-Length" to body.size.toString()),
+        ByteArrayInputStream(body),
+    )
+}
+
+private fun isCircleLoadingBrowserUrl(value: String?): Boolean = runCatching {
+    val uri = Uri.parse(value.orEmpty())
+    uri.host.equals(PoctraController.CircleBrowserHost, ignoreCase = true) &&
+        uri.pathSegments.firstOrNull().equals("loading", ignoreCase = true)
+}.getOrDefault(false)
+
 private fun emptyCircleResponse(): WebResourceResponse =
     WebResourceResponse(
         "text/plain",
@@ -5888,7 +6914,7 @@ private fun escapeHtml(value: String): String =
         .replace("'", "&#39;")
 
 @Composable
-private fun DAppBrowserLoadingOverlay(title: String, url: String) {
+private fun DAppBrowserLoadingOverlay() {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -5901,19 +6927,9 @@ private fun DAppBrowserLoadingOverlay(title: String, url: String) {
                 .padding(Space.x8),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Box(
-                modifier = Modifier
-                    .size(54.dp)
-                    .clip(RoundedCornerShape(Radius.md))
-                    .background(SurfaceStrong),
-                contentAlignment = Alignment.Center,
-            ) {
-                CircularProgressIndicator(color = SurfaceRaised, modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
-            }
-            Spacer(Modifier.height(Space.x7))
-            Text("Opening $title", color = TextTertiary, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
-            Spacer(Modifier.height(Space.x3))
-            Text(url, color = TextSecondary, style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            CircularProgressIndicator(color = SurfaceRaised, modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+            Spacer(Modifier.height(Space.x5))
+            Text("Loading", color = TextSecondary, style = MaterialTheme.typography.bodySmall)
         }
     }
 }
@@ -5944,150 +6960,465 @@ private fun DAppBrowserErrorOverlay(message: String, onRetry: () -> Unit) {
     }
 }
 
-private class PoctraProviderBridge(
-    private val controller: PoctraController,
-    private val currentOrigin: () -> String,
-    private val expectedToken: () -> String,
-    private val evaluate: (String) -> Unit,
-) {
-    @JavascriptInterface
-    fun request(payload: String) {
-        val json = runCatching { JSONObject(payload) }.getOrNull()
-        val id = json?.optString("id").orEmpty()
-        val token = json?.optString("bridgeToken").orEmpty()
-        val method = json?.optString("method").orEmpty()
-        if (token.isBlank() || token != expectedToken()) {
-            if (method == "octra_requestAccounts") {
-                controller.showError("Unable to connect dApp. Refresh the page and try again.")
-            }
-            reject(id, -32600, "Invalid poctra bridge token.")
-            return
-        }
-        val origin = json?.optString("origin").orEmpty().ifBlank {
-            runCatching { currentOrigin() }.getOrDefault("")
-        }
-        controller.handleDAppBridgeRequest(
-            originRaw = origin,
-            payload = payload,
-            onSuccess = { resultJson ->
-                evaluate(
-                    "window.__poctraResolve && window.__poctraResolve(" +
-                        "${JSONObject.quote(id)},$resultJson);",
-                )
-            },
-            onError = { code, message ->
-                evaluate(
-                    "window.__poctraReject && window.__poctraReject(" +
-                        "${JSONObject.quote(id)},$code,${JSONObject.quote(message)});",
-                )
-            },
-        )
-    }
-
-    @JavascriptInterface
-    fun circleRequest(payload: String) {
-        val json = runCatching { JSONObject(payload) }.getOrNull()
-        val id = json?.optString("id").orEmpty()
-        val token = json?.optString("bridgeToken").orEmpty()
-        if (token.isBlank() || token != expectedToken()) {
-            rejectCircle(id, -32600, "Invalid poctra circle bridge token.")
-            return
-        }
-        controller.handleCircleBridgeRequest(
-            payload = payload,
-            onSuccess = { resultJson ->
-                evaluate(
-                    "window.__poctraCircleResolve && window.__poctraCircleResolve(" +
-                        "${JSONObject.quote(id)},$resultJson);",
-                )
-            },
-            onError = { code, message ->
-                rejectCircle(id, code, message)
-            },
-        )
-    }
-
-    @JavascriptInterface
-    fun circleDownload(payload: String) {
-        val json = runCatching { JSONObject(payload) }.getOrNull()
-        val id = json?.optString("id").orEmpty()
-        val token = json?.optString("bridgeToken").orEmpty()
-        if (token.isBlank() || token != expectedToken()) {
-            rejectCircleDownload(id, "Invalid poctra circle download token.")
-            return
-        }
-        val pathsJson = json?.optJSONArray("paths")
-        val paths = mutableListOf<String>()
-        if (pathsJson != null) {
-            for (index in 0 until pathsJson.length()) {
-                pathsJson.optString(index).takeIf { it.isNotBlank() }?.let(paths::add)
-            }
-        }
-        controller.downloadCircleAssets(
-            paths = paths,
-            fileName = json?.optString("fileName").orEmpty(),
-            mimeType = json?.optString("mimeType").orEmpty(),
-            expectedSha256 = json?.optString("sha256")?.ifBlank { null },
-            onProgress = { completed, total ->
-                evaluate(
-                    "window.__poctraCircleDownloadProgress && window.__poctraCircleDownloadProgress(" +
-                        "${JSONObject.quote(id)},$completed,$total);",
-                )
-            },
-            onSuccess = {
-                evaluate(
-                    "window.__poctraCircleDownloadDone && window.__poctraCircleDownloadDone(" +
-                        "${JSONObject.quote(id)});",
-                )
-            },
-            onError = { message -> rejectCircleDownload(id, message) },
-        )
-    }
-
-    private fun reject(id: String, code: Int, message: String) {
-        if (id.isBlank()) return
-        evaluate(
-            "window.__poctraReject && window.__poctraReject(" +
-                "${JSONObject.quote(id)},$code,${JSONObject.quote(message)});",
-        )
-    }
-
-    private fun rejectCircle(id: String, code: Int, message: String) {
-        if (id.isBlank()) return
-        evaluate(
-            "window.__poctraCircleReject && window.__poctraCircleReject(" +
-                "${JSONObject.quote(id)},$code,${JSONObject.quote(message)});",
-        )
-    }
-
-    private fun rejectCircleDownload(id: String, message: String) {
-        if (id.isBlank()) return
-        evaluate(
-            "window.__poctraCircleDownloadError && window.__poctraCircleDownloadError(" +
-                "${JSONObject.quote(id)},${JSONObject.quote(message)});",
-        )
-    }
-}
-
-private fun injectPoctraProvider(webView: WebView, bridgeToken: String) {
+private fun injectPoctraProvider(webView: WebView, bridgeToken: String, targetUrl: String?) {
     runCatching {
-        webView.evaluateJavascript(poctraProviderScript(bridgeToken), null)
+        val script = if (requiresNavigationLifecycleProvider(targetUrl.orEmpty())) {
+            androidRfcO1ContentBridgeScript(bridgeToken)
+        } else {
+            poctraProviderScript(bridgeToken)
+        }
+        webView.evaluateJavascript(script, null)
     }
 }
 
-private fun schedulePoctraProviderInjection(webView: WebView, bridgeToken: String) {
-    injectPoctraProvider(webView, bridgeToken)
+private fun installDocumentStartProvider(webView: WebView, bridgeToken: String, targetUrl: String) {
+    val supported = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
+    if (BuildConfig.DEBUG) Log.d("PoctraDApp", "document-start supported=$supported")
+    if (!supported) return
+    runCatching {
+        val script = if (requiresNavigationLifecycleProvider(targetUrl)) {
+            androidRfcO1ContentBridgeScript(bridgeToken)
+        } else {
+            poctraProviderScript(bridgeToken)
+        }
+        WebViewCompat.addDocumentStartJavaScript(
+            webView,
+            script,
+            // EVM dApps commonly redirect to a different HTTPS subdomain before
+            // their application code runs. Android WebView accepts the global
+            // origin rule here; the script has a top-frame guard and native
+            // origin validation still gates every wallet request.
+            setOf("*"),
+        )
+        if (BuildConfig.DEBUG) Log.d("PoctraDApp", "document-start provider installed")
+    }.onFailure { error ->
+        if (BuildConfig.DEBUG) Log.d("PoctraDApp", "document-start provider failed=${error.message}")
+    }
+}
+
+private fun schedulePoctraProviderInjection(webView: WebView, bridgeToken: String, targetUrl: String?) {
+    injectPoctraProvider(webView, bridgeToken, targetUrl)
     listOf(80L, 250L, 750L, 1_500L, 3_000L).forEach { delayMs ->
         webView.postDelayed({
-            injectPoctraProvider(webView, bridgeToken)
+            injectPoctraProvider(webView, bridgeToken, webView.url)
         }, delayMs)
     }
 }
 
+private fun androidRfcO1ContentBridgeScript(bridgeToken: String): String {
+    val inpagePath = rfcO1InpageProviderPath(bridgeToken)
+    return """
+        (function () {
+          var bridgeToken = ${JSONObject.quote(bridgeToken)};
+          var targetOrigin = window.location.origin === 'null' ? '*' : window.location.origin;
+          if (!window.__poctraAndroidRfcO1RelayInstalled) {
+            window.__poctraAndroidRfcO1RelayInstalled = true;
+            if (${BuildConfig.DEBUG}) {
+              try { console.log('[PoctraRelay] relay installed origin=' + window.location.origin); } catch (_) {}
+            }
+            window.addEventListener('message', function (event) {
+              if (event.source !== window) return;
+              if (window.location.origin !== 'null' && event.origin !== window.location.origin) return;
+              var data = event.data;
+              if (!data || data.source !== 'poctra-inpage' || typeof data.id !== 'string') return;
+              if (!data.id || data.id.length > 128 || typeof data.method !== 'string') return;
+              if (${BuildConfig.DEBUG}) {
+                try { console.log('[PoctraRelay] request id=' + data.id + ' method=' + data.method); } catch (_) {}
+              }
+              try {
+                window.PoctraAndroid.request(JSON.stringify({
+                  id: data.id,
+                  bridgeToken: bridgeToken,
+                  origin: window.location.origin || window.location.href,
+                  method: data.method,
+                  params: Array.isArray(data.params) ? data.params : []
+                }));
+              } catch (error) {
+                window.postMessage({
+                  source: 'poctra-content',
+                  id: data.id,
+                  error: {
+                    code: 4900,
+                    message: error && error.message ? error.message : 'Wallet transport disconnected.',
+                    data: { reason: 'wallet_disconnected' }
+                  }
+                }, targetOrigin);
+              }
+            });
+            window.__poctraAndroidRfcO1Resolve = function (id, result) {
+              window.postMessage({ source: 'poctra-content', id: id, result: result }, targetOrigin);
+            };
+            window.__poctraAndroidRfcO1Reject = function (id, code, message) {
+              window.postMessage({
+                source: 'poctra-content',
+                id: id,
+                error: { code: code, message: message || 'Wallet request failed.' }
+              }, targetOrigin);
+            };
+          }
+
+          function installInpageProvider() {
+            var existing = document.getElementById('poctra-rfc-o1-inpage');
+            if (existing) {
+              window.dispatchEvent(new Event('octra:requestProvider'));
+              return;
+            }
+            var mount = document.head || document.documentElement;
+            if (!mount) {
+              window.setTimeout(installInpageProvider, 0);
+              return;
+            }
+            var script = document.createElement('script');
+            script.id = 'poctra-rfc-o1-inpage';
+            script.src = ${JSONObject.quote(inpagePath)};
+            script.async = false;
+            script.setAttribute('data-poctra-provider', 'rfc-o-1');
+            script.addEventListener('load', function () {
+              try { console.log('[PoctraDebug] extension-compatible RFC-O-1 provider loaded'); } catch (_) {}
+            }, { once: true });
+            script.addEventListener('error', function () {
+              script.remove();
+              try { console.log('[PoctraDebug] extension-compatible RFC-O-1 provider failed'); } catch (_) {}
+            }, { once: true });
+            mount.appendChild(script);
+          }
+          installInpageProvider();
+        })();
+    """.trimIndent()
+}
+
 private fun poctraProviderScript(bridgeToken: String): String = """
     (function () {
+      // Wallet providers belong to the top-level dApp document. Do not expose
+      // the bridge token or provider to third-party iframes.
+      try {
+        if (window.top !== window.self) return;
+      } catch (_) {
+        return;
+      }
       var bridgeToken = ${JSONObject.quote(bridgeToken)};
+      var poctraDebug = ${BuildConfig.DEBUG};
       window.__poctraBridgeToken = bridgeToken;
+      function poctraDebugLog(message) {
+        if (!poctraDebug) return;
+        try { console.log('[PoctraDebug] ' + message); } catch (_) {}
+      }
+      if (poctraDebug && !window.__poctraDebugClickInstalled) {
+        window.__poctraDebugClickInstalled = true;
+        try {
+          document.addEventListener('click', function (event) {
+            window.setTimeout(function () {
+              try {
+                var target = event && event.target;
+                var targetName = target && target.tagName ? String(target.tagName).toLowerCase() : 'unknown';
+                var targetRole = target && target.getAttribute ? (target.getAttribute('role') || '') : '';
+                var targetControl = target && target.closest ? target.closest('button, a, [role="button"]') : null;
+                var targetLabel = '';
+                var targetClass = '';
+                try {
+                  targetLabel = String(
+                    targetControl && (targetControl.getAttribute('aria-label') || targetControl.textContent) || ''
+                  ).replace(/\s+/g, ' ').trim().slice(0, 120);
+                  targetClass = String(targetControl && targetControl.className || '').replace(/\s+/g, '.').slice(0, 80);
+                } catch (_) {}
+                var dialogs = document.querySelectorAll(
+                  '[role="dialog"], [aria-modal="true"], dialog, [data-state="open"], [data-vaul-drawer]'
+                );
+                var geometry = [];
+                for (var index = 0; index < dialogs.length && index < 8; index++) {
+                  var dialog = dialogs[index];
+                  var rect = dialog.getBoundingClientRect();
+                  var style = window.getComputedStyle(dialog);
+                  var firstChild = dialog.firstElementChild;
+                  var childRect = firstChild ? firstChild.getBoundingClientRect() : null;
+                  var className = typeof dialog.className === 'string' ? dialog.className.replace(/\s+/g, '.').slice(0, 72) : '';
+                  geometry.push(
+                    String(index) + ':' + String(dialog.tagName || '').toLowerCase() +
+                    (dialog.id ? '#' + dialog.id : '') + (className ? '.' + className : '') +
+                    ',state=' + (dialog.getAttribute('data-state') || '') +
+                    ',role=' + (dialog.getAttribute('role') || '') +
+                    ',rect=' + Math.round(rect.left) + ',' + Math.round(rect.top) + ',' +
+                    Math.round(rect.width) + 'x' + Math.round(rect.height) + ',' +
+                    style.display + ',' + style.visibility + ',' + style.opacity + ',z=' + style.zIndex +
+                    ',pos=' + style.position + ',overflow=' + style.overflow + ',transform=' + style.transform +
+                    ',children=' + dialog.childElementCount + ',desc=' + dialog.querySelectorAll('*').length +
+                    ',scroll=' + dialog.scrollHeight + '/' + dialog.clientHeight +
+                    (childRect ? ',first=' + Math.round(childRect.left) + ',' + Math.round(childRect.top) + ',' +
+                      Math.round(childRect.width) + 'x' + Math.round(childRect.height) : '')
+                  );
+                }
+                poctraDebugLog(
+                  'click target=' + targetName + ' role=' + targetRole +
+                  ' control=' + targetClass + ' label=' + targetLabel +
+                  ' viewport=' + window.innerWidth + 'x' + window.innerHeight +
+                  ' visual=' + (window.visualViewport ?
+                    Math.round(window.visualViewport.width) + 'x' + Math.round(window.visualViewport.height) : 'none') +
+                  ' dialogs=' + dialogs.length + ' [' + geometry.join(';') + ']'
+                );
+              } catch (_) {}
+            }, 350);
+          }, true);
+        } catch (_) {}
+      }
+      function installMobileSheetCompatibility() {
+        if (!document || !document.documentElement) {
+          window.setTimeout(installMobileSheetCompatibility, 0);
+          return;
+        }
+        var repairedProperties = [
+          'position', 'left', 'right', 'top', 'bottom', 'width', 'height', 'min-height',
+          'max-height', 'transform', 'overflow', 'z-index', 'box-sizing'
+        ];
+        var repairedChildProperties = ['left', 'right', 'width', 'min-width', 'max-width', 'transform'];
+        var repairedContainerProperties = ['transform', 'perspective', 'filter', 'contain', 'will-change'];
+        function removeImportantProperties(element, properties) {
+          for (var index = 0; index < properties.length; index++) element.style.removeProperty(properties[index]);
+        }
+        function restoreClosedSheets() {
+          var repaired = document.querySelectorAll('[data-poctra-sheet-compat="true"]');
+          for (var index = 0; index < repaired.length; index++) {
+            var element = repaired[index];
+            var state = element.getAttribute('data-state');
+            var computed = window.getComputedStyle(element);
+            var closed = !element.isConnected || computed.display === 'none' || computed.visibility === 'hidden' ||
+              computed.pointerEvents === 'none' || Number(computed.opacity || '1') <= 0 ||
+              element.getAttribute('aria-hidden') === 'true' || (state && state !== 'open');
+            if (closed) {
+              element.removeAttribute('data-poctra-sheet-compat');
+              removeImportantProperties(element, repairedProperties);
+            }
+          }
+          if (!document.querySelector('[data-poctra-sheet-compat="true"]')) {
+            var repairedChildren = document.querySelectorAll('[data-poctra-sheet-child-compat="true"]');
+            for (var childIndex = 0; childIndex < repairedChildren.length; childIndex++) {
+              repairedChildren[childIndex].removeAttribute('data-poctra-sheet-child-compat');
+              removeImportantProperties(repairedChildren[childIndex], repairedChildProperties);
+            }
+            var repairedContainers = document.querySelectorAll('[data-poctra-sheet-container-compat="true"]');
+            for (var containerIndex = 0; containerIndex < repairedContainers.length; containerIndex++) {
+              repairedContainers[containerIndex].removeAttribute('data-poctra-sheet-container-compat');
+              removeImportantProperties(repairedContainers[containerIndex], repairedContainerProperties);
+            }
+          }
+        }
+        function normalizeContainingBlocks(element) {
+          var ancestor = element.parentElement;
+          while (ancestor && ancestor !== document.body && ancestor !== document.documentElement) {
+            var computed = window.getComputedStyle(ancestor);
+            var establishesContainingBlock = computed.transform !== 'none' || computed.perspective !== 'none' ||
+              computed.filter !== 'none' || /paint|layout|strict|content/.test(computed.contain || '') ||
+              /transform|perspective|filter/.test(computed.willChange || '');
+            if (establishesContainingBlock) {
+              ancestor.style.setProperty('transform', 'none', 'important');
+              ancestor.style.setProperty('perspective', 'none', 'important');
+              ancestor.style.setProperty('filter', 'none', 'important');
+              ancestor.style.setProperty('contain', 'none', 'important');
+              ancestor.style.setProperty('will-change', 'auto', 'important');
+              ancestor.setAttribute('data-poctra-sheet-container-compat', 'true');
+            }
+            ancestor = ancestor.parentElement;
+          }
+        }
+        function expandCollapsedContent(element) {
+          var descendants = element.querySelectorAll('*');
+          var expanded = 0;
+          for (var index = 0; index < descendants.length; index++) {
+            var child = descendants[index];
+            var childStyle = window.getComputedStyle(child);
+            if (childStyle.display === 'none' || childStyle.visibility === 'hidden') continue;
+            var childRect = child.getBoundingClientRect();
+            if (childRect.width > 2 || childRect.height < 64) continue;
+            child.style.setProperty('left', '0px', 'important');
+            child.style.setProperty('right', '0px', 'important');
+            child.style.setProperty('width', '100%', 'important');
+            child.style.setProperty('min-width', '100%', 'important');
+            child.style.setProperty('max-width', '100%', 'important');
+            child.style.setProperty('transform', 'none', 'important');
+            child.setAttribute('data-poctra-sheet-child-compat', 'true');
+            expanded += 1;
+          }
+          return expanded;
+        }
+        function repairOpenSheets() {
+          restoreClosedSheets();
+          var viewport = window.visualViewport;
+          var viewportLeft = viewport ? viewport.offsetLeft : 0;
+          var viewportTop = viewport ? viewport.offsetTop : 0;
+          var viewportWidth = viewport ? viewport.width : window.innerWidth;
+          var viewportHeight = viewport ? viewport.height : window.innerHeight;
+          var viewportBottom = viewportTop + viewportHeight;
+          var candidates = document.querySelectorAll(
+            '[role="dialog"], [aria-modal="true"], dialog, [data-state="open"], [data-vaul-drawer]'
+          );
+          for (var index = 0; index < candidates.length; index++) {
+            var element = candidates[index];
+            if (!element || element === document.body || element === document.documentElement) continue;
+            // Circle pages install a viewport-aware transaction sheet repair
+            // in their injected runtime. Let that single owner manage layout;
+            // alternating between both repairers causes visible height flicker.
+            if (element.getAttribute('data-poctra-circle-sheet-compat') === 'true') continue;
+            var state = element.getAttribute('data-state');
+            if (state && state !== 'open') continue;
+            var computed = window.getComputedStyle(element);
+            if (computed.display === 'none' || computed.visibility === 'hidden' || Number(computed.opacity || '1') <= 0) continue;
+            var rect = element.getBoundingClientRect();
+            if (rect.width < viewportWidth * 0.72 || element.childElementCount <= 0) continue;
+            var contentHeight = Math.max(element.scrollHeight || 0, element.clientHeight || 0);
+            var outsideViewport = rect.top >= viewportBottom - 2;
+            var severelyClipped = rect.height <= 56 && contentHeight >= rect.height + 32;
+            var role = element.getAttribute('role') || '';
+            var collapsedDialog = rect.height <= 56 && (role === 'dialog' || element.getAttribute('aria-modal') === 'true' || element.tagName === 'DIALOG');
+            var isTransactionProgress = element.classList && (
+              element.classList.contains('tx-progress-dialog') || element.classList.contains('tx-progress-sheet')
+            );
+            var isWalletPicker = element.classList && element.classList.contains('wallet-sheet');
+            var descendantCount = element.querySelectorAll('*').length;
+            var contentFloor = descendantCount > 40
+              ? Math.floor(viewportHeight * 0.72)
+              : (descendantCount > 15 ? Math.floor(viewportHeight * 0.55) : 80);
+            var desiredHeight = Math.min(
+              Math.max(
+                contentHeight,
+                isWalletPicker ? 180 : (collapsedDialog ? Math.floor(viewportHeight * 0.72) : contentFloor)
+              ),
+              Math.floor(viewportHeight * 0.88)
+            );
+            var reportedBottomInset = Math.max(0, Math.round(window.innerHeight - viewportBottom));
+            var transactionBottomReserve = Math.max(16, reportedBottomInset);
+            var transactionProgressClipped = isTransactionProgress && (
+              rect.height < desiredHeight - 8 ||
+              rect.bottom > viewportBottom - transactionBottomReserve + 2 ||
+              rect.top > viewportTop + viewportHeight * 0.72
+            );
+            if (!outsideViewport && !severelyClipped && !collapsedDialog && !transactionProgressClipped) continue;
+            var desiredLeft = outsideViewport || isWalletPicker ? viewportLeft : Math.max(viewportLeft, rect.left);
+            var desiredWidth = outsideViewport || isWalletPicker ? viewportWidth : Math.min(rect.width, viewportWidth);
+            var desiredBottom = isTransactionProgress
+              ? transactionBottomReserve
+              : reportedBottomInset + ((collapsedDialog || transactionProgressClipped) && !outsideViewport ? 12 : 0);
+            var desiredTop = Math.max(viewportTop, viewportBottom - desiredHeight - 12);
+            normalizeContainingBlocks(element);
+            element.style.setProperty('position', 'fixed', 'important');
+            element.style.setProperty('left', Math.round(desiredLeft) + 'px', 'important');
+            element.style.setProperty('right', 'auto', 'important');
+            element.style.setProperty('top', isWalletPicker ? Math.round(desiredTop) + 'px' : 'auto', 'important');
+            element.style.setProperty('bottom', isWalletPicker ? 'auto' : Math.round(desiredBottom) + 'px', 'important');
+            element.style.setProperty('width', Math.round(desiredWidth) + 'px', 'important');
+            element.style.setProperty('height', desiredHeight + 'px', 'important');
+            element.style.setProperty('min-height', desiredHeight + 'px', 'important');
+            element.style.setProperty('max-height', Math.floor(viewportHeight * 0.88) + 'px', 'important');
+            element.style.setProperty('transform', 'none', 'important');
+            element.style.setProperty('overflow', 'auto', 'important');
+            element.style.setProperty('z-index', '2147483000', 'important');
+            element.style.setProperty('box-sizing', 'border-box', 'important');
+            element.setAttribute('data-poctra-sheet-compat', 'true');
+            element.getBoundingClientRect();
+            var expandedChildren = expandCollapsedContent(element);
+            var repairedRect = element.getBoundingClientRect();
+            poctraDebugLog(
+              'mobile sheet repaired top=' + Math.round(rect.top) + ' height=' + Math.round(rect.height) +
+              ' content=' + contentHeight + ' desired=' + desiredHeight + ' role=' + role +
+              ' result=' + Math.round(repairedRect.left) + ',' + Math.round(repairedRect.top) + ',' +
+              Math.round(repairedRect.width) + 'x' + Math.round(repairedRect.height) +
+              ' expanded=' + expandedChildren
+            );
+          }
+        }
+        window.__poctraRepairMobileSheets = repairOpenSheets;
+        if (!window.__poctraMobileSheetCompatibilityInstalled) {
+          window.__poctraMobileSheetCompatibilityInstalled = true;
+          var sheetRepairScheduled = false;
+          function scheduleSheetRepair() {
+            if (sheetRepairScheduled) return;
+            sheetRepairScheduled = true;
+            var runSheetRepair = function () {
+              sheetRepairScheduled = false;
+              repairOpenSheets();
+              window.setTimeout(repairOpenSheets, 80);
+              window.setTimeout(repairOpenSheets, 240);
+            };
+            if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(runSheetRepair);
+            else window.setTimeout(runSheetRepair, 16);
+          }
+          document.addEventListener('click', scheduleSheetRepair, true);
+          window.addEventListener('resize', scheduleSheetRepair);
+          if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', scheduleSheetRepair);
+          }
+          var sheetObserverRoot = document.documentElement || document.body;
+          if (sheetObserverRoot && typeof MutationObserver === 'function') {
+            window.__poctraMobileSheetObserver = new MutationObserver(function (mutations) {
+              for (var mutationIndex = 0; mutationIndex < mutations.length; mutationIndex++) {
+                if (mutations[mutationIndex].addedNodes && mutations[mutationIndex].addedNodes.length) {
+                  scheduleSheetRepair();
+                  break;
+                }
+              }
+            });
+            window.__poctraMobileSheetObserver.observe(sheetObserverRoot, { childList: true, subtree: true });
+          }
+          scheduleSheetRepair();
+        }
+      }
+      installMobileSheetCompatibility();
+      window.__poctraDismissConnectOverlays = function () {
+        try { window.dispatchEvent(new Event('focus')); } catch (_) {}
+        function dismissOnce() {
+          try {
+            document.dispatchEvent(new KeyboardEvent('keydown', {
+              key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true
+            }));
+            document.dispatchEvent(new KeyboardEvent('keyup', {
+              key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true
+            }));
+          } catch (_) {}
+        }
+        window.setTimeout(dismissOnce, 80);
+        window.setTimeout(dismissOnce, 220);
+      };
+      function poctraNavigationControl(target) {
+        try {
+          return target && target.closest
+            ? target.closest('a[href], area[href], [role="link"]')
+            : null;
+        } catch (_) {
+          return null;
+        }
+      }
+      function poctraNotifyNavigation() {
+        try { window.PoctraAndroid.pageInteraction(window.__poctraBridgeToken || bridgeToken); } catch (_) {}
+      }
+      window.__poctraNotifyNavigation = poctraNotifyNavigation;
+      if (!window.__poctraNavigationProgressInstalled) {
+        window.__poctraNavigationProgressInstalled = true;
+        document.addEventListener('click', function (event) {
+          if (!event || event.defaultPrevented || event.button > 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+          var control = poctraNavigationControl(event.target);
+          if (!control || control.getAttribute('aria-disabled') === 'true') return;
+          var href = '';
+          try { href = control.getAttribute('href') || ''; } catch (_) {}
+          if (href === '#' || /^javascript:/i.test(href) || /^mailto:/i.test(href) || /^tel:/i.test(href)) return;
+          window.__poctraNotifyNavigation();
+        }, false);
+        document.addEventListener('submit', function (event) {
+          if (!event || event.defaultPrevented) return;
+          window.__poctraNotifyNavigation();
+        }, false);
+        ['pushState', 'replaceState'].forEach(function (method) {
+          try {
+            var original = history[method];
+            if (typeof original !== 'function') return;
+            history[method] = function () {
+              var before = window.location.href;
+              var result = original.apply(this, arguments);
+              if (window.location.href !== before) window.__poctraNotifyNavigation();
+              return result;
+            };
+          } catch (_) {}
+        });
+        window.addEventListener('popstate', function () { window.__poctraNotifyNavigation(); });
+        window.addEventListener('hashchange', function () { window.__poctraNotifyNavigation(); });
+      }
       function dispatchEventSafely(event) {
         try { window.dispatchEvent(event); } catch (_) {}
       }
@@ -6108,11 +7439,289 @@ private fun poctraProviderScript(bridgeToken: String): String = """
         var detail = Object.freeze({ provider: provider, info: info });
         var announceEvent = customEvent('octra:announceProvider', detail);
         if (announceEvent) dispatchEventSafely(announceEvent);
+        poctraDebugLog(
+          'RFC-O-1 announce rdns=' + String(info && info.rdns || '') +
+          ' uuid=' + String(info && info.uuid || '') +
+          ' icon=' + Boolean(info && info.icon) +
+          ' surface=' + Boolean(
+            provider && provider.isOctra === true &&
+            typeof provider.request === 'function' &&
+            typeof provider.on === 'function' &&
+            typeof provider.removeListener === 'function'
+          )
+        );
         var loadedEvent = customEvent('octraLoaded', detail);
         if (loadedEvent) dispatchEventSafely(loadedEvent);
         dispatchEventSafely(new Event('octra#initialized'));
         dispatchEventSafely(new Event('poctra#initialized'));
       }
+      var octraProviderUuid = ${JSONObject.quote(POCTRA_PROVIDER_UUID)};
+      try {
+        if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+          octraProviderUuid = window.crypto.randomUUID();
+        }
+      } catch (_) {}
+      var octraProviderInfo = Object.freeze({
+        uuid: octraProviderUuid,
+        name: ${JSONObject.quote(POCTRA_PROVIDER_NAME)},
+        rdns: ${JSONObject.quote(POCTRA_PROVIDER_RDNS)},
+        icon: ${JSONObject.quote(POCTRA_PROVIDER_ICON)},
+        version: ${JSONObject.quote(POCTRA_PROVIDER_VERSION)},
+        homepage: ${JSONObject.quote(POCTRA_PROVIDER_HOMEPAGE)}
+      });
+      function installEvmProvider() {
+        var currentHost = '';
+        try { currentHost = String(window.location.hostname || '').toLowerCase(); } catch (_) {}
+        if (currentHost === 'uniswap.org' || currentHost.endsWith('.uniswap.org')) {
+          poctraDebugLog('EVM provider disabled for unsupported dApp host');
+          return null;
+        }
+        var evmInfo = Object.freeze({
+          uuid: '2e3de8f2-fb54-4ca1-bc67-81c82488a09c',
+          name: 'poctra',
+          icon: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='96' height='96' viewBox='0 0 96 96'%3E%3Crect width='96' height='96' rx='24' fill='%23070b09'/%3E%3Ctext x='48' y='67' text-anchor='middle' font-family='monospace' font-size='64' font-weight='700' fill='%2310b981'%3Ep%3C/text%3E%3C/svg%3E",
+          rdns: 'com.poctra.wallet',
+          walletId: 'poctra'
+        });
+        function announceEvm(provider) {
+          var detail = Object.freeze({ info: evmInfo, provider: provider });
+          var event = customEvent('eip6963:announceProvider', detail);
+          if (event) dispatchEventSafely(event);
+          poctraDebugLog('eip6963 announce rdns=' + evmInfo.rdns);
+        }
+        function exposeEvmProvider(provider) {
+          try {
+            if (!window.ethereum || typeof window.ethereum.request !== 'function' || window.ethereum.isPoctra) {
+              Object.defineProperty(window, 'ethereum', { value: provider, configurable: true, writable: false });
+            }
+          } catch (_) {
+            if (!window.ethereum || typeof window.ethereum.request !== 'function') window.ethereum = provider;
+          }
+          try {
+            var providers = window.ethereum && Array.isArray(window.ethereum.providers)
+              ? window.ethereum.providers.slice()
+              : [];
+            if (providers.indexOf(provider) < 0) providers.push(provider);
+            if (window.ethereum === provider) provider.providers = providers;
+          } catch (_) {}
+        }
+        if (window.__poctraEvmProviderInstalled && window.poctraEthereum) {
+          exposeEvmProvider(window.poctraEthereum);
+          return window.poctraEthereum;
+        }
+
+        var evmPending = {};
+        var evmNextId = 1;
+        var evmListeners = {};
+        var evmChainId = null;
+        var evmSelectedAddress = null;
+        var evmConnected = false;
+        var evmAccountsRequestPromise = null;
+        var evmDiscoveryObserved = false;
+        function evmEmit(event) {
+          var args = Array.prototype.slice.call(arguments, 1);
+          var list = (evmListeners[event] || []).slice();
+          for (var i = 0; i < list.length; i++) {
+            try { list[i].apply(evmProvider, args); } catch (_) {}
+          }
+        }
+        function evmError(code, message, data) {
+          var error = new Error(message || 'EVM wallet request failed');
+          error.name = 'ProviderRpcError';
+          error.code = Number(code);
+          if (data !== undefined) error.data = data;
+          return error;
+        }
+        function updateEvmAccounts(accounts) {
+          var next = Array.isArray(accounts) && accounts.length ? String(accounts[0]) : null;
+          var changed = next !== evmSelectedAddress;
+          evmSelectedAddress = next;
+          if (changed) evmEmit('accountsChanged', next ? [next] : []);
+        }
+        function updateEvmChain(chainId) {
+          if (typeof chainId !== 'string' || !chainId) return;
+          var changed = evmChainId !== null && evmChainId !== chainId;
+          evmChainId = chainId;
+          if (changed) evmEmit('chainChanged', chainId);
+          if (!evmConnected) {
+            evmConnected = true;
+            evmEmit('connect', { chainId: chainId });
+          }
+        }
+        function refreshEvmChain() {
+          return evmProvider.request({ method: 'eth_chainId' }).then(function (chainId) {
+            updateEvmChain(chainId);
+            return chainId;
+          }).catch(function () { return null; });
+        }
+
+        window.__poctraEvmResolve = function (id, result) {
+          var entry = evmPending[id];
+          if (!entry) return;
+          delete evmPending[id];
+          if (entry.method === 'eth_requestAccounts') evmAccountsRequestPromise = null;
+          if (entry.method === 'eth_requestAccounts' || entry.method === 'eth_accounts') {
+            updateEvmAccounts(result);
+          }
+          if (entry.method === 'eth_chainId') updateEvmChain(result);
+          if (entry.method === 'wallet_revokePermissions' || entry.method === 'eth_disconnect') {
+            updateEvmAccounts([]);
+          }
+          entry.resolve(result);
+          if (entry.method === 'wallet_requestPermissions') {
+            evmProvider.request({ method: 'eth_accounts' }).then(updateEvmAccounts).catch(function () {});
+          }
+          if (entry.method === 'wallet_switchEthereumChain' || entry.method === 'wallet_addEthereumChain') {
+            refreshEvmChain();
+          }
+        };
+        window.__poctraEvmReject = function (id, code, message) {
+          var entry = evmPending[id];
+          if (!entry) return;
+          delete evmPending[id];
+          if (entry.method === 'eth_requestAccounts') evmAccountsRequestPromise = null;
+          entry.reject(evmError(code, message));
+        };
+
+        var evmProvider = {
+          isPoctra: true,
+          isInjected: true,
+          providerId: 'poctra-evm',
+          name: 'poctra',
+          rdns: 'com.poctra.wallet',
+          get chainId() { return evmChainId; },
+          get networkVersion() {
+            if (!evmChainId) return null;
+            try { return String(parseInt(evmChainId, 16)); } catch (_) { return null; }
+          },
+          get selectedAddress() { return evmSelectedAddress; },
+          isConnected: function () { return evmConnected; },
+          request: function (args) {
+            if (!args || typeof args.method !== 'string' || !args.method) {
+              return Promise.reject(evmError(-32602, 'EVM provider method is required'));
+            }
+            if (args.method === 'eth_requestAccounts' && evmAccountsRequestPromise) {
+              return evmAccountsRequestPromise;
+            }
+            var requestPromise = new Promise(function (resolve, reject) {
+              var id = 'evm-' + String(evmNextId++);
+              evmPending[id] = { resolve: resolve, reject: reject, method: args.method };
+              try {
+                window.PoctraAndroid.evmRequest(JSON.stringify({
+                  id: id,
+                  bridgeToken: window.__poctraBridgeToken || bridgeToken,
+                  origin: window.location.origin || window.location.href,
+                  method: args.method,
+                  params: args.params === undefined ? [] : args.params
+                }));
+              } catch (error) {
+                delete evmPending[id];
+                reject(evmError(4900, error && error.message ? error.message : 'poctra EVM bridge unavailable'));
+              }
+            });
+            if (args.method === 'eth_requestAccounts') {
+              evmAccountsRequestPromise = requestPromise;
+              requestPromise.then(
+                function () { if (evmAccountsRequestPromise === requestPromise) evmAccountsRequestPromise = null; },
+                function () { if (evmAccountsRequestPromise === requestPromise) evmAccountsRequestPromise = null; }
+              );
+            }
+            return requestPromise;
+          },
+          enable: function () {
+            return evmProvider.request({ method: 'eth_requestAccounts' });
+          },
+          on: function (event, listener) {
+            if (typeof listener !== 'function') return evmProvider;
+            if (!evmListeners[event]) evmListeners[event] = [];
+            if (evmListeners[event].indexOf(listener) < 0) evmListeners[event].push(listener);
+            return evmProvider;
+          },
+          addListener: function (event, listener) {
+            return evmProvider.on(event, listener);
+          },
+          removeListener: function (event, listener) {
+            var list = evmListeners[event] || [];
+            var index = list.indexOf(listener);
+            if (index >= 0) list.splice(index, 1);
+            return evmProvider;
+          },
+          removeAllListeners: function (event) {
+            if (event) evmListeners[event] = [];
+            else evmListeners = {};
+            return evmProvider;
+          },
+          sendAsync: function (payload, callback) {
+            var request = payload || {};
+            evmProvider.request({ method: request.method, params: request.params || [] })
+              .then(function (result) {
+                callback(null, { jsonrpc: '2.0', id: request.id, result: result });
+              })
+              .catch(function (error) {
+                callback(error, { jsonrpc: '2.0', id: request.id, error: { code: error.code, message: error.message } });
+              });
+          },
+          send: function (payloadOrMethod, paramsOrCallback) {
+            if (typeof payloadOrMethod === 'string') {
+              return evmProvider.request({ method: payloadOrMethod, params: Array.isArray(paramsOrCallback) ? paramsOrCallback : [] });
+            }
+            if (typeof paramsOrCallback === 'function') {
+              evmProvider.sendAsync(payloadOrMethod, paramsOrCallback);
+              return;
+            }
+            return evmProvider.request(payloadOrMethod || {});
+          }
+        };
+
+        window.poctraEthereum = evmProvider;
+        window.__poctraEvmProviderInstalled = true;
+        exposeEvmProvider(evmProvider);
+
+        function announceEvmProvider(event) {
+          if (event && event.type === 'eip6963:requestProvider') evmDiscoveryObserved = true;
+          poctraDebugLog(event && event.type === 'eip6963:requestProvider'
+            ? 'eip6963 request observed'
+            : 'eip6963 replay announcement');
+          announceEvm(evmProvider);
+        }
+        window.addEventListener('eip6963:requestProvider', announceEvmProvider);
+        document.addEventListener('DOMContentLoaded', announceEvmProvider);
+        window.addEventListener('load', announceEvmProvider);
+        window.addEventListener('focus', announceEvmProvider);
+        announceEvmProvider();
+        dispatchEventSafely(new Event('ethereum#initialized'));
+        document.addEventListener('click', function (event) {
+          if (!evmDiscoveryObserved || evmSelectedAddress || evmAccountsRequestPromise) return;
+          var target = event && event.target;
+          var control = null;
+          try { control = target && target.closest ? target.closest('button, a, [role="button"]') : null; } catch (_) {}
+          if (!control) return;
+          var rawLabel = '';
+          try { rawLabel = control.getAttribute('aria-label') || control.innerText || control.textContent || ''; } catch (_) {}
+          var label = String(rawLabel).toLowerCase().replace(/\s+/g, ' ').trim();
+          if (label.length > 80) return;
+          var isConnectIntent = label === 'connect' ||
+            label === 'connect wallet' ||
+            label === 'connect a wallet' ||
+            label === 'connect evm wallet' ||
+            label === 'browser wallet' ||
+            label === 'evm wallets' ||
+            label === 'get started';
+          if (!isConnectIntent) return;
+          poctraDebugLog('trusted wallet-connect intent label=' + label);
+          window.setTimeout(function () {
+            evmProvider.request({ method: 'eth_requestAccounts' }).then(function () {
+              if (window.__poctraDismissConnectOverlays) window.__poctraDismissConnectOverlays();
+            }).catch(function () {});
+          }, 0);
+        }, true);
+        // Establish provider-to-chain connectivity without requesting or
+        // exposing an account. Connector libraries commonly inspect
+        // isConnected() and chainId before presenting an injected wallet.
+        window.setTimeout(function () { refreshEvmChain(); }, 0);
+        return evmProvider;
+      }
+      window.__poctraInstallEvmProvider = installEvmProvider;
       function installProviderGlobals(provider, info) {
         try {
           Object.defineProperty(window, 'octra', { value: provider, configurable: true, writable: true });
@@ -6129,14 +7738,10 @@ private fun poctraProviderScript(bridgeToken: String): String = """
         } catch (_) {}
       }
       if (window.__poctraProviderInstalled && window.octra) {
-        var existingInfo = window.__poctraProviderInfo || {
-          uuid: '8f286d3e-891a-4cc4-98a5-48dc905b36bb',
-          name: 'poctra',
-          rdns: 'id.octra.poctra',
-          version: '1.0.0'
-        };
+        var existingInfo = window.__poctraProviderInfo || octraProviderInfo;
         installProviderGlobals(window.octra, existingInfo);
         announceProvider(window.octra, existingInfo);
+        installEvmProvider();
         return;
       }
 
@@ -6149,12 +7754,7 @@ private fun poctraProviderScript(bridgeToken: String): String = """
         if (request && Array.isArray(request.permissions)) return request.permissions.slice();
         return ['read_address', 'read_balance'];
       }
-      var info = Object.freeze({
-        uuid: '8f286d3e-891a-4cc4-98a5-48dc905b36bb',
-        name: 'poctra',
-        rdns: 'id.octra.poctra',
-        version: '1.0.0'
-      });
+      var info = octraProviderInfo;
 
       window.__poctraProviderInfo = info;
       window.__poctraResolve = function (id, result) {
@@ -6199,12 +7799,14 @@ private fun poctraProviderScript(bridgeToken: String): String = """
       var provider = {
         isOctra: true,
         isPoctra: true,
+        isOctraWallet: true,
         providerId: 'poctra',
         name: 'poctra',
         rdns: 'id.octra.poctra',
         version: '1.0.0',
         get isConnected() { return connected; },
         request: function (args) {
+          poctraDebugLog('RFC-O-1 provider request method=' + String(args && args.method || ''));
           return new Promise(function (resolve, reject) {
             if (!args || !args.method) {
               var invalid = new Error('Octra provider method is required');
@@ -6275,6 +7877,7 @@ private fun poctraProviderScript(bridgeToken: String): String = """
       installProviderGlobals(provider, info);
 
       function announce() {
+        poctraDebugLog('RFC-O-1 request/replay observed');
         announceProvider(provider, info);
       }
       window.addEventListener('octra:requestProvider', announce);
@@ -6289,6 +7892,7 @@ private fun poctraProviderScript(bridgeToken: String): String = """
       setTimeout(announce, 5000);
       setTimeout(announce, 9000);
       setTimeout(announce, 15000);
+      installEvmProvider();
     })();
 """.trimIndent()
 
@@ -6372,6 +7976,13 @@ private fun BottomNavItem(
             .clip(RoundedCornerShape(Radius.md))
             .clickable(onClick = onClick),
     ) {
+        if (iconicPrivacy && !selected) {
+            PrivacyNavOrbit(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(width = 52.dp, height = 42.dp),
+            )
+        }
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -6399,6 +8010,43 @@ private fun BottomNavItem(
                 .size(width = if (iconicPrivacy) 28.dp else 20.dp, height = 3.dp)
                 .clip(RoundedCornerShape(Radius.md))
                 .background(if (selected) accentColor else Color.Transparent),
+        )
+    }
+}
+
+@Composable
+private fun PrivacyNavOrbit(modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "privacyNavOrbit")
+    val progress by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 2_400, easing = LinearEasing),
+        ),
+        label = "privacyNavOrbitProgress",
+    )
+    Canvas(modifier = modifier) {
+        val strokeWidth = 1.25.dp.toPx()
+        val inset = strokeWidth / 2f
+        val dashLength = 12.dp.toPx()
+        val perimeter = (size.width + size.height) * 2f
+        val pathEffect = PathEffect.dashPathEffect(
+            intervals = floatArrayOf(dashLength, perimeter),
+            phase = -progress * (dashLength + perimeter),
+        )
+        drawRoundRect(
+            color = PrivacyPrimary.copy(alpha = 0.12f),
+            topLeft = Offset(inset, inset),
+            size = Size(size.width - strokeWidth, size.height - strokeWidth),
+            cornerRadius = CornerRadius(Radius.md.toPx()),
+            style = Stroke(width = strokeWidth),
+        )
+        drawRoundRect(
+            color = PrivacyPrimary.copy(alpha = 0.9f),
+            topLeft = Offset(inset, inset),
+            size = Size(size.width - strokeWidth, size.height - strokeWidth),
+            cornerRadius = CornerRadius(Radius.md.toPx()),
+            style = Stroke(width = strokeWidth, pathEffect = pathEffect),
         )
     }
 }
@@ -6809,6 +8457,11 @@ private fun SendScreen(controller: PoctraController) {
         OctraSendReviewSheet(
             title = "Review Send",
             assetLabel = "OCT",
+            senderIdentityName = controller.wallet?.address?.let(controller::walletIdentityDomain),
+            senderAddress = controller.wallet?.address,
+            recipientIdentityName = recipientLookup.resolution?.name
+                ?: selectedRecipientName
+                ?: controller.identityNameForAddress(recipientForReview),
             recipient = recipientForReview,
             amount = "${amount.replace(",", ".")} OCT",
             fee = "$reviewFeeOu OU ~= ${ouToOct(reviewFeeOu)} OCT",
@@ -7188,6 +8841,11 @@ private fun SendAssetScreen(controller: PoctraController) {
         OctraSendReviewSheet(
             title = "Review ${token.symbol} Send",
             assetLabel = token.symbol,
+            senderIdentityName = controller.wallet?.address?.let(controller::walletIdentityDomain),
+            senderAddress = controller.wallet?.address,
+            recipientIdentityName = recipientLookup.resolution?.name
+                ?: selectedRecipientName
+                ?: controller.identityNameForAddress(recipientForReview),
             recipient = recipientForReview,
             amount = "${amount.replace(",", ".")} ${token.symbol}",
             fee = "$reviewFeeOu OU ~= ${ouToOct(reviewFeeOu)} OCT",
@@ -7206,6 +8864,9 @@ private fun SendAssetScreen(controller: PoctraController) {
 private fun OctraSendReviewSheet(
     title: String,
     assetLabel: String,
+    senderIdentityName: String?,
+    senderAddress: String?,
+    recipientIdentityName: String?,
     recipient: String,
     amount: String,
     fee: String,
@@ -7281,6 +8942,21 @@ private fun OctraSendReviewSheet(
                             Text(assetLabel, color = TextSecondary, style = MaterialTheme.typography.labelSmall)
                         }
                     }
+                    Spacer(Modifier.height(Space.x5))
+                    ReviewProcessFlow(
+                        source = ReviewFlowEndpoint(
+                            label = "From",
+                            address = senderAddress.orEmpty(),
+                            identityName = senderIdentityName,
+                        ),
+                        destination = ReviewFlowEndpoint(
+                            label = "To",
+                            address = recipient,
+                            identityName = recipientIdentityName,
+                        ),
+                        actionLabel = "Send",
+                        actionGlyph = Glyph.Go,
+                    )
                     Spacer(Modifier.height(Space.x6))
                     Card(
                         modifier = Modifier.fillMaxWidth(),
@@ -7288,8 +8964,6 @@ private fun OctraSendReviewSheet(
                         colors = CardDefaults.cardColors(containerColor = SurfaceBase),
                     ) {
                         Column(Modifier.padding(horizontal = Space.x6, vertical = Space.x3)) {
-                            DetailLine("Recipient", recipient)
-                            DetailSeparator()
                             DetailLine("Amount", amount)
                             DetailSeparator()
                             DetailLine("Network Fee", fee)
@@ -8468,6 +10142,7 @@ private fun BridgeReviewSheet(
                         )
                     } else {
                         BridgeReviewContent(
+                            controller = controller,
                             title = reviewTitle,
                             direction = direction,
                             amount = amount,
@@ -8526,6 +10201,7 @@ private enum class BridgeFeePreset {
 
 @Composable
 private fun BridgeReviewContent(
+    controller: PoctraController,
     title: String,
     direction: BridgeDirection,
     amount: String,
@@ -8565,6 +10241,43 @@ private fun BridgeReviewContent(
             Text(bridgeReviewRouteLabel(direction), color = TextSecondary, style = MaterialTheme.typography.labelSmall)
         }
     }
+    val octraWallet = controller.wallet
+    val evmAccount = controller.evmAccount
+    val source = if (direction == BridgeDirection.OctToWoct) {
+        ReviewFlowEndpoint(
+            label = "Octra sender",
+            address = octraWallet?.address.orEmpty(),
+            identityName = octraWallet?.address?.let(controller::walletIdentityDomain),
+        )
+    } else {
+        ReviewFlowEndpoint(
+            label = "EVM sender",
+            address = evmAccount?.address.orEmpty(),
+            identityName = evmAccount?.ensName,
+        )
+    }
+    val destination = if (direction == BridgeDirection.OctToWoct) {
+        ReviewFlowEndpoint(
+            label = receiverLabel.takeIf { it != "Receiver" } ?: "EVM receiver",
+            address = receiverAddress,
+            identityName = evmAccount?.ensName?.takeIf {
+                evmAccount.address.equals(receiverAddress, ignoreCase = true)
+            },
+        )
+    } else {
+        ReviewFlowEndpoint(
+            label = receiverLabel.takeIf { it != "Receiver" } ?: "Octra receiver",
+            address = receiverAddress,
+            identityName = controller.identityNameForAddress(receiverAddress),
+        )
+    }
+    ReviewProcessFlow(
+        source = source,
+        destination = destination,
+        actionLabel = "Bridge",
+        actionGlyph = Glyph.Bridge,
+        modifier = Modifier.padding(top = Space.x5),
+    )
     Spacer(Modifier.height(Space.x6))
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -8573,8 +10286,6 @@ private fun BridgeReviewContent(
     ) {
         Column(Modifier.padding(horizontal = Space.x6, vertical = Space.x3)) {
             DetailLine("Amount", "$amount ${if (direction == BridgeDirection.OctToWoct) "OCT" else "wOCT"}")
-            DetailSeparator()
-            DetailLine(receiverLabel, receiverAddress)
             if (showBridgeDetails) {
                 DetailSeparator()
                 DetailLine("Estimated bridge", bridgeReviewEstimate(direction))
@@ -9730,7 +11441,11 @@ private fun EvmSendScreen(controller: PoctraController) {
                     selectedNft == null && amount.replace(",", ".").toDoubleOrNull() == null -> amountError = "Enter a valid $symbol amount."
                     selectedNft != null && !selectedNft.owned -> formError = "This NFT is not owned by the active EVM account."
                     account?.connected == false -> formError = account.message ?: "EVM RPC is not connected."
-                    else -> controller.prepareEvmSendDialog(recipientForSubmit, if (selectedNft != null) "1" else amount)
+                    else -> controller.prepareEvmSendDialog(
+                        recipientAddress = recipientForSubmit,
+                        amountText = if (selectedNft != null) "1" else amount,
+                        recipientIdentityName = recipientLookup.resolution?.name,
+                    )
                 }
             },
         )
@@ -10155,6 +11870,7 @@ private fun EvmReceivePanel(controller: PoctraController, clipboard: androidx.co
 @Composable
 private fun EvmAddTokenScreen(controller: PoctraController) {
     var tokenAddress by remember { mutableStateOf("") }
+    val network = controller.activeEvmNetwork
 
     LaunchedEffect(Unit) {
         controller.refreshEvmAccount()
@@ -10171,7 +11887,7 @@ private fun EvmAddTokenScreen(controller: PoctraController) {
     ) {
         DetailScreenHeader(
             title = "Add ERC20",
-            description = "Lookup an ERC20 contract and add it to this EVM account.",
+            description = "Add a token on ${network?.name ?: "the active EVM network"}.",
             onBack = controller::closeEvmAddToken,
             backEnabled = !controller.evmLookupLoading,
         )
@@ -10182,7 +11898,16 @@ private fun EvmAddTokenScreen(controller: PoctraController) {
             colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
         ) {
             Column(Modifier.padding(Space.x7)) {
-                Text("Token Contract", color = TextTertiary, fontWeight = FontWeight.SemiBold)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Token Contract", color = TextTertiary, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    Text(
+                        network?.name ?: "EVM Network",
+                        color = SurfaceRaised,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
                 Spacer(Modifier.height(Space.x6))
                 PoctraTextField(
                     value = tokenAddress,
@@ -10837,7 +12562,6 @@ internal fun isValidOctraIdentityName(value: String): Boolean {
 internal data class RecipientResolutionPreview(
     val name: String,
     val address: String,
-    val source: String,
 )
 
 internal data class RecipientLookupUiState(
@@ -10855,6 +12579,28 @@ internal fun rememberOctraRecipientLookup(
     LaunchedEffect(value, controller.activeIdentityProvider?.id, controller.activeRpcNetwork?.id) {
         val query = value.trim()
         state = RecipientLookupUiState()
+        if (isValidOctraAddress(query)) {
+            controller.identityNameForAddress(query)?.let { cachedName ->
+                state = RecipientLookupUiState(
+                    resolution = RecipientResolutionPreview(
+                        name = cachedName,
+                        address = query,
+                    ),
+                )
+                return@LaunchedEffect
+            }
+            delay(350)
+            val identityName = runCatching { controller.previewOctraIdentityName(query) }.getOrNull()
+            if (query == value.trim() && !identityName.isNullOrBlank()) {
+                state = RecipientLookupUiState(
+                    resolution = RecipientResolutionPreview(
+                        name = identityName,
+                        address = query,
+                    ),
+                )
+            }
+            return@LaunchedEffect
+        }
         if (!isValidOctraIdentityName(query)) return@LaunchedEffect
         delay(650)
         state = RecipientLookupUiState(loading = true)
@@ -10869,7 +12615,6 @@ internal fun rememberOctraRecipientLookup(
                             resolution = RecipientResolutionPreview(
                                 name = query.lowercase(),
                                 address = address,
-                                source = "Octra Identity",
                             ),
                         )
                     }
@@ -10892,6 +12637,19 @@ private fun rememberEvmRecipientLookup(
     LaunchedEffect(value, controller.activeEvmNetwork?.id) {
         val query = value.trim()
         state = RecipientLookupUiState()
+        if (query.matches(Regex("^0x[a-fA-F0-9]{40}$"))) {
+            delay(350)
+            val identityName = runCatching { controller.previewEvmRecipientIdentity(query) }.getOrNull()
+            if (query == value.trim() && !identityName.isNullOrBlank()) {
+                state = RecipientLookupUiState(
+                    resolution = RecipientResolutionPreview(
+                        name = identityName,
+                        address = query,
+                    ),
+                )
+            }
+            return@LaunchedEffect
+        }
         if (!isValidEvmNameInput(query)) return@LaunchedEffect
         delay(650)
         state = RecipientLookupUiState(loading = true)
@@ -10906,7 +12664,6 @@ private fun rememberEvmRecipientLookup(
                             resolution = RecipientResolutionPreview(
                                 name = query.lowercase(),
                                 address = address,
-                                source = "ENS",
                             ),
                         )
                     }
@@ -10941,7 +12698,6 @@ internal fun RecipientLookupField(
         RecipientResolutionPreview(
             name = directPreviewName?.takeIf { it.isNotBlank() } ?: cleanValue,
             address = cleanValue,
-            source = if (!directPreviewName.isNullOrBlank()) "Octra Identity" else "Octra Address",
         )
     } else {
         null
@@ -11001,7 +12757,7 @@ private fun ResolvedRecipientCard(
             Spacer(Modifier.width(Space.x4))
             Column(Modifier.weight(1f)) {
                 Text(
-                    "${resolution.name} (${resolution.source.lowercase()})",
+                    resolution.name,
                     color = TextTertiary,
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
@@ -11086,6 +12842,8 @@ private fun TransactionDetailsScreen(controller: PoctraController) {
     }
 
     val outgoing = tx.isOutgoing(activeAddress)
+    val fromIdentityName = controller.identityNameForAddress(tx.from)
+    val toIdentityName = controller.identityNameForAddress(tx.to)
     val explorerHost = controller.activeRpcNetwork?.explorerUrl.orEmpty()
     val txExplorerUrl = explorerUrl(explorerHost, "tx.html", "hash", tx.hash)
     val fromExplorerUrl = explorerUrl(explorerHost, "address.html", "addr", tx.from)
@@ -11150,14 +12908,18 @@ private fun TransactionDetailsScreen(controller: PoctraController) {
         TransactionDetailCard(title = "Route", glyph = Glyph.Go) {
                 DetailLine(
                     label = "From",
-                    value = tx.from,
+                    value = fromIdentityName ?: tx.from,
+                    secondaryValue = tx.from.takeIf { fromIdentityName != null },
+                    valueColor = if (fromIdentityName != null) SurfaceRaised else TextTertiary,
                     actionLabel = if (fromExplorerUrl != null) "View" else null,
                     onAction = fromExplorerUrl?.let { url -> { controller.openDAppBrowser("Address", url) } },
                 )
                 DetailSeparator()
                 DetailLine(
                     label = "To",
-                    value = tx.to,
+                    value = toIdentityName ?: tx.to,
+                    secondaryValue = tx.to.takeIf { toIdentityName != null },
+                    valueColor = if (toIdentityName != null) SurfaceRaised else TextTertiary,
                     actionLabel = if (toExplorerUrl != null) "View" else null,
                     onAction = toExplorerUrl?.let { url -> { controller.openDAppBrowser("Address", url) } },
                 )
@@ -11235,7 +12997,10 @@ private fun TransactionDetailCard(
 fun DetailLine(
     label: String,
     value: String,
+    secondaryValue: String? = null,
+    valueColor: Color = TextTertiary,
     actionLabel: String? = null,
+    actionGlyph: Glyph? = null,
     onAction: (() -> Unit)? = null,
 ) {
     Column(
@@ -11246,20 +13011,36 @@ fun DetailLine(
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(label, color = TextSecondary, style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(1f))
             if (actionLabel != null && onAction != null) {
-                Text(
-                    actionLabel,
+                Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(Radius.md))
                         .clickable(onClick = onAction)
                         .padding(horizontal = Space.x4, vertical = Space.x2),
-                    color = SurfaceRaised,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.SemiBold,
-                )
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        actionLabel,
+                        color = SurfaceRaised,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    actionGlyph?.let { glyph ->
+                        Spacer(Modifier.width(Space.x2))
+                        GlyphIcon(glyph, Modifier.size(14.dp), SurfaceRaised)
+                    }
+                }
             }
         }
         Spacer(Modifier.height(Space.x2))
-        Text(value.ifBlank { "-" }, color = TextTertiary, style = MaterialTheme.typography.bodyMedium)
+        Text(value.ifBlank { "-" }, color = valueColor, style = MaterialTheme.typography.bodyMedium)
+        secondaryValue?.takeIf { it.isNotBlank() }?.let { secondary ->
+            Spacer(Modifier.height(Space.x1))
+            Text(
+                text = secondary,
+                color = TextSecondary,
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
     }
 }
 
@@ -11437,7 +13218,9 @@ private fun SettingsScreen(controller: PoctraController) {
             )
             SettingsDestinationButton(
                 title = "Octra Identity Provider",
-                subtitle = controller.activeIdentityProvider?.let { "${it.name} - ${shortAddress(it.contractAddress)}" } ?: "Resolve foo.oct recipients",
+                subtitle = controller.activeIdentityProvider?.let {
+                    "AML - ${shortAddress(it.contractAddress)}"
+                } ?: "Resolve foo.oct recipients",
                 glyph = Glyph.Browser,
                 onClick = controller::openIdentityProviderSettings,
             )
@@ -11792,6 +13575,7 @@ private fun DetailScreenHeader(
 }
 
 @Composable
+@Suppress("UNUSED_PARAMETER")
 fun SettingsDetailScreen(
     title: String,
     description: String,
@@ -12382,7 +14166,7 @@ private fun IdentityProviderSettingsScreen(controller: PoctraController) {
 
     SettingsDetailScreen(
         title = "Octra Identity Provider",
-        description = "Choose the contract used to resolve foo.oct recipients.",
+        description = "Choose an AML contract to resolve foo.oct.",
         glyph = Glyph.Browser,
         onBack = controller::closeSettingsDetail,
     ) {
@@ -12395,7 +14179,8 @@ private fun IdentityProviderSettingsScreen(controller: PoctraController) {
         if (controller.identityProviders.isEmpty()) {
             EmptyPanel("No identity provider for ${networkTypeLabel(activeNetwork)}")
         } else {
-            Column(verticalArrangement = Arrangement.spacedBy(Space.x5)) {
+            Column(verticalArrangement = Arrangement.spacedBy(Space.x4)) {
+                SettingsSectionTitle("AML contracts")
                 controller.identityProviders.forEach { provider ->
                     IdentityProviderRow(
                         provider = provider,
@@ -12429,7 +14214,7 @@ private fun AddIdentityProviderScreen(controller: PoctraController) {
 
     SettingsDetailScreen(
         title = "Add Identity Provider",
-        description = "Add the Octra Identity contract used to resolve foo.oct recipients.",
+        description = "Add an AML contract for the active Octra network.",
         glyph = Glyph.Browser,
         onBack = controller::closeAddIdentityProvider,
     ) {
@@ -12476,7 +14261,11 @@ private fun AddIdentityProviderScreen(controller: PoctraController) {
                         if (validation != null) {
                             localError = validation
                         } else {
-                            controller.addIdentityProvider(name.trim(), contractAddress.trim(), activeNetwork)
+                            controller.addIdentityProvider(
+                                name = name.trim(),
+                                contractAddress = contractAddress.trim(),
+                                network = activeNetwork,
+                            )
                         }
                     },
                     modifier = Modifier.fillMaxWidth(),
@@ -12603,7 +14392,7 @@ private fun IdentityProviderRow(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(provider.name, color = TextTertiary, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Spacer(Modifier.width(Space.x4))
-                OpTypeBadge(networkTypeLabel(provider.network))
+                OpTypeBadge("AML")
             }
             Spacer(Modifier.height(Space.x2))
             Text(provider.contractAddress, color = TextSecondary, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -13033,7 +14822,7 @@ private fun AboutScreen(controller: PoctraController) {
             colors = CardDefaults.cardColors(containerColor = SurfaceMuted.copy(alpha = 0.56f)),
         ) {
             Column(Modifier.padding(horizontal = Space.x6)) {
-                DetailLine("Version", "alpha v1.0.0")
+                DetailLine("Version", "1.0.0")
             }
         }
     }
@@ -13090,7 +14879,8 @@ private fun AboutFeatureCard(
 
 @Composable
 private fun RpcManagementPanel(controller: PoctraController) {
-    val activeId = controller.activeRpcNetwork?.id
+    val activeNetwork = controller.activeRpcNetwork
+    val networks = controller.rpcNetworks
 
     SettingsInlinePanel {
         val status = controller.rpcStatus
@@ -13101,45 +14891,86 @@ private fun RpcManagementPanel(controller: PoctraController) {
         }
         StateBanner(text = statusText, isError = status?.state == RpcStatus.State.Failed)
         Spacer(Modifier.height(Space.x6))
-
-        Column(verticalArrangement = Arrangement.spacedBy(Space.x5)) {
-            controller.rpcNetworks.forEach { network ->
-                RpcNetworkRow(
-                    network = network,
-                    active = network.id == activeId,
-                    canDelete = controller.rpcNetworks.size > 1,
-                    onActivate = { controller.activateRpcNetwork(network.id) },
-                    onDelete = { controller.deleteRpcNetwork(network.id) },
-                    busy = controller.busy,
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(Radius.md),
+            colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
+        ) {
+            Column(Modifier.padding(Space.x7)) {
+                Text("Active Network", color = TextTertiary, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(Space.x6))
+                RpcNetworkDropdown(
+                    networks = networks,
+                    selectedNetwork = activeNetwork ?: networks.firstOrNull(),
+                    onSelected = { id ->
+                        if (id != activeNetwork?.id) controller.activateRpcNetwork(id)
+                    },
+                    enabled = !controller.busy,
                 )
+                activeNetwork?.let { network ->
+                    Spacer(Modifier.height(Space.x6))
+                    DetailLine("Network Name", network.name)
+                    DetailSeparator()
+                    DetailLine("Network Type", networkTypeLabel(network.networkType))
+                    DetailSeparator()
+                    DetailLine("RPC", network.url)
+                    DetailSeparator()
+                    DetailLine("Explorer", network.explorerUrl.ifBlank { "Not set" })
+                }
             }
         }
-
         Spacer(Modifier.height(Space.x6))
-        PoctraButton(
-            text = "Add RPC Network",
-            onClick = controller::openAddRpcNetwork,
-            modifier = Modifier.fillMaxWidth(),
-            variant = ButtonVariant.Ghost,
-            leadingGlyph = Glyph.Plus,
-            enabled = !controller.busy,
-        )
+        Row(horizontalArrangement = Arrangement.spacedBy(Space.x5)) {
+            PoctraButton(
+                text = "Edit Network",
+                onClick = { activeNetwork?.let(controller::openEditRpcNetwork) },
+                modifier = Modifier.weight(1f),
+                variant = ButtonVariant.Ghost,
+                leadingGlyph = Glyph.Pencil,
+                enabled = activeNetwork != null && !controller.busy,
+            )
+            PoctraButton(
+                text = "Add Network",
+                onClick = controller::openAddRpcNetwork,
+                modifier = Modifier.weight(1f),
+                variant = ButtonVariant.Ghost,
+                leadingGlyph = Glyph.Plus,
+                enabled = !controller.busy,
+            )
+        }
+        if (activeNetwork != null && networks.size > 1) {
+            Spacer(Modifier.height(Space.x5))
+            PoctraButton(
+                text = "Delete Network",
+                onClick = { controller.deleteRpcNetwork(activeNetwork.id) },
+                modifier = Modifier.fillMaxWidth(),
+                variant = ButtonVariant.Ghost,
+                leadingGlyph = Glyph.Trash,
+                enabled = !controller.busy,
+            )
+        }
     }
 }
 
 @Composable
 private fun AddRpcNetworkScreen(controller: PoctraController) {
-    var name by remember { mutableStateOf("") }
-    var url by remember { mutableStateOf("") }
-    var networkType by remember(controller.activeRpcNetwork?.networkType) {
-        mutableStateOf(controller.activeRpcNetwork?.networkType ?: "devnet")
+    val editing = controller.rpcEditingNetwork
+    val isEditing = editing != null
+    var name by remember(editing?.id) { mutableStateOf(editing?.name.orEmpty()) }
+    var url by remember(editing?.id) { mutableStateOf(editing?.url.orEmpty()) }
+    var networkType by remember(editing?.id, controller.activeRpcNetwork?.networkType) {
+        mutableStateOf(editing?.networkType ?: controller.activeRpcNetwork?.networkType ?: "devnet")
     }
-    var explorerUrl by remember { mutableStateOf("") }
+    var explorerUrl by remember(editing?.id) { mutableStateOf(editing?.explorerUrl.orEmpty()) }
     var localError by remember { mutableStateOf<String?>(null) }
 
     SettingsDetailScreen(
-        title = "Add RPC Network",
-        description = "Add a custom Octra RPC endpoint and explorer URL.",
+        title = if (isEditing) "Edit RPC Network" else "Add RPC Network",
+        description = if (isEditing) {
+            "Update this Octra network endpoint, type, and explorer."
+        } else {
+            "Add a custom Octra RPC endpoint and explorer URL."
+        },
         glyph = Glyph.Wifi,
         onBack = controller::closeAddRpcNetwork,
     ) {
@@ -13201,7 +15032,7 @@ private fun AddRpcNetworkScreen(controller: PoctraController) {
                 )
                 Spacer(Modifier.height(Space.x7))
                 PoctraButton(
-                    text = "Save Network",
+                    text = if (isEditing) "Save Network" else "Add Network",
                     onClick = {
                         val validation = when {
                             name.trim().isBlank() -> "RPC name is required."
@@ -13211,7 +15042,12 @@ private fun AddRpcNetworkScreen(controller: PoctraController) {
                         if (validation != null) {
                             localError = validation
                         } else {
-                            controller.addRpcNetwork(name.trim(), url.trim(), networkType, explorerUrl.trim())
+                            controller.saveRpcNetworkDetails(
+                                name = name,
+                                url = url,
+                                networkType = networkType,
+                                explorerUrl = explorerUrl,
+                            )
                         }
                     },
                     modifier = Modifier.fillMaxWidth(),
@@ -13336,55 +15172,106 @@ private fun AddRpcNetworkDialog(
 }
 
 @Composable
-private fun RpcNetworkRow(
-    network: RpcNetwork,
-    active: Boolean,
-    canDelete: Boolean,
-    onActivate: () -> Unit,
-    onDelete: () -> Unit,
-    busy: Boolean,
+private fun RpcNetworkDropdown(
+    networks: List<RpcNetwork>,
+    selectedNetwork: RpcNetwork?,
+    onSelected: (String) -> Unit,
+    enabled: Boolean,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(Radius.md))
-            .background(if (active) SurfaceRaised.copy(alpha = 0.14f) else SurfaceStrong)
-            .clickable(enabled = !busy, onClick = onActivate)
-            .padding(Space.x6),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
+    var expanded by remember { mutableStateOf(false) }
+    Box(Modifier.fillMaxWidth()) {
+        Row(
             modifier = Modifier
-                .size(24.dp)
+                .fillMaxWidth()
                 .clip(RoundedCornerShape(Radius.md))
-                .background(if (active) SurfaceRaised else Color.Transparent),
-            contentAlignment = Alignment.Center,
+                .background(SurfaceBase)
+                .clickable(enabled = enabled && networks.isNotEmpty()) { expanded = true }
+                .padding(horizontal = Space.x6, vertical = Space.x5),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (active) GlyphIcon(Glyph.Check, modifier = Modifier.size(16.dp), color = PrimaryContent)
-        }
-        Spacer(Modifier.width(Space.x6))
-        Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(network.name, color = TextTertiary, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Spacer(Modifier.width(Space.x4))
-                OpTypeBadge(networkTypeLabel(network.networkType))
-            }
-            Spacer(Modifier.height(Space.x2))
-            Text(network.url, color = TextSecondary, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (network.explorerUrl.isNotBlank()) {
-                Text(network.explorerUrl, color = TextSecondary, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-        }
-        if (canDelete) {
-            Text(
-                "Delete",
+            Box(
                 modifier = Modifier
+                    .size(34.dp)
                     .clip(RoundedCornerShape(Radius.md))
-                    .clickable(enabled = !busy, onClick = onDelete)
-                    .padding(horizontal = Space.x4, vertical = Space.x3),
-                color = ErrorRed,
-                style = MaterialTheme.typography.bodyMedium,
+                    .background(SurfaceRaised.copy(alpha = 0.16f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                GlyphIcon(Glyph.Wifi, modifier = Modifier.size(17.dp), color = SurfaceRaised)
+            }
+            Spacer(Modifier.width(Space.x5))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    selectedNetwork?.name ?: "Select network",
+                    color = TextTertiary,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    selectedNetwork?.let { networkTypeLabel(it.networkType) } ?: "No Octra network available",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Spacer(Modifier.width(Space.x4))
+            GlyphIcon(
+                if (expanded) Glyph.ChevronUp else Glyph.ChevronDown,
+                modifier = Modifier.size(16.dp),
+                color = TextSecondary,
             )
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(SurfaceStrong),
+        ) {
+            networks.forEach { network ->
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(
+                                network.name,
+                                color = TextTertiary,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                networkTypeLabel(network.networkType),
+                                color = TextSecondary,
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                        }
+                    },
+                    leadingIcon = {
+                        Box(
+                            modifier = Modifier
+                                .size(26.dp)
+                                .clip(RoundedCornerShape(Radius.sm))
+                                .background(
+                                    if (network.id == selectedNetwork?.id) SurfaceRaised else SurfaceMuted,
+                                ),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            GlyphIcon(
+                                if (network.id == selectedNetwork?.id) Glyph.Check else Glyph.Wifi,
+                                modifier = Modifier.size(14.dp),
+                                color = if (network.id == selectedNetwork?.id) PrimaryContent else TextTertiary,
+                            )
+                        }
+                    },
+                    trailingIcon = { OpTypeBadge(networkTypeLabel(network.networkType)) },
+                    onClick = {
+                        onSelected(network.id)
+                        expanded = false
+                    },
+                    enabled = enabled,
+                )
+            }
         }
     }
 }
@@ -13571,12 +15458,15 @@ private fun startUnlockBiometric(
         negativeText = "Cancel",
         cipher = cipher,
         onSuccess = { authenticatedCipher ->
-            controller.unlockWithBiometric(authenticatedCipher)
+            controller.unlockWithBiometric(authenticatedCipher) {
+                onPromptClosed?.invoke()
+            }
         },
         onError = { message ->
             onPromptClosed?.invoke()
             controller.showError(message)
         },
+        onCancelled = { onPromptClosed?.invoke() },
     )
 }
 

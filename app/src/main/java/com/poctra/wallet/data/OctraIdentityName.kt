@@ -14,9 +14,9 @@ object OctraIdentityName {
     fun isValidPath(value: String): Boolean {
         val parts = value.trim().lowercase().split('.')
         return when (parts.size) {
-            1 -> isValidLabel(parts[0], minimumLength = 3)
+            1 -> isValidLabel(parts[0], minimumLength = 2)
             2 -> isValidLabel(parts[0], minimumLength = 1) &&
-                isValidLabel(parts[1], minimumLength = 3)
+                isValidLabel(parts[1], minimumLength = 2)
             else -> false
         }
     }

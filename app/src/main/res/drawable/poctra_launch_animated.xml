@@ -1,0 +1,6 @@
+<animated-vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/poctra_launch_icon">
+    <target
+        android:name="logo_path"
+        android:animation="@animator/poctra_launch_fill" />
+</animated-vector>

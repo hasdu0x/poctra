@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
 #include <vector>
 #include <cassert>
 #include "r1cs_prover.hpp"
@@ -21,6 +22,22 @@ inline Scalar sc_mersenne_p() {
     return Scalar{{UINT64_MAX, 0x7FFFFFFFFFFFFFFFULL, 0, 0}};
 }
 
+inline const Scalar& sc_mersenne_p_inv() {
+    static const Scalar inverse = sc_inv(sc_mersenne_p());
+    return inverse;
+}
+
+inline const Scalar& sc_power_of_two(size_t bit) {
+    static const std::array<Scalar, 253> powers = []() {
+        std::array<Scalar, 253> values{};
+        values[0] = sc_from_u64(1);
+        for (size_t i = 1; i < values.size(); ++i)
+            values[i] = sc_add(values[i - 1], values[i - 1]);
+        return values;
+    }();
+    return powers[bit];
+}
+
 inline void range_check(
     R1CSProver& prover,
     const Variable& v_var,
@@ -36,8 +53,6 @@ inline void range_check(
     };
 
     LinearCombination reconstruction;
-    Scalar power_of_2 = sc_from_u64(1);
-    Scalar two = sc_from_u64(2);
     Scalar one_sc = sc_from_u64(1);
 
     for (size_t i = 0; i < n_bits; i++) {
@@ -51,14 +66,13 @@ inline void range_check(
         LinearCombination sum_lc(left);
         sum_lc += LinearCombination(right);
         sum_lc -= LinearCombination(Variable::one());
-        prover.constrain(sum_lc);
+        prover.constrain(std::move(sum_lc));
 
-        reconstruction += LinearCombination(left, power_of_2);
-        power_of_2 = sc_mul(power_of_2, two);
+        reconstruction += LinearCombination(left, sc_power_of_two(i));
     }
 
     reconstruction -= LinearCombination(v_var);
-    prover.constrain(reconstruction);
+    prover.constrain(std::move(reconstruction));
 }
 
 struct FpMulResult {
@@ -83,7 +97,7 @@ inline FpMulResult fp_mul_gadget(
         LinearCombination lc(a0_var);
         lc += LinearCombination(a1_var, sc_pow2_64());
         lc -= LinearCombination(a_var);
-        prover.constrain(lc);
+        prover.constrain(std::move(lc));
     }
 
     range_check(prover, a0_var, a0_val, 64);
@@ -99,7 +113,7 @@ inline FpMulResult fp_mul_gadget(
         LinearCombination lc(b0_var);
         lc += LinearCombination(b1_var, sc_pow2_64());
         lc -= LinearCombination(b_var);
-        prover.constrain(lc);
+        prover.constrain(std::move(lc));
     }
 
     range_check(prover, b0_var, b0_val, 64);
@@ -135,7 +149,7 @@ inline FpMulResult fp_mul_gadget(
 
     Scalar p_sc = sc_mersenne_p();
     Scalar T_minus_c = sc_sub(T_red_val, c_val);
-    Scalar q_val = sc_mul(T_minus_c, sc_inv(p_sc));
+    Scalar q_val = sc_mul(T_minus_c, sc_mersenne_p_inv());
 
     auto [c_var, c_r, c_o] = prover.allocate(c_val, one_sc);
     auto [q_var, q_r, q_o] = prover.allocate(q_val, one_sc);
@@ -152,13 +166,22 @@ inline FpMulResult fp_mul_gadget(
         lc -= LinearCombination(p10_out, pow2_64);
         lc -= LinearCombination(p11_out, two);
         lc += LinearCombination(c_var);
-        prover.constrain(lc);
+        prover.constrain(std::move(lc));
     }
 
     range_check(prover, c_var, c_val, 127);
     range_check(prover, q_var, q_val, 66);
 
     return {c_var, c_val};
+}
+
+inline FpMulResult fp_cube_gadget(
+    R1CSProver& prover,
+    const Variable& x_var,
+    const Scalar& x_val
+) {
+    auto x2 = fp_mul_gadget(prover, x_var, x_val, x_var, x_val);
+    return fp_mul_gadget(prover, x2.var, x2.val, x_var, x_val);
 }
 
 struct FpLimbs {
@@ -182,7 +205,7 @@ inline FpLimbs fp127_decompose(
         LinearCombination lc(x0_var);
         lc += LinearCombination(x1_var, sc_pow2_64());
         lc -= LinearCombination(x_var);
-        prover.constrain(lc);
+        prover.constrain(std::move(lc));
     }
 
     range_check(prover, x0_var, x0_val, 64);
@@ -213,7 +236,7 @@ inline BoundPcResult bind_pc_value(
         LinearCombination sum(b_left);
         sum += LinearCombination(b_right);
         sum -= LinearCombination(Variable::one());
-        prover.constrain(sum);
+        prover.constrain(std::move(sum));
     }
 
     auto [x_var, x_r, x_o] = prover.allocate(x_val, one_sc);
@@ -222,7 +245,7 @@ inline BoundPcResult bind_pc_value(
         LinearCombination lc(x_var);
         lc -= LinearCombination(v_signed);
         lc -= LinearCombination(b_left, sc_mersenne_p());
-        prover.constrain(lc);
+        prover.constrain(std::move(lc));
     }
 
     auto limbs = fp127_decompose(prover, x_var, x_val);

@@ -4,8 +4,10 @@
 #include <cstring>
 #include <array>
 #include <stdexcept>
+#include <utility>
 #include "../core/hash.hpp"
 #include "../core/field.hpp"
+#include "../core/seedable_rng.hpp"
 
 namespace pvac {
 
@@ -36,6 +38,12 @@ inline Fe25519 fe_add(const Fe25519& f, const Fe25519& g) {
     return fe_reduce(h);
 }
 
+inline Fe25519 fe_add_loose(const Fe25519& f, const Fe25519& g) {
+    Fe25519 h;
+    for (int i = 0; i < 5; ++i) h.v[i] = f.v[i] + g.v[i];
+    return h;
+}
+
 inline Fe25519 fe_sub(const Fe25519& f, const Fe25519& g) {
 
     Fe25519 h;
@@ -45,6 +53,16 @@ inline Fe25519 fe_sub(const Fe25519& f, const Fe25519& g) {
     h.v[3] = (f.v[3] + ((1ULL << 52) - 2))  - g.v[3];
     h.v[4] = (f.v[4] + ((1ULL << 52) - 2))  - g.v[4];
     return fe_reduce(h);
+}
+
+inline Fe25519 fe_sub_loose(const Fe25519& f, const Fe25519& g) {
+    Fe25519 h;
+    h.v[0] = (f.v[0] + ((1ULL << 53) - 76)) - g.v[0];
+    h.v[1] = (f.v[1] + ((1ULL << 53) - 4)) - g.v[1];
+    h.v[2] = (f.v[2] + ((1ULL << 53) - 4)) - g.v[2];
+    h.v[3] = (f.v[3] + ((1ULL << 53) - 4)) - g.v[3];
+    h.v[4] = (f.v[4] + ((1ULL << 53) - 4)) - g.v[4];
+    return h;
 }
 
 inline Fe25519 fe_neg(const Fe25519& f) {
@@ -83,7 +101,40 @@ inline Fe25519 fe_mul(const Fe25519& f, const Fe25519& g) {
 }
 
 inline Fe25519 fe_sq(const Fe25519& f) {
-    return fe_mul(f, f);
+    const uint64_t f0_2 = 2 * f.v[0];
+    const uint64_t f1_2 = 2 * f.v[1];
+    const uint64_t f1_38 = 38 * f.v[1];
+    const uint64_t f2_38 = 38 * f.v[2];
+    const uint64_t f3_38 = 38 * f.v[3];
+    const uint64_t f4_19 = 19 * f.v[4];
+
+    u128 t[5];
+    t[0] = (u128)f.v[0] * f.v[0] +
+           (u128)f1_38 * f.v[4] +
+           (u128)f2_38 * f.v[3];
+    t[1] = (u128)f0_2 * f.v[1] +
+           (u128)f2_38 * f.v[4] +
+           (u128)f.v[3] * (19 * f.v[3]);
+    t[2] = (u128)f0_2 * f.v[2] +
+           (u128)f.v[1] * f.v[1] +
+           (u128)f3_38 * f.v[4];
+    t[3] = (u128)f0_2 * f.v[3] +
+           (u128)f1_2 * f.v[2] +
+           (u128)f4_19 * f.v[4];
+    t[4] = (u128)f0_2 * f.v[4] +
+           (u128)f1_2 * f.v[3] +
+           (u128)f.v[2] * f.v[2];
+
+    Fe25519 h;
+    uint64_t c;
+    h.v[0] = (uint64_t)t[0] & FE_MASK51; c = (uint64_t)(t[0] >> 51);
+    t[1] += c; h.v[1] = (uint64_t)t[1] & FE_MASK51; c = (uint64_t)(t[1] >> 51);
+    t[2] += c; h.v[2] = (uint64_t)t[2] & FE_MASK51; c = (uint64_t)(t[2] >> 51);
+    t[3] += c; h.v[3] = (uint64_t)t[3] & FE_MASK51; c = (uint64_t)(t[3] >> 51);
+    t[4] += c; h.v[4] = (uint64_t)t[4] & FE_MASK51; c = (uint64_t)(t[4] >> 51);
+    h.v[0] += c * 19;
+    c = h.v[0] >> 51; h.v[1] += c; h.v[0] &= FE_MASK51;
+    return h;
 }
 
 inline Fe25519 fe_pow2523(const Fe25519& z) {
@@ -184,6 +235,14 @@ inline void fe_tobytes(uint8_t s[32], Fe25519 h) {
         s[i*8+6] = (uint8_t)(bits[i] >> 48);
         s[i*8+7] = (uint8_t)(bits[i] >> 56);
     }
+}
+
+inline bool fe_has_canonical_encoding(const uint8_t bytes[32], const Fe25519& value) {
+    uint8_t canonical[32];
+    fe_tobytes(canonical, value);
+    uint8_t mismatch = 0;
+    for (size_t i = 0; i < 32; ++i) mismatch |= bytes[i] ^ canonical[i];
+    return mismatch == 0;
 }
 
 inline bool fe_is_zero(const Fe25519& f) {
@@ -392,9 +451,30 @@ inline Scalar sc_from_fp_signed(const Fp& x) {
     return sc_from_fp(x);
 }
 
+inline uint64_t sc_random_u64() {
+    struct ThreadRng {
+        SeedableRng rng;
+        bool initialized = false;
+
+        uint64_t next() {
+            if (!initialized) {
+                uint8_t seed[32];
+                csprng_bytes(seed, sizeof(seed));
+                rng.init(seed);
+                std::memset(seed, 0, sizeof(seed));
+                initialized = true;
+            }
+            return rng.u64();
+        }
+    };
+
+    thread_local ThreadRng thread_rng;
+    return thread_rng.next();
+}
+
 inline Scalar sc_random() {
     uint64_t r[8];
-    for (int i = 0; i < 8; i++) r[i] = csprng_u64();
+    for (int i = 0; i < 8; i++) r[i] = sc_random_u64();
     return sc_reduce512(r);
 }
 
@@ -419,32 +499,39 @@ struct ExtPoint {
     Fe25519 X, Y, Z, T;
 };
 
-inline Fe25519 ed_d() {
-
-    static const uint8_t d_bytes[32] = {
-        0xa3, 0x78, 0x59, 0x13, 0xca, 0x4d, 0xeb, 0x75,
-        0xab, 0xd8, 0x41, 0x41, 0x4d, 0x0a, 0x70, 0x00,
-        0x98, 0xe8, 0x79, 0x77, 0x79, 0x40, 0xc7, 0x8c,
-        0x73, 0xfe, 0x6f, 0x2b, 0xee, 0x6c, 0x03, 0x52
-    };
-    return fe_frombytes(d_bytes);
+inline const Fe25519& ed_d() {
+    static const Fe25519 value = []() {
+        static const uint8_t bytes[32] = {
+            0xa3, 0x78, 0x59, 0x13, 0xca, 0x4d, 0xeb, 0x75,
+            0xab, 0xd8, 0x41, 0x41, 0x4d, 0x0a, 0x70, 0x00,
+            0x98, 0xe8, 0x79, 0x77, 0x79, 0x40, 0xc7, 0x8c,
+            0x73, 0xfe, 0x6f, 0x2b, 0xee, 0x6c, 0x03, 0x52
+        };
+        return fe_frombytes(bytes);
+    }();
+    return value;
 }
 
-inline Fe25519 ed_2d() {
-    return fe_add(ed_d(), ed_d());
+inline const Fe25519& ed_2d() {
+    static const Fe25519 value = fe_add(ed_d(), ed_d());
+    return value;
 }
 
 inline ExtPoint ext_identity() {
     return {fe_zero(), fe_one(), fe_one(), fe_zero()};
 }
 
-inline ExtPoint ext_double(const ExtPoint& P) {
-    Fe25519 A = fe_sq(P.X);
-    Fe25519 B = fe_sq(P.Y);
-    Fe25519 C = fe_add(fe_sq(P.Z), fe_sq(P.Z));
+inline ExtPoint ext_double_reference(const ExtPoint& P) {
+    Fe25519 A = fe_mul(P.X, P.X);
+    Fe25519 B = fe_mul(P.Y, P.Y);
+    Fe25519 Z2 = fe_mul(P.Z, P.Z);
+    Fe25519 C = fe_add(Z2, Z2);
     Fe25519 D = fe_neg(A);
 
-    Fe25519 E = fe_sub(fe_sq(fe_add(P.X, P.Y)), fe_add(A, B));
+    Fe25519 E = fe_sub(
+        fe_mul(fe_add(P.X, P.Y), fe_add(P.X, P.Y)),
+        fe_add(A, B)
+    );
     Fe25519 G_ = fe_add(D, B);
     Fe25519 F_ = fe_sub(G_, C);
     Fe25519 H_ = fe_sub(D, B);
@@ -457,15 +544,93 @@ inline ExtPoint ext_double(const ExtPoint& P) {
     };
 }
 
-inline ExtPoint ext_add(const ExtPoint& P, const ExtPoint& Q) {
+inline ExtPoint ext_double(const ExtPoint& P) {
+    Fe25519 A = fe_sq(P.X);
+    Fe25519 B = fe_sq(P.Y);
+    Fe25519 Z2 = fe_sq(P.Z);
+    Fe25519 C = fe_add_loose(Z2, Z2);
+    Fe25519 D = fe_sub_loose(fe_zero(), A);
+
+    Fe25519 E = fe_sub_loose(
+        fe_sq(fe_add_loose(P.X, P.Y)),
+        fe_add_loose(A, B)
+    );
+    Fe25519 G_ = fe_add_loose(D, B);
+    Fe25519 F_ = fe_sub_loose(G_, C);
+    Fe25519 H_ = fe_sub_loose(D, B);
+
+    return {
+        fe_mul(E, F_),
+        fe_mul(G_, H_),
+        fe_mul(F_, G_),
+        fe_mul(E, H_)
+    };
+}
+
+inline ExtPoint ext_add_reference(const ExtPoint& P, const ExtPoint& Q) {
     Fe25519 A = fe_mul(fe_sub(P.Y, P.X), fe_sub(Q.Y, Q.X));
     Fe25519 B = fe_mul(fe_add(P.Y, P.X), fe_add(Q.Y, Q.X));
     Fe25519 C = fe_mul(fe_mul(P.T, Q.T), ed_2d());
-    Fe25519 D = fe_add(fe_mul(P.Z, Q.Z), fe_mul(P.Z, Q.Z));
+    Fe25519 Z_product = fe_mul(P.Z, Q.Z);
+    Fe25519 D = fe_add(Z_product, Z_product);
     Fe25519 E = fe_sub(B, A);
     Fe25519 F_ = fe_sub(D, C);
     Fe25519 G_ = fe_add(D, C);
     Fe25519 H_ = fe_add(B, A);
+
+    return {
+        fe_mul(E, F_),
+        fe_mul(G_, H_),
+        fe_mul(F_, G_),
+        fe_mul(E, H_)
+    };
+}
+
+inline ExtPoint ext_add(const ExtPoint& P, const ExtPoint& Q) {
+    Fe25519 A = fe_mul(
+        fe_sub_loose(P.Y, P.X),
+        fe_sub_loose(Q.Y, Q.X)
+    );
+    Fe25519 B = fe_mul(
+        fe_add_loose(P.Y, P.X),
+        fe_add_loose(Q.Y, Q.X)
+    );
+    Fe25519 C = fe_mul(fe_mul(P.T, Q.T), ed_2d());
+    Fe25519 Z_product = fe_mul(P.Z, Q.Z);
+    Fe25519 D = fe_add_loose(Z_product, Z_product);
+    Fe25519 E = fe_sub_loose(B, A);
+    Fe25519 F_ = fe_sub_loose(D, C);
+    Fe25519 G_ = fe_add_loose(D, C);
+    Fe25519 H_ = fe_add_loose(B, A);
+
+    return {
+        fe_mul(E, F_),
+        fe_mul(G_, H_),
+        fe_mul(F_, G_),
+        fe_mul(E, H_)
+    };
+}
+
+inline ExtPoint ext_add_with_t2d(
+    const ExtPoint& P,
+    const ExtPoint& Q,
+    const Fe25519& Q_t2d
+) {
+    Fe25519 A = fe_mul(
+        fe_sub_loose(P.Y, P.X),
+        fe_sub_loose(Q.Y, Q.X)
+    );
+    Fe25519 B = fe_mul(
+        fe_add_loose(P.Y, P.X),
+        fe_add_loose(Q.Y, Q.X)
+    );
+    Fe25519 C = fe_mul(P.T, Q_t2d);
+    Fe25519 Z_product = fe_mul(P.Z, Q.Z);
+    Fe25519 D = fe_add_loose(Z_product, Z_product);
+    Fe25519 E = fe_sub_loose(B, A);
+    Fe25519 F_ = fe_sub_loose(D, C);
+    Fe25519 G_ = fe_add_loose(D, C);
+    Fe25519 H_ = fe_add_loose(B, A);
 
     return {
         fe_mul(E, F_),
@@ -483,7 +648,7 @@ inline ExtPoint ext_sub(const ExtPoint& P, const ExtPoint& Q) {
     return ext_add(P, ext_neg(Q));
 }
 
-inline ExtPoint ext_scalarmul(const ExtPoint& P, const Scalar& s) {
+inline ExtPoint ext_scalarmul_binary(const ExtPoint& P, const Scalar& s) {
     uint8_t sb[32];
     sc_tobytes(sb, s);
 
@@ -492,11 +657,71 @@ inline ExtPoint ext_scalarmul(const ExtPoint& P, const Scalar& s) {
 
     for (int i = 0; i < 256; i++) {
         if ((sb[i >> 3] >> (i & 7)) & 1) {
-            R = ext_add(R, Q);
+            R = ext_add_reference(R, Q);
         }
-        Q = ext_double(Q);
+        Q = ext_double_reference(Q);
     }
     return R;
+}
+
+inline ExtPoint ext_scalarmul(const ExtPoint& P, const Scalar& s) {
+    uint8_t bytes[32];
+    sc_tobytes(bytes, s);
+
+    std::array<int8_t, 64> digits{};
+    for (size_t i = 0; i < digits.size(); ++i) {
+        const uint8_t packed = bytes[i >> 1];
+        digits[i] = static_cast<int8_t>(
+            (i & 1) ? (packed >> 4) : (packed & 0x0f)
+        );
+    }
+    for (size_t i = 0; i + 1 < digits.size(); ++i) {
+        const int8_t carry = static_cast<int8_t>((digits[i] + 8) >> 4);
+        digits[i] = static_cast<int8_t>(digits[i] - (carry << 4));
+        digits[i + 1] = static_cast<int8_t>(digits[i + 1] + carry);
+    }
+
+    std::array<ExtPoint, 8> multiples;
+    std::array<Fe25519, 8> multiples_t2d;
+    multiples[0] = P;
+    for (size_t i = 1; i < multiples.size(); ++i)
+        multiples[i] = ext_add(multiples[i - 1], P);
+    for (size_t i = 0; i < multiples.size(); ++i)
+        multiples_t2d[i] = fe_mul(multiples[i].T, ed_2d());
+
+    int top = static_cast<int>(digits.size()) - 1;
+    while (top >= 0 && digits[static_cast<size_t>(top)] == 0) --top;
+    if (top < 0) return ext_identity();
+
+    const auto select_digit = [&](int8_t digit) {
+        const bool negative = digit < 0;
+        const uint8_t magnitude = static_cast<uint8_t>(
+            negative ? -static_cast<int>(digit) : digit
+        );
+        ExtPoint selected = multiples[magnitude - 1];
+        Fe25519 selected_t2d = multiples_t2d[magnitude - 1];
+        if (negative) {
+            selected = ext_neg(selected);
+            selected_t2d = fe_neg(selected_t2d);
+        }
+        return std::pair<ExtPoint, Fe25519>{selected, selected_t2d};
+    };
+
+    ExtPoint result = select_digit(digits[static_cast<size_t>(top)]).first;
+    for (int i = top - 1; i >= 0; --i) {
+        for (int bit = 0; bit < 4; ++bit)
+            result = ext_double(result);
+        const int8_t digit = digits[static_cast<size_t>(i)];
+        if (digit != 0) {
+            const auto selected = select_digit(digit);
+            result = ext_add_with_t2d(
+                result,
+                selected.first,
+                selected.second
+            );
+        }
+    }
+    return result;
 }
 
 inline ExtPoint ed_basepoint() {
@@ -534,6 +759,55 @@ inline ExtPoint ed_basepoint() {
 
     Fe25519 T = fe_mul(X, Y);
     return {X, Y, Z, T};
+}
+
+inline const ExtPoint& ed_basepoint_cached() {
+    static const ExtPoint point = ed_basepoint();
+    return point;
+}
+
+struct FixedBaseTable {
+    std::array<std::array<ExtPoint, 16>, 64> windows;
+};
+
+inline FixedBaseTable make_fixed_base_table(const ExtPoint& point) {
+    FixedBaseTable table;
+    ExtPoint base = point;
+    for (size_t window = 0; window < table.windows.size(); ++window) {
+        table.windows[window][0] = ext_identity();
+        table.windows[window][1] = base;
+        for (size_t digit = 2; digit < table.windows[window].size(); ++digit)
+            table.windows[window][digit] =
+                ext_add(table.windows[window][digit - 1], base);
+        for (size_t bit = 0; bit < 4; ++bit)
+            base = ext_double(base);
+    }
+    return table;
+}
+
+inline ExtPoint fixed_base_scalarmul(
+    const FixedBaseTable& table,
+    const Scalar& scalar
+) {
+    uint8_t bytes[32];
+    sc_tobytes(bytes, scalar);
+
+    ExtPoint result = ext_identity();
+    for (size_t window = 0; window < table.windows.size(); ++window) {
+        const uint8_t packed = bytes[window >> 1];
+        const uint8_t digit =
+            (window & 1) ? static_cast<uint8_t>(packed >> 4)
+                         : static_cast<uint8_t>(packed & 0x0f);
+        if (digit)
+            result = ext_add(result, table.windows[window][digit]);
+    }
+    return result;
+}
+
+inline const FixedBaseTable& fixed_base_G_table() {
+    static const FixedBaseTable table =
+        make_fixed_base_table(ed_basepoint_cached());
+    return table;
 }
 
 using RistrettoPoint = std::array<uint8_t, 32>;
@@ -639,6 +913,7 @@ inline RistrettoPoint rist_encode(const ExtPoint& P) {
 inline bool rist_decode(ExtPoint& P, const RistrettoPoint& bytes) {
     Fe25519 s = fe_frombytes(bytes.data());
 
+    if (!fe_has_canonical_encoding(bytes.data(), s)) return false;
     if (fe_is_negative(s)) return false;
 
     Fe25519 ss = fe_sq(s);
@@ -689,7 +964,7 @@ inline RistrettoPoint rist_scalarmul(const RistrettoPoint& pt, const Scalar& s) 
 }
 
 inline RistrettoPoint rist_basemul(const Scalar& s) {
-    return rist_encode(ext_scalarmul(ed_basepoint(), s));
+    return rist_encode(fixed_base_scalarmul(fixed_base_G_table(), s));
 }
 
 inline RistrettoPoint rist_identity() {
@@ -751,18 +1026,20 @@ inline RistrettoPoint rist_H() {
     return rist_encode(P);
 }
 
+inline const ExtPoint& rist_H_ext_cached() {
+    static const ExtPoint point = rist_decode_or_throw(rist_H());
+    return point;
+}
+
+inline const FixedBaseTable& fixed_base_H_table() {
+    static const FixedBaseTable table =
+        make_fixed_base_table(rist_H_ext_cached());
+    return table;
+}
+
 inline RistrettoPoint pedersen_commit(const Scalar& value, const Scalar& blinding) {
-
-    ExtPoint G_pt, H_pt;
-    RistrettoPoint G_enc = rist_G();
-    RistrettoPoint H_enc = rist_H();
-    if (!rist_decode(G_pt, G_enc))
-        throw std::runtime_error("pvac: invalid Pedersen G generator");
-    if (!rist_decode(H_pt, H_enc))
-        throw std::runtime_error("pvac: invalid Pedersen H generator");
-
-    ExtPoint vG = ext_scalarmul(G_pt, value);
-    ExtPoint bH = ext_scalarmul(H_pt, blinding);
+    ExtPoint vG = fixed_base_scalarmul(fixed_base_G_table(), value);
+    ExtPoint bH = fixed_base_scalarmul(fixed_base_H_table(), blinding);
 
     return rist_encode(ext_add(vG, bH));
 }

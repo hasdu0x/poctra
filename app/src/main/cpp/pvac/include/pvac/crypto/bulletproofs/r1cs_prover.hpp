@@ -4,9 +4,15 @@
 #include <vector>
 #include <tuple>
 #include <cassert>
+#include <stdexcept>
+#if defined(PVAC_PROFILE)
+#include <chrono>
+#include <iostream>
+#endif
 #include "transcript.hpp"
 #include "generators.hpp"
 #include "inner_product.hpp"
+#include "r1cs_limits.hpp"
 #include "r1cs_types.hpp"
 #include "../ristretto255.hpp"
 
@@ -23,6 +29,12 @@ class R1CSProver {
 
 public:
     R1CSProver() = default;
+
+    void reserve(size_t committed, size_t gates, size_t constraints) {
+        committed_.reserve(std::min(committed, R1CS_MAX_COMMITTED));
+        gates_.reserve(std::min(gates, R1CS_MAX_GATES));
+        constraints_.reserve(std::min(constraints, R1CS_MAX_CONSTRAINTS));
+    }
 
     Variable commit(const Scalar& value, const Scalar& blinding) {
         size_t j = committed_.size();
@@ -50,34 +62,73 @@ public:
 
         LinearCombination cl = lc_left;
         cl -= LinearCombination(Variable::mult_left(i));
-        constraints_.push_back({cl});
+        constraints_.push_back({std::move(cl)});
 
         LinearCombination cr = lc_right;
         cr -= LinearCombination(Variable::mult_right(i));
-        constraints_.push_back({cr});
+        constraints_.push_back({std::move(cr)});
 
         return {Variable::mult_left(i), Variable::mult_right(i), Variable::mult_out(i)};
     }
 
-    void constrain(const LinearCombination& lc) {
-        constraints_.push_back({lc});
+    void constrain(LinearCombination lc) {
+        constraints_.push_back({std::move(lc)});
     }
 
     size_t num_gates() const { return gates_.size(); }
     size_t num_constraints() const { return constraints_.size(); }
     size_t num_committed() const { return committed_.size(); }
+    size_t constraint_terms() const {
+        size_t count = 0;
+        for (const auto& constraint : constraints_) {
+            if (constraint.lc.terms.size() > R1CS_MAX_TERMS - count)
+                return R1CS_MAX_TERMS + 1;
+            count += constraint.lc.terms.size();
+        }
+        return count;
+    }
     std::vector<Constraint> get_constraints() const { return constraints_; }
+    std::vector<Constraint> take_constraints() {
+        return std::move(constraints_);
+    }
 
     R1CSProof prove(Transcript& transcript) {
+#if defined(PVAC_PROFILE)
+        using ProfileClock = std::chrono::steady_clock;
+        const auto profile_started = ProfileClock::now();
+        auto profile_last = profile_started;
+        const auto profile_mark = [&](const char* phase) {
+            const auto now = ProfileClock::now();
+            const auto phase_ms =
+                std::chrono::duration<double, std::milli>(now - profile_last).count();
+            const auto total_ms =
+                std::chrono::duration<double, std::milli>(now - profile_started).count();
+            std::cerr << "[r1cs-profile] " << phase
+                      << " phase_ms=" << phase_ms
+                      << " total_ms=" << total_ms << std::endl;
+            profile_last = now;
+        };
+#endif
         R1CSProof proof;
         const size_t n = gates_.size();
         const size_t m = committed_.size();
         const size_t q = constraints_.size();
+        const size_t terms = constraint_terms();
+        if (n > R1CS_MAX_GATES || m > R1CS_MAX_COMMITTED ||
+            q > R1CS_MAX_CONSTRAINTS || terms > R1CS_MAX_TERMS)
+            throw std::runtime_error("pvac: r1cs prover limits exceeded");
         const size_t N = next_power_of_2(n > 0 ? n : 1);
+#if defined(PVAC_PROFILE)
+        std::cerr << "[r1cs-profile] gates=" << n << " N=" << N
+                  << " committed=" << m << " constraints=" << q << std::endl;
+#endif
 
         proof.V.resize(m);
         for (size_t j = 0; j < m; j++)
             proof.V[j] = pedersen_commit(committed_[j].value, committed_[j].blinding);
+#if defined(PVAC_PROFILE)
+        profile_mark("value_commitments");
+#endif
 
         transcript.append_u64("n", N);
         transcript.append_u64("m", m);
@@ -99,12 +150,24 @@ public:
 
         const auto& gen = generators();
         gen.precompute(N);
+#if defined(PVAC_PROFILE)
+        profile_mark("generator_precompute");
+#endif
 
         proof.A_I1 = msm_GH_blind(aL, aR, alpha, N);
+#if defined(PVAC_PROFILE)
+        profile_mark("commit_A_I");
+#endif
 
         proof.A_O1 = msm_G_blind(aO, beta, N);
+#if defined(PVAC_PROFILE)
+        profile_mark("commit_A_O");
+#endif
 
         proof.S1 = msm_GH_blind(sL, sR, rho, N);
+#if defined(PVAC_PROFILE)
+        profile_mark("commit_S");
+#endif
 
         transcript.append_point("A_I", proof.A_I1);
         transcript.append_point("A_O", proof.A_O1);
@@ -211,17 +274,27 @@ public:
         transcript.append_scalar("e_blinding", proof.e_blinding);
 
         Scalar w_ch = transcript.challenge_scalar("w");
-        RistrettoPoint Q = rist_scalarmul(pedersen_B(), w_ch);
+        ExtPoint Q = ext_scalarmul(pedersen_B_ext(), w_ch);
 
-        auto Gv = gen.G_vec(N);
-        auto Hv = gen.H_vec(N);
+        auto Gv = gen.G_ext_vec(N);
+        auto Hv = gen.H_ext_vec(N);
 
-        std::vector<RistrettoPoint> H_prime(N);
-        for (size_t i = 0; i < N; i++) {
-            H_prime[i] = rist_scalarmul(Hv[i], y_inv_n[i]);
-        }
+#if defined(PVAC_PROFILE)
+        profile_mark("scalar_polynomials");
+#endif
 
-        proof.ipp = ipp_prove(transcript, Q, l_eval, r_eval, Gv, H_prime);
+        proof.ipp = ipp_prove_ext(
+            transcript,
+            Q,
+            std::move(l_eval),
+            std::move(r_eval),
+            std::move(Gv),
+            std::move(Hv),
+            std::move(y_inv_n)
+        );
+#if defined(PVAC_PROFILE)
+        profile_mark("inner_product_proof");
+#endif
         return proof;
     }
 
@@ -268,23 +341,26 @@ private:
         const Scalar& blind, size_t N
     ) const {
         const auto& gen = generators();
-        std::vector<Scalar> sc; std::vector<RistrettoPoint> pt;
+        auto G_ext = gen.G_ext_vec(N);
+        auto H_ext = gen.H_ext_vec(N);
+        std::vector<Scalar> sc; std::vector<ExtPoint> pt;
         sc.reserve(2*N+1); pt.reserve(2*N+1);
-        for (size_t i=0;i<N;i++) { sc.push_back(a[i]); pt.push_back(gen.G(i)); }
-        for (size_t i=0;i<N;i++) { sc.push_back(b[i]); pt.push_back(gen.H(i)); }
-        sc.push_back(blind); pt.push_back(pedersen_B_blinding());
-        return multi_scalar_mul(sc, pt);
+        for (size_t i=0;i<N;i++) { sc.push_back(a[i]); pt.push_back(G_ext[i]); }
+        for (size_t i=0;i<N;i++) { sc.push_back(b[i]); pt.push_back(H_ext[i]); }
+        sc.push_back(blind); pt.push_back(pedersen_B_blinding_ext());
+        return multi_scalar_mul_ext(sc, pt);
     }
 
     RistrettoPoint msm_G_blind(
         const std::vector<Scalar>& a, const Scalar& blind, size_t N
     ) const {
         const auto& gen = generators();
-        std::vector<Scalar> sc; std::vector<RistrettoPoint> pt;
+        auto G_ext = gen.G_ext_vec(N);
+        std::vector<Scalar> sc; std::vector<ExtPoint> pt;
         sc.reserve(N+1); pt.reserve(N+1);
-        for (size_t i=0;i<N;i++) { sc.push_back(a[i]); pt.push_back(gen.G(i)); }
-        sc.push_back(blind); pt.push_back(pedersen_B_blinding());
-        return multi_scalar_mul(sc, pt);
+        for (size_t i=0;i<N;i++) { sc.push_back(a[i]); pt.push_back(G_ext[i]); }
+        sc.push_back(blind); pt.push_back(pedersen_B_blinding_ext());
+        return multi_scalar_mul_ext(sc, pt);
     }
 };
 

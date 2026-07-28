@@ -12,14 +12,19 @@ namespace pvac_ser {
 static constexpr uint8_t MAGIC[4] = {'P', 'V', 'A', 'C'};
 static constexpr uint8_t VERSION_V1 = 0x01;
 static constexpr uint8_t VERSION_V2 = 0x02;
-static constexpr uint8_t VERSION = VERSION_V2;
+static constexpr uint8_t VERSION_V3 = 0x03;
+static constexpr uint8_t VERSION_V4 = 0x04;
+static constexpr uint8_t VERSION_V5 = 0x05;
+static constexpr uint8_t VERSION = VERSION_V3;
 static constexpr uint8_t TAG_CIPHER = 0;
 static constexpr uint8_t TAG_PUBKEY = 1;
 static constexpr uint8_t TAG_SECKEY = 2;
 static constexpr uint8_t TAG_RANGE_PROOF = 4;
 static constexpr uint8_t TAG_AGG_RANGE_PROOF = 5;
 static constexpr uint8_t TAG_ZERO_PROOF = 6;
+static constexpr uint8_t TAG_BOUND_RANGE_PROOF = 7;
 static constexpr uint64_t MAX_BITVEC_BITS = 1ULL << 20;
+static constexpr uint8_t PUBKEY_V5_KEY_BOUND_PROFILE = 0x01;
 
 struct Writer {
     std::vector<uint8_t> buf;
@@ -56,8 +61,11 @@ struct Writer {
     }
 
     void fp(const pvac::Fp& x) {
+        if ((x.hi & ~pvac::MASK63) != 0 ||
+            (x.lo == UINT64_MAX && x.hi == pvac::MASK63))
+            throw std::runtime_error("pvac_ser: noncanonical field element");
         u64(x.lo);
-        u64(x.hi & pvac::MASK63);
+        u64(x.hi);
     }
 
     void scalar(const pvac::Scalar& s) {
@@ -76,11 +84,13 @@ struct Writer {
         for (auto w : bv.w) u64(w);
     }
 
-    void header(uint8_t tag) {
+    void header_version(uint8_t tag, uint8_t version) {
         raw(MAGIC, 4);
-        u8(VERSION);
+        u8(version);
         u8(tag);
     }
+
+    void header(uint8_t tag) { header_version(tag, VERSION); }
 };
 
 struct Reader {
@@ -146,7 +156,13 @@ struct Reader {
 
     pvac::Fp fp() {
         uint64_t lo = u64();
-        uint64_t hi = u64() & pvac::MASK63;
+        uint64_t hi = u64();
+        if (failed) return {};
+        if ((hi & ~pvac::MASK63) != 0 ||
+            (lo == UINT64_MAX && hi == pvac::MASK63)) {
+            fail("pvac_ser: noncanonical field element");
+            return {};
+        }
         return pvac::Fp{lo, hi};
     }
 
@@ -203,7 +219,14 @@ struct Reader {
         if (std::memcmp(m, MAGIC, 4) != 0) { fail("pvac_ser: bad magic"); return 0; }
         uint8_t ver = u8();
         if (failed) return 0;
-        if (ver != VERSION_V1 && ver != VERSION_V2) { fail("pvac_ser: bad version"); return 0; }
+        if (ver != VERSION_V1 &&
+            ver != VERSION_V2 &&
+            ver != VERSION_V3 &&
+            ver != VERSION_V4 &&
+            ver != VERSION_V5) {
+            fail("pvac_ser: bad version");
+            return 0;
+        }
         uint8_t tag = u8();
         if (failed) return 0;
         if (tag != expected_tag) { fail("pvac_ser: wrong type tag"); return 0; }
@@ -225,8 +248,12 @@ inline void validate_cipher_structure(const pvac::Cipher& cipher) {
             throw std::runtime_error("pvac_ser: invalid product parent");
         if (layer.rule == pvac::RRule::PROD && !layer.PC.empty())
             throw std::runtime_error("pvac_ser: product layer must not contain PC");
+        if (layer.rule == pvac::RRule::PROD && !layer.R_PC.empty())
+            throw std::runtime_error("pvac_ser: product layer must not contain R_PC");
         if (!layer.PC.empty() && layer.PC.size() != cipher.slots)
             throw std::runtime_error("pvac_ser: layer PC/slots size mismatch");
+        if (!layer.R_PC.empty() && layer.R_PC.size() != cipher.slots)
+            throw std::runtime_error("pvac_ser: layer R_PC/slots size mismatch");
     }
     for (const auto& edge : cipher.E) {
         if (edge.layer_id >= cipher.L.size())
@@ -246,6 +273,8 @@ inline void validate_pubkey_structure(const pvac::PubKey& pk) {
     if (pk.ubk.perm.size() != static_cast<size_t>(pk.prm.m_bits) ||
         pk.ubk.inv.size() != static_cast<size_t>(pk.prm.m_bits))
         throw std::runtime_error("pvac_ser: UBK size mismatch");
+    if (!pvac::is_valid_pubkey_shape(pk))
+        throw std::runtime_error("pvac_ser: invalid UBK permutation");
     if (pk.powg_B.size() != static_cast<size_t>(pk.prm.B))
         throw std::runtime_error("pvac_ser: powg_B size mismatch");
     for (const auto& column : pk.H) {
@@ -309,12 +338,36 @@ inline void write_layer(Writer& w, const pvac::Layer& L) {
 
     w.raw(L.R_com.data(), 32);
 
+    w.u64(L.R_PC.size());
+    for (const auto& rpc : L.R_PC)
+        w.raw(rpc.data(), 32);
+
     w.u64(L.PC.size());
     for (const auto& pc : L.PC)
         w.raw(pc.data(), 32);
 }
 
-inline pvac::Layer read_layer(Reader& r, uint8_t ver = VERSION_V2) {
+inline void write_layer_public(Writer& w, const pvac::Layer& L) {
+    w.u8(static_cast<uint8_t>(L.rule));
+    if (L.rule == pvac::RRule::BASE) {
+        w.u64(L.seed.ztag);
+        w.u64(L.seed.nonce.lo);
+        w.u64(L.seed.nonce.hi);
+    } else {
+        w.u32(L.pa);
+        w.u32(L.pb);
+    }
+}
+
+inline void mark_public_base_layer(pvac::Layer& L, size_t slots) {
+    if (L.rule == pvac::RRule::BASE) {
+        L.R_com = {};
+        L.R_PC.assign(slots, {});
+        L.PC.clear();
+    }
+}
+
+inline pvac::Layer read_layer(Reader& r, uint8_t ver = VERSION_V2, size_t slots = 0) {
     pvac::Layer L{};
     L.rule = static_cast<pvac::RRule>(r.u8());
     if (L.rule == pvac::RRule::BASE) {
@@ -326,9 +379,19 @@ inline pvac::Layer read_layer(Reader& r, uint8_t ver = VERSION_V2) {
         L.pb = r.u32();
     }
 
-    r.raw(L.R_com.data(), 32);
+    if (ver < VERSION_V4)
+        r.raw(L.R_com.data(), 32);
 
-    if (ver >= VERSION_V2) {
+    if (ver >= VERSION_V3 && ver < VERSION_V4) {
+        size_t nRPC = r.u64();
+        r.check_count(nRPC, 32);
+        if (r.failed) return L;
+        L.R_PC.resize(nRPC);
+        for (size_t i = 0; i < nRPC; i++)
+            L.R_PC[i] = r.rist_point();
+    }
+
+    if (ver >= VERSION_V2 && ver < VERSION_V4) {
         size_t nPC = r.u64();
         r.check_count(nPC, 32);
         if (r.failed) return L;
@@ -336,6 +399,9 @@ inline pvac::Layer read_layer(Reader& r, uint8_t ver = VERSION_V2) {
         for (size_t i = 0; i < nPC; i++)
             L.PC[i] = r.rist_point();
     }
+
+    if (ver >= VERSION_V4)
+        mark_public_base_layer(L, slots);
 
     return L;
 }
@@ -377,6 +443,20 @@ inline std::vector<uint8_t> serialize_cipher(const pvac::Cipher& C) {
     return std::move(w.buf);
 }
 
+inline std::vector<uint8_t> serialize_cipher_public(const pvac::Cipher& C) {
+    validate_cipher_structure(C);
+    Writer w;
+    w.header_version(TAG_CIPHER, VERSION_V4);
+    w.u64(C.slots);
+    w.u64(C.L.size());
+    for (const auto& L : C.L) write_layer_public(w, L);
+    w.u64(C.c0.size());
+    for (const auto& x : C.c0) w.fp(x);
+    w.u64(C.E.size());
+    for (const auto& e : C.E) write_edge(w, e);
+    return std::move(w.buf);
+}
+
 inline pvac::Cipher deserialize_cipher(const uint8_t* data, size_t len) {
     Reader r(data, len);
     uint8_t ver = r.header(TAG_CIPHER);
@@ -386,7 +466,7 @@ inline pvac::Cipher deserialize_cipher(const uint8_t* data, size_t len) {
     r.check_count(nL, 8);
     if (!r.failed) {
         C.L.resize(nL);
-        for (size_t i = 0; i < nL; ++i) C.L[i] = read_layer(r, ver);
+        for (size_t i = 0; i < nL; ++i) C.L[i] = read_layer(r, ver, C.slots);
     }
     size_t nc = r.u64();
     r.check_count(nc, 16);
@@ -401,6 +481,7 @@ inline pvac::Cipher deserialize_cipher(const uint8_t* data, size_t len) {
         for (size_t i = 0; i < nE; ++i) C.E[i] = read_edge(r);
     }
     if (r.failed) throw std::runtime_error(r.error);
+    if (r.remaining() != 0) throw std::runtime_error("pvac_ser: trailing cipher bytes");
     validate_cipher_structure(C);
     return C;
 }
@@ -425,6 +506,8 @@ inline std::vector<uint8_t> serialize_pubkey_raw(const pvac::PubKey& pk) {
     w.u64(pk.powg_B.size());
     for (const auto& x : pk.powg_B) w.fp(x);
 
+    w.rist_point(pk.circuit_prf_key_commit);
+
     return std::move(w.buf);
 }
 
@@ -436,7 +519,7 @@ inline std::vector<uint8_t> serialize_pubkey(const pvac::PubKey& pk, bool compre
 
 inline pvac::PubKey deserialize_pubkey_raw(const uint8_t* data, size_t len) {
     Reader r(data, len);
-    r.header(TAG_PUBKEY);
+    uint8_t ver = r.header(TAG_PUBKEY);
     pvac::PubKey pk;
     if (r.failed) throw std::runtime_error(r.error);
     pk.prm = read_params(r);
@@ -472,7 +555,16 @@ inline pvac::PubKey deserialize_pubkey_raw(const uint8_t* data, size_t len) {
         for (size_t i = 0; i < ng; ++i) pk.powg_B[i] = r.fp();
     }
 
+    if (ver >= VERSION_V3)
+        pk.circuit_prf_key_commit = r.rist_point();
+    if (ver == VERSION_V5) {
+        const uint8_t profile = r.u8();
+        if (!r.failed && profile != PUBKEY_V5_KEY_BOUND_PROFILE)
+            r.fail("pvac_ser: unsupported public key profile");
+    }
+
     if (r.failed) throw std::runtime_error(r.error);
+    if (r.remaining() != 0) throw std::runtime_error("pvac_ser: trailing public key bytes");
     validate_pubkey_structure(pk);
     return pk;
 }
@@ -489,6 +581,8 @@ inline std::vector<uint8_t> serialize_seckey(const pvac::SecKey& sk) {
     Writer w;
     w.header(TAG_SECKEY);
     for (int i = 0; i < 4; ++i) w.u64(sk.prf_k[i]);
+    w.fp(sk.circuit_prf_key);
+    w.raw(sk.circuit_prf_key_blind.data(), 32);
     w.u64(sk.lpn_s_bits.size());
     for (auto x : sk.lpn_s_bits) w.u64(x);
     return std::move(w.buf);
@@ -496,10 +590,14 @@ inline std::vector<uint8_t> serialize_seckey(const pvac::SecKey& sk) {
 
 inline pvac::SecKey deserialize_seckey(const uint8_t* data, size_t len) {
     Reader r(data, len);
-    r.header(TAG_SECKEY);
+    uint8_t ver = r.header(TAG_SECKEY);
     pvac::SecKey sk;
     if (r.failed) throw std::runtime_error(r.error);
     for (int i = 0; i < 4; ++i) sk.prf_k[i] = r.u64();
+    if (ver >= VERSION_V3) {
+        sk.circuit_prf_key = r.fp();
+        r.raw(sk.circuit_prf_key_blind.data(), 32);
+    }
     size_t ns = r.u64();
     r.check_count(ns, 8);
     if (!r.failed) {
@@ -507,6 +605,7 @@ inline pvac::SecKey deserialize_seckey(const uint8_t* data, size_t len) {
         for (size_t i = 0; i < ns; ++i) sk.lpn_s_bits[i] = r.u64();
     }
     if (r.failed) throw std::runtime_error(r.error);
+    if (r.remaining() != 0) throw std::runtime_error("pvac_ser: trailing secret key bytes");
     return sk;
 }
 
@@ -603,6 +702,7 @@ inline pvac::ZeroProof deserialize_zero_proof(const uint8_t* data, size_t len) {
     if (r.failed) throw std::runtime_error(r.error);
     auto zp = read_zero_proof_raw(r);
     if (r.failed) throw std::runtime_error(r.error);
+    if (r.remaining() != 0) throw std::runtime_error("pvac_ser: trailing zero proof bytes");
     return zp;
 }
 
@@ -623,7 +723,7 @@ inline pvac::Cipher read_cipher_raw(Reader& r, uint8_t ver = VERSION_V2) {
     r.check_count(nL, 8);
     if (!r.failed) {
         C.L.resize(nL);
-        for (size_t i = 0; i < nL; ++i) C.L[i] = read_layer(r, ver);
+        for (size_t i = 0; i < nL; ++i) C.L[i] = read_layer(r, ver, C.slots);
     }
     size_t nc = r.u64();
     r.check_count(nc, 16);
@@ -686,7 +786,25 @@ inline pvac::RangeProof deserialize_range_proof(const uint8_t* data, size_t len)
         rp.lc_proof = read_zero_proof_raw(r);
 
     if (r.failed) throw std::runtime_error(r.error);
+    if (r.remaining() != 0) throw std::runtime_error("pvac_ser: trailing range proof bytes");
     return rp;
+}
+
+inline std::vector<uint8_t> serialize_bound_range_proof(const pvac::ZeroProof& proof) {
+    Writer w;
+    w.header(TAG_BOUND_RANGE_PROOF);
+    write_zero_proof_raw(w, proof);
+    return std::move(w.buf);
+}
+
+inline pvac::ZeroProof deserialize_bound_range_proof(const uint8_t* data, size_t len) {
+    Reader r(data, len);
+    r.header(TAG_BOUND_RANGE_PROOF);
+    if (r.failed) throw std::runtime_error(r.error);
+    auto proof = read_zero_proof_raw(r);
+    if (r.failed) throw std::runtime_error(r.error);
+    if (r.remaining() != 0) throw std::runtime_error("pvac_ser: trailing bound range proof bytes");
+    return proof;
 }
 
 inline std::vector<uint8_t> serialize_agg_range_proof(const pvac::AggregatedRangeProof& arp) {
@@ -717,21 +835,20 @@ inline pvac::AggregatedRangeProof deserialize_agg_range_proof(const uint8_t* dat
     if (!r.failed)
         arp.proof = read_r1cs_proof_raw(r);
     if (r.failed) throw std::runtime_error(r.error);
+    if (r.remaining() != 0) throw std::runtime_error("pvac_ser: trailing aggregated range proof bytes");
     return arp;
 }
 
-// ═══ Unified Range Proof dispatch ═══
-
-enum RangeProofFormat { RP_OLD = 0, RP_AGGREGATED = 1 };
+enum RangeProofFormat { RP_OLD = 0, RP_AGGREGATED = 1, RP_BOUND = 2 };
 
 struct RangeProofAny {
     RangeProofFormat format;
     pvac::RangeProof old_proof;
     pvac::AggregatedRangeProof agg_proof;
+    pvac::ZeroProof bound_proof;
 };
 
 inline RangeProofAny deserialize_range_proof_any(const uint8_t* data, size_t len) {
-    // Header layout: MAGIC[4] + VERSION[1] + TAG[1]
     if (len < 6) throw std::runtime_error("pvac_ser: range proof too short");
     uint8_t tag = data[5];
     RangeProofAny result;
@@ -741,6 +858,9 @@ inline RangeProofAny deserialize_range_proof_any(const uint8_t* data, size_t len
     } else if (tag == TAG_AGG_RANGE_PROOF) {
         result.format = RP_AGGREGATED;
         result.agg_proof = deserialize_agg_range_proof(data, len);
+    } else if (tag == TAG_BOUND_RANGE_PROOF) {
+        result.format = RP_BOUND;
+        result.bound_proof = deserialize_bound_range_proof(data, len);
     } else {
         throw std::runtime_error("pvac_ser: unknown range proof tag");
     }

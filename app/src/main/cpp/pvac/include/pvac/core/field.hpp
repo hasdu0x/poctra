@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <algorithm>
+#include <limits>
+#include "simd.hpp"
 
 #if !defined(__SIZEOF_INT128__) && !(defined(_MSC_VER) && defined(__clang__))
 #error "Needs unsigned __int128"
@@ -18,6 +20,27 @@ struct Fp {
     uint64_t lo;
     uint64_t hi;
 };
+
+inline bool fp_to_i64(const Fp& value, int64_t& out) {
+    u128 p = (u128(1) << 127) - 1;
+    u128 raw = (u128(value.hi) << 64) | value.lo;
+    u128 max_pos = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+    u128 max_neg = u128(1) << 63;
+    if (raw >= p) return false;
+    if (raw <= max_pos) {
+        out = static_cast<int64_t>(raw);
+        return true;
+    }
+    if (raw <= p / 2) return false;
+    u128 magnitude = p - raw;
+    if (magnitude > max_neg) return false;
+    if (magnitude == max_neg) {
+        out = std::numeric_limits<int64_t>::min();
+        return true;
+    }
+    out = -static_cast<int64_t>(magnitude);
+    return true;
+}
 
 inline Fp fp_from_u64(uint64_t x) {
     return Fp{x, 0};
@@ -210,6 +233,104 @@ inline Fp fp_mul(const Fp& a, const Fp& b) {
     uint64_t z0, z1, z2, z3;
     mul128x128(a.lo, a.hi, b.lo, b.hi, z0, z1, z2, z3);
     return fp_reduce256(z0, z1, z2, z3);
+}
+
+namespace detail {
+
+#if defined(__AVX2__)
+inline void fp_add_vec_avx2(
+    Fp* output,
+    const Fp* a,
+    const Fp* b,
+    size_t count
+) {
+    size_t i = 0;
+    const __m256i one = _mm256_set1_epi64x(1);
+    const __m256i sign =
+        _mm256_set1_epi64x(-9223372036854775807LL - 1);
+    alignas(32) uint64_t lanes[4];
+
+    for (; i + 2 <= count; i += 2) {
+        const __m256i av =
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(a + i));
+        const __m256i bv =
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b + i));
+        const __m256i sum = _mm256_add_epi64(av, bv);
+        const __m256i carry_mask = _mm256_cmpgt_epi64(
+            _mm256_xor_si256(av, sign),
+            _mm256_xor_si256(sum, sign)
+        );
+        const __m256i carry = _mm256_and_si256(
+            _mm256_slli_si256(carry_mask, 8),
+            one
+        );
+        const __m256i raw = _mm256_add_epi64(sum, carry);
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(lanes), raw);
+        output[i] = fp_from_words(lanes[0], lanes[1]);
+        output[i + 1] = fp_from_words(lanes[2], lanes[3]);
+    }
+    for (; i < count; ++i)
+        output[i] = fp_add(a[i], b[i]);
+}
+#endif
+
+}  // namespace detail
+
+inline void fp_add_vec(Fp* output, const Fp* a, const Fp* b, size_t count) {
+#if defined(__AVX2__)
+    detail::fp_add_vec_avx2(output, a, b, count);
+#else
+    for (size_t i = 0; i < count; ++i)
+        output[i] = fp_add(a[i], b[i]);
+#endif
+}
+
+inline void fp_add_inplace(Fp* accumulator, const Fp* values, size_t count) {
+#if defined(__AVX2__)
+    detail::fp_add_vec_avx2(accumulator, accumulator, values, count);
+#else
+    for (size_t i = 0; i < count; ++i)
+        accumulator[i] = fp_add(accumulator[i], values[i]);
+#endif
+}
+
+inline void fp_sub_vec(Fp* output, const Fp* a, const Fp* b, size_t count) {
+    for (size_t i = 0; i < count; ++i)
+        output[i] = fp_sub(a[i], b[i]);
+}
+
+inline void fp_neg_vec(Fp* output, const Fp* values, size_t count) {
+    for (size_t i = 0; i < count; ++i)
+        output[i] = fp_neg(values[i]);
+}
+
+inline void fp_mul_vec(Fp* output, const Fp* a, const Fp* b, size_t count) {
+    size_t i = 0;
+    for (; i + 4 <= count; i += 4) {
+        output[i] = fp_mul(a[i], b[i]);
+        output[i + 1] = fp_mul(a[i + 1], b[i + 1]);
+        output[i + 2] = fp_mul(a[i + 2], b[i + 2]);
+        output[i + 3] = fp_mul(a[i + 3], b[i + 3]);
+    }
+    for (; i < count; ++i)
+        output[i] = fp_mul(a[i], b[i]);
+}
+
+inline void fp_mul_scalar_vec(
+    Fp* output,
+    const Fp* values,
+    Fp scalar,
+    size_t count
+) {
+    size_t i = 0;
+    for (; i + 4 <= count; i += 4) {
+        output[i] = fp_mul(values[i], scalar);
+        output[i + 1] = fp_mul(values[i + 1], scalar);
+        output[i + 2] = fp_mul(values[i + 2], scalar);
+        output[i + 3] = fp_mul(values[i + 3], scalar);
+    }
+    for (; i < count; ++i)
+        output[i] = fp_mul(values[i], scalar);
 }
 
 inline Fp fp_pow_u64(Fp a, uint64_t e) {

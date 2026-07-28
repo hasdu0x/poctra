@@ -5,4 +5,14 @@ app/.cxx/
 local.properties
 *.iml
 .idea/
+.tmp-adb/
+temp/
 temp/**/public/
+.env
+tools/public_circle/.env.*
+!tools/public_circle/.env.example
+*.jks
+*.keystore
+*.p12
+keystore.properties
+play-integrity-service-account*.json

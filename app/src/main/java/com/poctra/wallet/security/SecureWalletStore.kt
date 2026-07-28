@@ -18,6 +18,7 @@ import java.security.KeyStore
 import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
+import javax.crypto.Mac
 import javax.crypto.SecretKey
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
@@ -25,6 +26,16 @@ import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 
 class SecureWalletStore(context: Context) {
+    data class UnlockedPinVault(
+        val vault: WalletVault,
+        val sessionKey: ByteArray,
+    )
+
+    private data class DerivedPinKey(
+        val bytes: ByteArray,
+        val version: Int,
+    )
+
     private val prefs: SharedPreferences = context.applicationContext.getSharedPreferences(
         PrefsName,
         Context.MODE_PRIVATE,
@@ -66,45 +77,63 @@ class SecureWalletStore(context: Context) {
     }
 
     fun saveVaultWithBiometric(vault: WalletVault, authenticatedCipher: Cipher) {
-        val encrypted = authenticatedCipher.doFinal(vault.toJson().toString().toByteArray(Charsets.UTF_8))
-        prefs.edit()
-            .putString(KeyMethod, SecurityMethod.Biometric.storageValue)
-            .putString(KeyEncryptedWallet, encrypted.toBase64())
-            .putString(KeyIv, authenticatedCipher.iv.toBase64())
-            .remove(KeySalt)
-            .putString(KeyAddress, vault.activeWallet?.address ?: vault.activeAddress)
-            .putString(KeyPublicKey, vault.activeWallet?.publicKeyHex.orEmpty())
-            .putString(KeyWalletMetadata, walletMetadataJson(vault))
-            .putLong(KeyCreatedAt, System.currentTimeMillis())
-            .apply()
+        val plaintext = vault.toJson().toString().toByteArray(Charsets.UTF_8)
+        val encrypted = try {
+            authenticatedCipher.doFinal(plaintext)
+        } finally {
+            plaintext.fill(0)
+        }
+        val iv = authenticatedCipher.iv
+        try {
+            prefs.edit()
+                .putString(KeyMethod, SecurityMethod.Biometric.storageValue)
+                .putString(KeyEncryptedWallet, encrypted.toBase64())
+                .putString(KeyIv, iv.toBase64())
+                .remove(KeySalt)
+                .remove(KeyPinKdfVersion)
+                .putString(KeyAddress, vault.activeWallet?.address ?: vault.activeAddress)
+                .putString(KeyPublicKey, vault.activeWallet?.publicKeyHex.orEmpty())
+                .putString(KeyWalletMetadata, walletMetadataJson(vault))
+                .putLong(KeyCreatedAt, System.currentTimeMillis())
+                .apply()
+        } finally {
+            encrypted.fill(0)
+            iv.fill(0)
+        }
+        deletePinBindingKey()
         clearPinFailures()
     }
 
     fun saveWithPin(wallet: Wallet, pin: String) {
-        saveVaultWithPin(WalletVault.single(wallet), pin)
+        saveVaultWithPin(WalletVault.single(wallet), pin).fill(0)
     }
 
-    fun saveVaultWithPin(vault: WalletVault, pin: String) {
+    fun saveVaultWithPin(vault: WalletVault, pin: String): ByteArray {
         require(pin.matches(Regex("\\d{6}"))) { "PIN must be 6 digits." }
-        deleteBiometricKey()
-
         val salt = ByteArray(SaltLength).also(secureRandom::nextBytes)
-        val iv = ByteArray(IvLength).also(secureRandom::nextBytes)
-        val cipher = Cipher.getInstance(AesMode)
-        cipher.init(Cipher.ENCRYPT_MODE, derivePinKey(pin, salt), GCMParameterSpec(128, iv))
-        val encrypted = cipher.doFinal(vault.toJson().toString().toByteArray(Charsets.UTF_8))
+        val derived = derivePinKey(pin, salt, bindToDevice = true, createDeviceKey = true)
+        return try {
+            saveVaultWithKey(vault, derived.bytes, salt, derived.version)
+            deleteBiometricKey()
+            clearPinFailures()
+            derived.bytes
+        } catch (error: Exception) {
+            derived.bytes.fill(0)
+            throw error
+        } finally {
+            salt.fill(0)
+        }
+    }
 
-        prefs.edit()
-            .putString(KeyMethod, SecurityMethod.Pin.storageValue)
-            .putString(KeyEncryptedWallet, encrypted.toBase64())
-            .putString(KeyIv, iv.toBase64())
-            .putString(KeySalt, salt.toBase64())
-            .putString(KeyAddress, vault.activeWallet?.address ?: vault.activeAddress)
-            .putString(KeyPublicKey, vault.activeWallet?.publicKeyHex.orEmpty())
-            .putString(KeyWalletMetadata, walletMetadataJson(vault))
-            .putLong(KeyCreatedAt, System.currentTimeMillis())
-            .apply()
-        clearPinFailures()
+    fun saveVaultWithPinSession(vault: WalletVault, sessionKey: ByteArray) {
+        require(sessionKey.size == KeyLengthBytes) { "PIN session key is invalid." }
+        val salt = decodeRequired(KeySalt)
+        val version = prefs.getInt(KeyPinKdfVersion, LegacyPinKdfVersion)
+        try {
+            saveVaultWithKey(vault, sessionKey, salt, version)
+        } finally {
+            salt.fill(0)
+        }
     }
 
     fun loadWithBiometric(authenticatedCipher: Cipher): Wallet {
@@ -114,9 +143,13 @@ class SecureWalletStore(context: Context) {
 
     fun loadVaultWithBiometric(authenticatedCipher: Cipher): WalletVault {
         val encrypted = decodeRequired(KeyEncryptedWallet)
-        val decrypted = authenticatedCipher.doFinal(encrypted)
-        clearPinFailures()
-        return parseVault(String(decrypted, Charsets.UTF_8))
+        return try {
+            val decrypted = authenticatedCipher.doFinal(encrypted)
+            clearPinFailures()
+            parseVaultBytes(decrypted)
+        } finally {
+            encrypted.fill(0)
+        }
     }
 
     fun loadWithPin(pin: String): Wallet {
@@ -125,21 +158,63 @@ class SecureWalletStore(context: Context) {
     }
 
     fun loadVaultWithPin(pin: String): WalletVault {
+        val unlocked = loadVaultWithPinSession(pin)
+        return try {
+            unlocked.vault
+        } finally {
+            unlocked.sessionKey.fill(0)
+        }
+    }
+
+    fun loadVaultWithPinSession(pin: String): UnlockedPinVault {
         require(pin.matches(Regex("\\d{6}"))) { "PIN must be 6 digits." }
         assertPinAllowed()
 
         val encrypted = decodeRequired(KeyEncryptedWallet)
         val salt = decodeRequired(KeySalt)
         val iv = decodeRequired(KeyIv)
+        val storedVersion = prefs.getInt(KeyPinKdfVersion, LegacyPinKdfVersion)
+        var sessionKey: ByteArray? = null
         return try {
+            val initial = derivePinKey(
+                pin = pin,
+                salt = salt,
+                bindToDevice = storedVersion >= DeviceBoundPinKdfVersion,
+                createDeviceKey = storedVersion < DeviceBoundPinKdfVersion,
+            )
+            sessionKey = initial.bytes
             val cipher = Cipher.getInstance(AesMode)
-            cipher.init(Cipher.DECRYPT_MODE, derivePinKey(pin, salt), GCMParameterSpec(128, iv))
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(initial.bytes, "AES"), GCMParameterSpec(128, iv))
             val decrypted = cipher.doFinal(encrypted)
+            val loaded = parseVaultBytes(decrypted)
+
+            if (storedVersion == LegacyPinKdfVersion) {
+                val upgraded = derivePinKey(pin, salt, bindToDevice = true, createDeviceKey = true)
+                if (upgraded.version == DeviceBoundPinKdfVersion) {
+                    val migrated = runCatching {
+                        saveVaultWithKey(loaded, upgraded.bytes, salt, upgraded.version)
+                    }.isSuccess
+                    if (migrated) {
+                        sessionKey?.fill(0)
+                        sessionKey = upgraded.bytes
+                    } else {
+                        upgraded.bytes.fill(0)
+                    }
+                } else {
+                    upgraded.bytes.fill(0)
+                }
+            }
             clearPinFailures()
-            parseVault(String(decrypted, Charsets.UTF_8))
+            UnlockedPinVault(loaded, requireNotNull(sessionKey))
         } catch (error: Exception) {
+            sessionKey?.fill(0)
+            if (error is PinDeviceBindingException) throw error
             recordPinFailure()
             throw IllegalArgumentException("Invalid PIN.", error)
+        } finally {
+            encrypted.fill(0)
+            salt.fill(0)
+            iv.fill(0)
         }
     }
 
@@ -152,6 +227,7 @@ class SecureWalletStore(context: Context) {
             .put("encryptedWallet", prefs.getString(KeyEncryptedWallet, null))
             .put("iv", prefs.getString(KeyIv, null))
             .put("salt", prefs.getString(KeySalt, null))
+            .put("pinKdfVersion", prefs.getInt(KeyPinKdfVersion, LegacyPinKdfVersion))
             .put("createdAt", prefs.getLong(KeyCreatedAt, 0L))
 
         require(!backup.isNull("encryptedWallet")) { "No encrypted wallet data to back up." }
@@ -163,8 +239,12 @@ class SecureWalletStore(context: Context) {
         return (lockedUntil - System.currentTimeMillis()).coerceAtLeast(0L)
     }
 
-    private fun parseVault(jsonText: String): WalletVault {
-        val parsed = applyWalletMetadata(WalletVault.fromJson(JSONObject(jsonText)))
+    private fun parseVaultBytes(jsonBytes: ByteArray): WalletVault {
+        val parsed = try {
+            applyWalletMetadata(WalletVault.fromJson(JSONObject(String(jsonBytes, Charsets.UTF_8))))
+        } finally {
+            jsonBytes.fill(0)
+        }
         val preferredActive = prefs.getString(KeyAddress, null)
         return if (!preferredActive.isNullOrBlank() && parsed.wallets.any { it.address == preferredActive }) {
             parsed.copy(activeAddress = preferredActive)
@@ -231,19 +311,102 @@ class SecureWalletStore(context: Context) {
             .toString()
     }
 
-    private fun derivePinKey(pin: String, salt: ByteArray): SecretKeySpec {
-        val platformKey = runCatching {
-            val spec = PBEKeySpec(pin.toCharArray(), salt, PbkdfIterations, KeyLengthBytes * 8)
-            SecretKeyFactory.getInstance(PbkdfAlgorithm).generateSecret(spec).encoded
-        }.getOrNull()
-        if (platformKey != null) {
-            return SecretKeySpec(platformKey, "AES")
+    private fun saveVaultWithKey(vault: WalletVault, keyBytes: ByteArray, salt: ByteArray, kdfVersion: Int) {
+        val iv = ByteArray(IvLength).also(secureRandom::nextBytes)
+        val plaintext = vault.toJson().toString().toByteArray(Charsets.UTF_8)
+        val encrypted = try {
+            val cipher = Cipher.getInstance(AesMode)
+            cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(keyBytes, "AES"), GCMParameterSpec(128, iv))
+            cipher.doFinal(plaintext)
+        } finally {
+            plaintext.fill(0)
         }
+        prefs.edit()
+            .putString(KeyMethod, SecurityMethod.Pin.storageValue)
+            .putString(KeyEncryptedWallet, encrypted.toBase64())
+            .putString(KeyIv, iv.toBase64())
+            .putString(KeySalt, salt.toBase64())
+            .putInt(KeyPinKdfVersion, kdfVersion)
+            .putString(KeyAddress, vault.activeWallet?.address ?: vault.activeAddress)
+            .putString(KeyPublicKey, vault.activeWallet?.publicKeyHex.orEmpty())
+            .putString(KeyWalletMetadata, walletMetadataJson(vault))
+            .putLong(KeyCreatedAt, System.currentTimeMillis())
+            .apply()
+        encrypted.fill(0)
+        iv.fill(0)
+    }
 
-        val generator = PKCS5S2ParametersGenerator(SHA256Digest())
-        generator.init(pin.toByteArray(Charsets.UTF_8), salt, PbkdfIterations)
-        val key = (generator.generateDerivedParameters(KeyLengthBytes * 8) as KeyParameter).key
-        return SecretKeySpec(key, "AES")
+    private fun derivePinKey(
+        pin: String,
+        salt: ByteArray,
+        bindToDevice: Boolean,
+        createDeviceKey: Boolean,
+    ): DerivedPinKey {
+        val stretched = platformPbkdf(pin, salt) ?: bouncyCastlePbkdf(pin, salt)
+        if (!bindToDevice) return DerivedPinKey(stretched, LegacyPinKdfVersion)
+
+        val deviceKey = runCatching {
+            if (createDeviceKey) getOrCreatePinBindingKey() else loadPinBindingKey()
+        }.getOrNull()
+        if (deviceKey == null) {
+            if (createDeviceKey) return DerivedPinKey(stretched, LegacyPinKdfVersion)
+            stretched.fill(0)
+            throw PinDeviceBindingException("This PIN vault is bound to a device key that is no longer available.")
+        }
+        return try {
+            val mac = Mac.getInstance(KeyProperties.KEY_ALGORITHM_HMAC_SHA256)
+            mac.init(deviceKey)
+            DerivedPinKey(mac.doFinal(stretched), DeviceBoundPinKdfVersion)
+        } finally {
+            stretched.fill(0)
+        }
+    }
+
+    private fun platformPbkdf(pin: String, salt: ByteArray): ByteArray? {
+        val password = pin.toCharArray()
+        val spec = PBEKeySpec(password, salt, PbkdfIterations, KeyLengthBytes * 8)
+        return try {
+            SecretKeyFactory.getInstance(PbkdfAlgorithm).generateSecret(spec).encoded
+        } catch (_: Exception) {
+            null
+        } finally {
+            spec.clearPassword()
+            password.fill('\u0000')
+        }
+    }
+
+    private fun bouncyCastlePbkdf(pin: String, salt: ByteArray): ByteArray {
+        val password = pin.toByteArray(Charsets.UTF_8)
+        return try {
+            val generator = PKCS5S2ParametersGenerator(SHA256Digest())
+            generator.init(password, salt, PbkdfIterations)
+            (generator.generateDerivedParameters(KeyLengthBytes * 8) as KeyParameter).key
+        } finally {
+            password.fill(0)
+        }
+    }
+
+    private fun getOrCreatePinBindingKey(): SecretKey {
+        loadPinBindingKey()?.let { return it }
+        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_HMAC_SHA256, AndroidKeyStore)
+        generator.init(
+            KeyGenParameterSpec.Builder(PinBindingAlias, KeyProperties.PURPOSE_SIGN)
+                .setDigests(KeyProperties.DIGEST_SHA256)
+                .build(),
+        )
+        return generator.generateKey()
+    }
+
+    private fun loadPinBindingKey(): SecretKey? =
+        KeyStore.getInstance(AndroidKeyStore).apply { load(null) }.getKey(PinBindingAlias, null) as? SecretKey
+
+    private fun deletePinBindingKey() {
+        runCatching {
+            KeyStore.getInstance(AndroidKeyStore).apply {
+                load(null)
+                if (containsAlias(PinBindingAlias)) deleteEntry(PinBindingAlias)
+            }
+        }
     }
 
     private fun getOrCreateBiometricKey(): SecretKey {
@@ -324,6 +487,7 @@ class SecureWalletStore(context: Context) {
         private const val PrefsName = "poctra_secure_wallet"
         private const val AndroidKeyStore = "AndroidKeyStore"
         private const val BiometricAlias = "poctra_wallet_biometric_key"
+        private const val PinBindingAlias = "poctra_wallet_pin_binding_key_v2"
         private const val AesMode = "AES/GCM/NoPadding"
         private const val SaltLength = 32
         private const val IvLength = 12
@@ -332,11 +496,14 @@ class SecureWalletStore(context: Context) {
         private const val PbkdfIterations = 310_000
         private const val MaxPinAttempts = 5
         private const val PinLockoutMs = 5 * 60 * 1000L
+        private const val LegacyPinKdfVersion = 1
+        private const val DeviceBoundPinKdfVersion = 2
 
         private const val KeyMethod = "method"
         private const val KeyEncryptedWallet = "encrypted_wallet"
         private const val KeyIv = "iv"
         private const val KeySalt = "salt"
+        private const val KeyPinKdfVersion = "pinKdfVersion"
         private const val KeyAddress = "address"
         private const val KeyPublicKey = "public_key"
         private const val KeyCreatedAt = "created_at"
@@ -345,3 +512,5 @@ class SecureWalletStore(context: Context) {
         private const val KeyWalletMetadata = "wallet_metadata"
     }
 }
+
+class PinDeviceBindingException(message: String) : IllegalStateException(message)

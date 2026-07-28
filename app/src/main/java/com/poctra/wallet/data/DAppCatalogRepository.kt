@@ -136,7 +136,7 @@ class DAppCatalogRepository(context: Context) {
     }
 
     companion object {
-        const val CatalogUrl = "https://m-tq.github.io/poctra/assets/dapp_list.json"
+        const val CatalogUrl = "https://poctra.github.io/assets/dapp_list.json"
         const val SvgDataPrefix = "data:image/svg+xml;base64,"
 
         private const val PrefsName = "poctra_dapp_catalog"

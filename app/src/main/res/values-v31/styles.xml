@@ -1,0 +1,14 @@
+<resources>
+    <style name="Theme.Poctra" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowBackground">@drawable/poctra_launch_window</item>
+        <item name="android:navigationBarColor">#080B09</item>
+        <item name="android:statusBarColor">#080B09</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowSplashScreenBackground">#080B09</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/poctra_launch_animated</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@android:color/transparent</item>
+        <item name="android:windowSplashScreenAnimationDuration">940</item>
+    </style>
+</resources>

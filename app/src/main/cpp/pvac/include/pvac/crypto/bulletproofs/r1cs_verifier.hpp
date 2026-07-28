@@ -7,16 +7,14 @@
 #include "transcript.hpp"
 #include "generators.hpp"
 #include "inner_product.hpp"
+#include "r1cs_limits.hpp"
 #include "r1cs_types.hpp"
 #include "../ristretto255.hpp"
 
 namespace pvac {
 namespace bp {
 
-inline constexpr size_t R1CS_MAX_GATES = BP_MAX_VECTOR_SIZE;
-inline constexpr size_t R1CS_MAX_COMMITTED = static_cast<size_t>(1) << 16;
-inline constexpr size_t R1CS_MAX_CONSTRAINTS = static_cast<size_t>(1) << 20;
-inline constexpr size_t R1CS_MAX_TERMS = static_cast<size_t>(1) << 22;
+static_assert(R1CS_MAX_GATES == BP_MAX_VECTOR_SIZE);
 
 struct ConstraintSystem {
     size_t num_gates;
@@ -136,25 +134,27 @@ inline bool ipp_verify_with_y(
     auto s_inv = batch_sc_inv(s);
 
     std::vector<Scalar> scalars;
-    std::vector<RistrettoPoint> points;
+    std::vector<ExtPoint> points;
     scalars.reserve(2 * n + 2 * lg + 2);
     points.reserve(2 * n + 2 * lg + 2);
 
     Scalar ab = sc_mul(proof.a, proof.b);
 
     const auto& gen = generators();
+    auto G_ext = gen.G_ext_vec(n);
+    auto H_ext = gen.H_ext_vec(n);
     for (size_t i = 0; i < n; i++) {
         scalars.push_back(sc_mul(proof.a, s[i]));
-        points.push_back(gen.G(i));
+        points.push_back(G_ext[i]);
     }
 
     for (size_t i = 0; i < n; i++) {
         scalars.push_back(sc_mul(sc_mul(proof.b, s_inv[i]), y_inv_n[i]));
-        points.push_back(gen.H(i));
+        points.push_back(H_ext[i]);
     }
 
     scalars.push_back(ab);
-    points.push_back(Q);
+    points.push_back(rist_decode_or_throw(Q));
 
     std::vector<Scalar> u_sqs(lg);
     for (size_t k = 0; k < lg; k++)
@@ -163,13 +163,13 @@ inline bool ipp_verify_with_y(
 
     for (size_t k = 0; k < lg; k++) {
         scalars.push_back(sc_neg(u_sqs[k]));
-        points.push_back(proof.L[k]);
+        points.push_back(rist_decode_or_throw(proof.L[k]));
 
         scalars.push_back(sc_neg(u_inv_sqs[k]));
-        points.push_back(proof.R[k]);
+        points.push_back(rist_decode_or_throw(proof.R[k]));
     }
 
-    RistrettoPoint expected = multi_scalar_mul(scalars, points);
+    RistrettoPoint expected = multi_scalar_mul_ext(scalars, points);
     return expected == P;
 }
 
@@ -302,13 +302,15 @@ inline bool r1cs_verify(
         gen.precompute(N);
 
         std::vector<Scalar> sc;
-        std::vector<RistrettoPoint> pt;
+        std::vector<ExtPoint> pt;
         sc.reserve(2*N + 5);
         pt.reserve(2*N + 5);
+        auto G_ext = gen.G_ext_vec(N);
+        auto H_ext = gen.H_ext_vec(N);
 
         for (size_t i = 0; i < N; i++) {
             sc.push_back(sc_mul(xc, sc_mul(y_inv_n[i], wR[i])));
-            pt.push_back(gen.G(i));
+            pt.push_back(G_ext[i]);
         }
 
         for (size_t i = 0; i < N; i++) {
@@ -317,25 +319,25 @@ inline bool r1cs_verify(
                 Scalar{{1,0,0,0}}
             );
             sc.push_back(h_coeff);
-            pt.push_back(gen.H(i));
+            pt.push_back(H_ext[i]);
         }
 
         sc.push_back(xc);
-        pt.push_back(proof.A_I1);
+        pt.push_back(rist_decode_or_throw(proof.A_I1));
 
         sc.push_back(x2);
-        pt.push_back(proof.A_O1);
+        pt.push_back(rist_decode_or_throw(proof.A_O1));
 
         sc.push_back(x3);
-        pt.push_back(proof.S1);
+        pt.push_back(rist_decode_or_throw(proof.S1));
 
         sc.push_back(sc_neg(proof.e_blinding));
-        pt.push_back(pedersen_B_blinding());
+        pt.push_back(pedersen_B_blinding_ext());
 
         sc.push_back(sc_mul(proof.t_x, w_ch));
-        pt.push_back(pedersen_B());
+        pt.push_back(pedersen_B_ext());
 
-        RistrettoPoint P = multi_scalar_mul(sc, pt);
+        RistrettoPoint P = multi_scalar_mul_ext(sc, pt);
 
         if (!ipp_verify_with_y(transcript, P, Q, proof.ipp, N, y_inv_n))
             return false;

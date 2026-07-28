@@ -9,11 +9,13 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.FileProvider
 import com.poctra.wallet.core.WalletCrypto
+import com.poctra.wallet.core.EvmCrypto
 import com.poctra.wallet.data.AssetRepository
 import com.poctra.wallet.data.AddressBookContact
 import com.poctra.wallet.data.AddressBookRepository
@@ -34,6 +36,7 @@ import com.poctra.wallet.data.DAppSessionRepository
 import com.poctra.wallet.data.DAppCatalogEntry
 import com.poctra.wallet.data.DAppCatalogRepository
 import com.poctra.wallet.data.EvmAccountSnapshot
+import com.poctra.wallet.data.EvmDAppTransaction
 import com.poctra.wallet.data.EvmGasEstimate
 import com.poctra.wallet.data.EvmNetwork
 import com.poctra.wallet.data.EvmNft
@@ -69,14 +72,38 @@ import com.poctra.wallet.data.WalletVault
 import com.poctra.wallet.data.TransactionNetworkState
 import com.poctra.wallet.data.TransactionNetworkStatus
 import com.poctra.wallet.data.canonicalizeOrigin
+import com.poctra.wallet.data.circleAssetFeeOu
 import com.poctra.wallet.data.hostLabel
+import com.poctra.wallet.data.validateCircleAssetBody
+import com.poctra.wallet.dapp.circle.CircleResourceMode
+import com.poctra.wallet.dapp.circle.isCircleCredentialOrIntegrityFailure
+import com.poctra.wallet.dapp.circle.normalizeCircleAssetPath
+import com.poctra.wallet.dapp.circle.parseCircleResourceMode
+import com.poctra.wallet.dapp.circle.resolveCircleResourceMode
+import com.poctra.wallet.dapp.circle.wireValue
+import com.poctra.wallet.data.validateCircleContentType
+import com.poctra.wallet.data.validateCircleWritePath
+import com.poctra.wallet.dapp.evm.Eip712TypedData
+import com.poctra.wallet.dapp.evm.Eip712TypedDataCodec
 import com.poctra.wallet.security.DAppUrlPolicy
+import com.poctra.wallet.security.BackendRequestSecurity
 import com.poctra.wallet.security.DeviceSecurity
+import com.poctra.wallet.security.PlayIntegrityState
+import com.poctra.wallet.security.PlayIntegrityStatus
+import com.poctra.wallet.security.RuntimeSecurity
+import com.poctra.wallet.security.RuntimeSecurityAssessment
+import com.poctra.wallet.security.RuntimeSecuritySignal
 import com.poctra.wallet.security.SecureWalletStore
 import com.poctra.wallet.privacy.PrivacyClaimableTransfer
 import com.poctra.wallet.privacy.PrivacyClaimPayload
 import com.poctra.wallet.privacy.PrivacyCryptoEngine
 import com.poctra.wallet.privacy.PrivacyEncryptedBalance
+import com.poctra.wallet.privacy.PrivacyIdentity
+import com.poctra.wallet.privacy.PrivacyKeyCompatibility
+import com.poctra.wallet.privacy.PrivacyKeyUpgradeMode
+import com.poctra.wallet.privacy.PrivacyKeyUpgradeStatus
+import com.poctra.wallet.privacy.PrivacyUpgradeFacts
+import com.poctra.wallet.privacy.PrivacyUpgradePolicy
 import com.poctra.wallet.privacy.PrivacyOperationStage
 import com.poctra.wallet.privacy.PrivacyOperationState
 import com.poctra.wallet.privacy.PrivacyOperationType
@@ -98,6 +125,7 @@ import kotlinx.coroutines.withContext
 import java.math.BigDecimal
 import java.math.BigInteger
 import java.math.RoundingMode
+import java.net.URI
 import java.net.URLEncoder
 import java.io.File
 import java.security.MessageDigest
@@ -118,6 +146,7 @@ enum class AppRoute {
     PrivacyDecrypt,
     PrivacyStealth,
     PrivacyClaim,
+    PrivacySettings,
     Settings,
     RpcManagement,
     RpcAddNetwork,
@@ -261,6 +290,7 @@ private fun initialPrivacySyncSteps(): List<PrivacySyncStep> = listOf(
     PrivacySyncStep("initializing.."),
     PrivacySyncStep("loading encrypted balance"),
     PrivacySyncStep("loading privacy history"),
+    PrivacySyncStep("checking privacy key"),
 )
 
 enum class TradeStep {
@@ -274,6 +304,11 @@ enum class TradeStep {
 
 private data class TradeChartCacheEntry(
     val candles: List<TradeCandle>,
+    val fetchedAtMs: Long,
+)
+
+private data class CircleAssetCacheEntry(
+    val asset: CircleAsset,
     val fetchedAtMs: Long,
 )
 
@@ -291,6 +326,16 @@ data class DAppRequestDetail(
     val value: String,
 )
 
+data class CircleDownloadResource(
+    val circleId: String,
+    val path: String,
+)
+
+private class DAppProviderException(
+    val providerCode: Int,
+    message: String,
+) : IllegalArgumentException(message)
+
 class PoctraController(private val activity: Activity) {
     private val appContext = activity.applicationContext
     private val uiPrefs = appContext.getSharedPreferences("poctra_ui", Context.MODE_PRIVATE)
@@ -306,8 +351,10 @@ class PoctraController(private val activity: Activity) {
     private val assetRepository = AssetRepository(appContext)
     private val identityProviderRepository = OctraIdentityProviderRepository(appContext)
     private val evmRepository = EvmRepository(appContext)
-    private val bridgeRepository = BridgeRepository()
-    private val tradeRepository = TradeRepository()
+    private val bridgeRepository = BridgeRepository(appContext)
+    private val tradeRepository = TradeRepository(appContext)
+    private val backendRequestSecurity = BackendRequestSecurity.get(appContext)
+    private val runtimeSecurity = RuntimeSecurity(appContext)
     private val octPriceRepository = OctPriceRepository()
     private val backupExporter = BackupExporter(appContext)
     private val privacyCrypto = PrivacyCryptoEngine()
@@ -317,6 +364,8 @@ class PoctraController(private val activity: Activity) {
     private var rpcManagementReturnRoute = AppRoute.Settings
     private var evmNetworkReturnRoute = AppRoute.Evm
     private var evmNetworkReturnTab: DashboardTab? = null
+    private var evmAddTokenReturnRoute = AppRoute.Evm
+    private var evmAddTokenReturnTab: DashboardTab? = null
 
     var route by mutableStateOf(AppRoute.Loading)
         private set
@@ -342,6 +391,8 @@ class PoctraController(private val activity: Activity) {
         private set
     var activeRpcNetwork by mutableStateOf<RpcNetwork?>(null)
         private set
+    var rpcEditingNetwork by mutableStateOf<RpcNetwork?>(null)
+        private set
     var tokenBalance by mutableStateOf(
         TokenBalance(
             symbol = "OCT",
@@ -363,6 +414,8 @@ class PoctraController(private val activity: Activity) {
     var addressBookContacts by mutableStateOf<List<AddressBookContact>>(emptyList())
         private set
     var securityRisks by mutableStateOf<List<ConsumerRiskItem>>(emptyList())
+        private set
+    var runtimeSecurityAssessment by mutableStateOf(runtimeSecurity.assess())
         private set
     var unifiedActivity by mutableStateOf<List<UnifiedActivityItem>>(emptyList())
         private set
@@ -431,6 +484,10 @@ class PoctraController(private val activity: Activity) {
     var privacyClaimableTransfers by mutableStateOf<List<PrivacyClaimableTransfer>>(emptyList())
         private set
     var privacyOperation by mutableStateOf<PrivacyOperationState?>(null)
+        private set
+    var privacyKeyStatus by mutableStateOf(PrivacyKeyUpgradeStatus())
+        private set
+    var privacyKeyStatusLoading by mutableStateOf(false)
         private set
     var assetPreview by mutableStateOf<OctraToken?>(null)
         private set
@@ -517,6 +574,8 @@ class PoctraController(private val activity: Activity) {
         private set
     var evmSendDialogRecipient by mutableStateOf("")
         private set
+    var evmSendDialogRecipientIdentity by mutableStateOf<String?>(null)
+        private set
     var evmSendDialogAmount by mutableStateOf("")
         private set
     var evmSendSpeedUpBusy by mutableStateOf(false)
@@ -568,6 +627,8 @@ class PoctraController(private val activity: Activity) {
     private var activeBridgeHistoryId: String? = null
     var tradeBalances by mutableStateOf(TradeBalances())
         private set
+    var tradeAssets by mutableStateOf(listOf(TradeAsset.WOCT, TradeAsset.ETH, TradeAsset.USDT))
+        private set
     var tradeQuote by mutableStateOf<TradeQuote?>(null)
         private set
     var tradeQuoteError by mutableStateOf<String?>(null)
@@ -615,7 +676,7 @@ class PoctraController(private val activity: Activity) {
     var pendingDAppRequest by mutableStateOf<PendingDAppRequest?>(null)
         private set
 
-    private var sessionPin: String? = null
+    private var pinSessionKey: ByteArray? = null
     private var unlockReturnRoute: AppRoute = AppRoute.Dashboard
     private var unlockReturnTab: DashboardTab = DashboardTab.Overview
     private var dAppReturnRoute: AppRoute = AppRoute.Dashboard
@@ -661,15 +722,21 @@ class PoctraController(private val activity: Activity) {
     private var privacySyncSerial = 0L
     private var privacyOperationSerial = 0L
     private var privacyFeeSerial = 0L
+    private var privacyKeyStatusSerial = 0L
     private var privacyLoadedKey: String? = null
     private var privacyLoadedAt = 0L
     private var privacyDecryptedCipher: String? = null
     private var privacyClaimCacheKey: String? = null
     private var privacyClaimCacheAt = 0L
+    private var privacyForceRefreshRequested = false
     private var tradePendingEvmTransaction by mutableStateOf<EvmSendResult?>(null)
     private val circleResourceModeCache = ConcurrentHashMap<String, String>()
+    private val circleBrowserModeCache = ConcurrentHashMap<String, String>()
+    private val circleAssetCache = ConcurrentHashMap<String, CircleAssetCacheEntry>()
+    private val circleAssetLocks = ConcurrentHashMap<String, Any>()
     private val circlePassphrases = ConcurrentHashMap<String, String>()
     private val activeCircleDownloads = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+    private val pendingCircleDeployments = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
     private val tradeChartCache = mutableMapOf<String, TradeChartCacheEntry>()
 
     val biometricAvailable: Boolean
@@ -756,6 +823,9 @@ class PoctraController(private val activity: Activity) {
     val privacyOperationActive: Boolean
         get() = privacyOperation?.let { !it.isTerminal && it.stage != PrivacyOperationStage.Review } == true
 
+    private val privacyOperationBlockingNavigation: Boolean
+        get() = privacyOperationActive && privacyOperation?.dialogVisible == true
+
     val privacyInitializing: Boolean
         get() {
             val activeWallet = wallet ?: return false
@@ -768,6 +838,7 @@ class PoctraController(private val activity: Activity) {
             AppRoute.SecuritySetup,
             AppRoute.Unlock,
             AppRoute.BackupSettings,
+            AppRoute.PrivacySettings,
         ) || pendingDAppRequest != null ||
             submittedTransaction?.showDialog == true ||
             bridgeDialogVisible ||
@@ -780,6 +851,7 @@ class PoctraController(private val activity: Activity) {
     }
 
     fun bootstrap() {
+        backendRequestSecurity.warmUp()
         rpcNetworks = rpcRepository.rpcNetworks()
         activeRpcNetwork = rpcRepository.activeNetwork()
         evmNetworks = evmRepository.networks()
@@ -848,6 +920,7 @@ class PoctraController(private val activity: Activity) {
         privacyBalanceVisible = false
         privacyBalanceRaw = null
         privacyDecryptedCipher = null
+        wallet?.address?.let { address -> rpcRepository.invalidatePvacRegistration(address) }
         circlePassphrases.clear()
         circlePassphraseRequest = null
         if (!privacyInProgress) {
@@ -855,7 +928,7 @@ class PoctraController(private val activity: Activity) {
             if (privacyOperation?.type == PrivacyOperationType.Claim) privacyOperation = null
             scope.launch { runCatching { privacyCrypto.clear() } }
         }
-        sessionPin = null
+        replacePinSessionKey(null)
         vault = null
         wallet = null
         clearPendingDAppRequest()
@@ -914,7 +987,7 @@ class PoctraController(private val activity: Activity) {
         }
         runBusy {
             withContext(Dispatchers.IO) { secureStore.saveVaultWithBiometric(vaultToSave, cipher) }
-            sessionPin = null
+            replacePinSessionKey(null)
             completeVaultSetup(vaultToSave)
         }
     }
@@ -925,26 +998,26 @@ class PoctraController(private val activity: Activity) {
             return
         }
         runBusy {
-            withContext(Dispatchers.IO) { secureStore.saveVaultWithPin(vaultToSave, pin) }
-            sessionPin = pin
+            val sessionKey = withContext(Dispatchers.IO) { secureStore.saveVaultWithPin(vaultToSave, pin) }
+            replacePinSessionKey(sessionKey)
             completeVaultSetup(vaultToSave)
         }
     }
 
-    fun unlockWithBiometric(cipher: Cipher) {
-        runBusy {
+    fun unlockWithBiometric(cipher: Cipher, onComplete: () -> Unit = {}) {
+        runBusy(onComplete = onComplete) {
             val loaded = withContext(Dispatchers.IO) { secureStore.loadVaultWithBiometric(cipher) }
             activateVault(loaded)
-            sessionPin = null
+            replacePinSessionKey(null)
             restoreAfterUnlock()
         }
     }
 
     fun unlockWithPin(pin: String) {
         runBusy {
-            val loaded = withContext(Dispatchers.IO) { secureStore.loadVaultWithPin(pin) }
-            activateVault(loaded)
-            sessionPin = pin
+            val unlocked = withContext(Dispatchers.IO) { secureStore.loadVaultWithPinSession(pin) }
+            activateVault(unlocked.vault)
+            replacePinSessionKey(unlocked.sessionKey)
             restoreAfterUnlock()
         }
     }
@@ -982,6 +1055,7 @@ class PoctraController(private val activity: Activity) {
             AppRoute.PrivacyEncrypt,
             AppRoute.PrivacyDecrypt,
             AppRoute.PrivacyStealth -> refreshPrivacy(force = false)
+            AppRoute.PrivacySettings -> refreshPrivacyKeyStatus()
             AppRoute.PrivacyClaim -> {
                 refreshPrivacy(force = false)
                 scanPrivacyClaims(showDialog = false)
@@ -1006,8 +1080,9 @@ class PoctraController(private val activity: Activity) {
 
     fun beginSecurityUpdateWithPin(pin: String) {
         runBusy {
-            pendingVault = withContext(Dispatchers.IO) { secureStore.loadVaultWithPin(pin) }
-            sessionPin = pin
+            val unlocked = withContext(Dispatchers.IO) { secureStore.loadVaultWithPinSession(pin) }
+            pendingVault = unlocked.vault
+            replacePinSessionKey(unlocked.sessionKey)
             route = AppRoute.SecuritySetup
         }
     }
@@ -1015,7 +1090,7 @@ class PoctraController(private val activity: Activity) {
     fun beginSecurityUpdateWithBiometric(cipher: Cipher) {
         runBusy {
             pendingVault = withContext(Dispatchers.IO) { secureStore.loadVaultWithBiometric(cipher) }
-            sessionPin = null
+            replacePinSessionKey(null)
             route = AppRoute.SecuritySetup
         }
     }
@@ -1024,16 +1099,16 @@ class PoctraController(private val activity: Activity) {
         runBusy {
             val loaded = withContext(Dispatchers.IO) { secureStore.loadVaultWithBiometric(cipher) }
             activateVault(loaded)
-            sessionPin = null
+            replacePinSessionKey(null)
             onVerified()
         }
     }
 
     fun confirmSecurityWithPin(pin: String, onVerified: () -> Unit) {
         runBusy {
-            val loaded = withContext(Dispatchers.IO) { secureStore.loadVaultWithPin(pin) }
-            activateVault(loaded)
-            sessionPin = pin
+            val unlocked = withContext(Dispatchers.IO) { secureStore.loadVaultWithPinSession(pin) }
+            activateVault(unlocked.vault)
+            replacePinSessionKey(unlocked.sessionKey)
             onVerified()
         }
     }
@@ -1093,10 +1168,17 @@ class PoctraController(private val activity: Activity) {
     }
 
     fun openAddRpcNetwork() {
+        rpcEditingNetwork = null
+        route = AppRoute.RpcAddNetwork
+    }
+
+    fun openEditRpcNetwork(network: RpcNetwork) {
+        rpcEditingNetwork = network
         route = AppRoute.RpcAddNetwork
     }
 
     fun closeAddRpcNetwork() {
+        rpcEditingNetwork = null
         route = AppRoute.RpcManagement
     }
 
@@ -1265,7 +1347,11 @@ class PoctraController(private val activity: Activity) {
         route = AppRoute.IdentityProviderSettings
     }
 
-    fun addIdentityProvider(name: String, contractAddress: String, network: String) {
+    fun addIdentityProvider(
+        name: String,
+        contractAddress: String,
+        network: String,
+    ) {
         runBusy {
             val provider = OctraIdentityProvider(
                 id = "identity-${System.currentTimeMillis()}",
@@ -1587,6 +1673,10 @@ class PoctraController(private val activity: Activity) {
         val activeWallet = wallet ?: return showError("Unlock wallet before speeding up this transaction.")
         val pending = bridgePendingEvmTransaction ?: return showError("No pending EVM bridge transaction to speed up.")
         if (!bridgeCanSpeedUp || bridgeSpeedUpBusy) return
+        configureBridgeRepositoryOrWarn()?.let { warning ->
+            showError(warning)
+            return
+        }
         scope.launch {
             bridgeSpeedUpBusy = true
             try {
@@ -2528,6 +2618,9 @@ class PoctraController(private val activity: Activity) {
     fun refreshTrade() {
         val activeWallet = wallet ?: return
         val requestSerial = ++tradeBalanceRequestSerial
+        val network = activeEvmNetwork ?: evmRepository.activeNetwork()
+        val assets = TradeAsset.forNetwork(network, evmRepository.savedTokens(network.chainId))
+        tradeAssets = assets
         configureTradeRepositoryOrWarn("syncing trade data")?.let { warning ->
             tradeBalances = TradeBalances()
             tradeQuote = null
@@ -2536,13 +2629,12 @@ class PoctraController(private val activity: Activity) {
             tradeLoading = false
             return
         }
-        val network = activeEvmNetwork ?: evmRepository.activeNetwork()
         val walletAddress = activeWallet.address
         tradeLoading = true
         scope.launch {
             try {
                 val balances = withContext(Dispatchers.IO) {
-                    tradeRepository.fetchBalances(activeWallet)
+                    tradeRepository.fetchBalances(activeWallet, assets)
                 }
                 if (requestSerial != tradeBalanceRequestSerial || !isActiveEvmSnapshot(walletAddress, network.id)) return@launch
                 tradeBalances = balances
@@ -2774,7 +2866,7 @@ class PoctraController(private val activity: Activity) {
             return
         }
         if (!tradeRepository.isSupportedPair(fromAsset, toAsset)) {
-            tradeQuoteError = "Trade supports wOCT pairs with ETH or USDT."
+            tradeQuoteError = "Trade supports asset pairs on Ethereum Mainnet."
             return
         }
         val requestId = ++tradeQuoteRequestSerial
@@ -2872,6 +2964,10 @@ class PoctraController(private val activity: Activity) {
         val activeWallet = wallet ?: return showError("Unlock wallet before speeding up this swap.")
         val pending = tradePendingEvmTransaction ?: return showError("No pending swap transaction to speed up.")
         if (!tradeCanSpeedUp || tradeSpeedUpBusy) return
+        configureTradeRepositoryOrWarn("speeding up this swap")?.let { warning ->
+            showError(warning)
+            return
+        }
         scope.launch {
             tradeSpeedUpBusy = true
             try {
@@ -2918,7 +3014,7 @@ class PoctraController(private val activity: Activity) {
             return
         }
         if (!tradeRepository.isSupportedPair(fromAsset, toAsset)) {
-            showError("Trade supports wOCT pairs with ETH or USDT.")
+            showError("Trade supports asset pairs on Ethereum Mainnet.")
             return
         }
         val quote = tradeQuote
@@ -2932,7 +3028,7 @@ class PoctraController(private val activity: Activity) {
         scope.launch {
             tradeBusy = true
             clearError()
-            tradeStep = if (fromAsset == TradeAsset.ETH) TradeStep.Swapping else TradeStep.TokenApproval
+            tradeStep = if (fromAsset.isNative) TradeStep.Swapping else TradeStep.TokenApproval
             tradeProgress = "Submitting swap route..."
             tradeLastTxHash = null
             tradePendingEvmTransaction = null
@@ -3164,13 +3260,29 @@ class PoctraController(private val activity: Activity) {
     }
 
     fun openEvmAddToken() {
+        evmAddTokenReturnRoute = AppRoute.Evm
+        evmAddTokenReturnTab = null
+        clearEvmAssetPreviews()
+        route = AppRoute.EvmAddToken
+    }
+
+    fun openEvmAddTokenFromTrade() {
+        evmAddTokenReturnRoute = AppRoute.Dashboard
+        evmAddTokenReturnTab = DashboardTab.Trade
         clearEvmAssetPreviews()
         route = AppRoute.EvmAddToken
     }
 
     fun closeEvmAddToken() {
         clearEvmAssetPreviews()
-        route = AppRoute.Evm
+        restoreEvmAddTokenDestination()
+    }
+
+    private fun restoreEvmAddTokenDestination() {
+        evmAddTokenReturnTab?.let { dashboardTab = it }
+        route = evmAddTokenReturnRoute
+        evmAddTokenReturnRoute = AppRoute.Evm
+        evmAddTokenReturnTab = null
     }
 
     fun openEvmAddNft() {
@@ -3185,6 +3297,7 @@ class PoctraController(private val activity: Activity) {
 
     fun openTransactionDetails(transaction: TransactionHistoryItem) {
         selectedTransaction = transaction
+        refreshRecentActivityIdentityNames(listOf(transaction))
         dashboardTab = DashboardTab.Overview
         route = AppRoute.TransactionDetails
     }
@@ -3267,7 +3380,14 @@ class PoctraController(private val activity: Activity) {
                     val historyResult = historyDeferred.await()
                     if (serial == privacySyncSerial && isActiveRpcSnapshot(activeWallet.address, requestRpcUrl)) {
                         historyResult.onSuccess { history ->
-                            privacyHistory = history
+                            val localPending = privacyHistory.filter { transaction ->
+                                transaction.status.equals("pending", ignoreCase = true) &&
+                                    history.none { it.hash == transaction.hash }
+                            }
+                            privacyHistory = (history + localPending)
+                                .distinctBy { it.hash }
+                                .sortedByDescending { it.timestamp }
+                                .take(InitialPrivacyHistoryLimit)
                             updatePrivacySyncStep(
                                 2,
                                 PrivacySyncStatus.Complete,
@@ -3275,6 +3395,47 @@ class PoctraController(private val activity: Activity) {
                             )
                         }.onFailure { failure ->
                             updatePrivacySyncStep(2, PrivacySyncStatus.Failed, failure.message ?: "History unavailable")
+                        }
+                    }
+
+                    updatePrivacySyncStep(3, PrivacySyncStatus.Running)
+                    val keyStatusResult = runCatching {
+                        readPrivacyKeyStatus(
+                            activeWallet = activeWallet,
+                            encryptedBalance = balanceResult.getOrNull(),
+                            rpcUrl = requestRpcUrl,
+                        )
+                    }
+                    if (serial == privacySyncSerial && isActiveRpcSnapshot(activeWallet.address, requestRpcUrl)) {
+                        keyStatusResult.onSuccess { status ->
+                            privacyKeyStatus = status
+                            if (
+                                balanceResult.getOrNull()?.cipher != null &&
+                                status.encryptedBalanceRaw != null
+                            ) {
+                                privacyBalanceRaw = status.encryptedBalanceRaw
+                                privacyDecryptedCipher = balanceResult.getOrNull()?.cipher
+                            }
+                            updatePrivacySyncStep(
+                                3,
+                                PrivacySyncStatus.Complete,
+                                when (status.mode) {
+                                    PrivacyKeyUpgradeMode.Current -> "Privacy key ready"
+                                    PrivacyKeyUpgradeMode.EmptyKeySwitch -> "Privacy key setup required"
+                                    PrivacyKeyUpgradeMode.KeyBoundMigration -> "Encrypted balance refresh required"
+                                    else -> "Privacy key needs attention"
+                                },
+                            )
+                        }.onFailure { failure ->
+                            privacyKeyStatus = PrivacyKeyUpgradeStatus(
+                                mode = PrivacyKeyUpgradeMode.Blocked,
+                                reason = failure.message ?: "Privacy key status is unavailable.",
+                            )
+                            updatePrivacySyncStep(
+                                3,
+                                PrivacySyncStatus.Failed,
+                                failure.message ?: "Key status unavailable",
+                            )
                         }
                     }
                 }
@@ -3286,6 +3447,245 @@ class PoctraController(private val activity: Activity) {
                 if (serial == privacySyncSerial) privacySyncing = false
             }
         }
+    }
+
+    fun refreshPrivacyKeyStatus(forceRefresh: Boolean = false) {
+        launchPrivacyKeyStatusRefresh(
+            forceRefresh = forceRefresh,
+            retryTransientState = privacyKeyStatus.mode == PrivacyKeyUpgradeMode.KeyMismatch,
+        )
+    }
+
+    fun recheckPrivacyKeyState() {
+        privacyLoadedAt = 0L
+        launchPrivacyKeyStatusRefresh(
+            forceRefresh = false,
+            retryTransientState = true,
+        )
+    }
+
+    private fun launchPrivacyKeyStatusRefresh(
+        forceRefresh: Boolean,
+        retryTransientState: Boolean,
+    ) {
+        val activeWallet = wallet ?: return
+        if (privacyKeyStatusLoading || privacyOperationActive) return
+        val serial = ++privacyKeyStatusSerial
+        val rpcUrl = currentRpcUrl
+        privacyKeyStatusLoading = true
+        scope.launch {
+            try {
+                val (encryptedBalance, status) = readPrivacyKeySnapshot(
+                    activeWallet = activeWallet,
+                    rpcUrl = rpcUrl,
+                    forceRefresh = forceRefresh,
+                    attempts = if (retryTransientState) PrivacyKeyRecheckAttempts else 1,
+                )
+                if (
+                    serial == privacyKeyStatusSerial &&
+                    isActiveRpcSnapshot(activeWallet.address, rpcUrl)
+                ) {
+                    applyPrivacyKeySnapshot(activeWallet, rpcUrl, encryptedBalance, status)
+                }
+            } catch (error: Exception) {
+                if (serial == privacyKeyStatusSerial) {
+                    privacyKeyStatus = PrivacyKeyUpgradeStatus(
+                        mode = PrivacyKeyUpgradeMode.Blocked,
+                        reason = error.message ?: "Privacy key status is unavailable.",
+                    )
+                }
+            } finally {
+                if (serial == privacyKeyStatusSerial) privacyKeyStatusLoading = false
+            }
+        }
+    }
+
+    private suspend fun readPrivacyKeySnapshot(
+        activeWallet: Wallet,
+        rpcUrl: String,
+        forceRefresh: Boolean,
+        attempts: Int,
+    ): Pair<PrivacyEncryptedBalance?, PrivacyKeyUpgradeStatus> {
+        var lastBalance: PrivacyEncryptedBalance? = null
+        var lastStatus = PrivacyKeyUpgradeStatus(
+            mode = PrivacyKeyUpgradeMode.Unavailable,
+            reason = "Privacy key status is unavailable.",
+        )
+        repeat(attempts.coerceAtLeast(1)) { attempt ->
+            lastBalance = rpcRepository.fetchEncryptedBalance(activeWallet, rpcUrl)
+            lastStatus = readPrivacyKeyStatus(
+                activeWallet = activeWallet,
+                encryptedBalance = lastBalance,
+                rpcUrl = rpcUrl,
+                forceRefresh = forceRefresh,
+            )
+            if (!lastStatus.mayBeTransientPrivacyKeyState()) {
+                return lastBalance to lastStatus
+            }
+            if (attempt < attempts - 1) delay(PrivacyKeyRecheckDelayMs)
+        }
+        return lastBalance to lastStatus
+    }
+
+    private fun PrivacyKeyUpgradeStatus.mayBeTransientPrivacyKeyState(): Boolean =
+        mode == PrivacyKeyUpgradeMode.KeyMismatch ||
+            (
+                mode == PrivacyKeyUpgradeMode.Blocked &&
+                    (
+                        reason.contains("missing", ignoreCase = true) ||
+                            reason.contains("unavailable", ignoreCase = true) ||
+                            reason.contains("cannot be decrypted", ignoreCase = true)
+                        )
+                )
+
+    private fun applyPrivacyKeySnapshot(
+        activeWallet: Wallet,
+        rpcUrl: String,
+        encryptedBalance: PrivacyEncryptedBalance?,
+        status: PrivacyKeyUpgradeStatus,
+    ) {
+        privacyEncryptedBalance = encryptedBalance
+        privacyKeyStatus = status
+        when {
+            encryptedBalance == null -> {
+                privacyBalanceRaw = 0L
+                privacyBalanceVisible = true
+                privacyDecryptedCipher = null
+            }
+            status.encryptedBalanceRaw != null -> {
+                privacyBalanceRaw = status.encryptedBalanceRaw
+                privacyDecryptedCipher = encryptedBalance.cipher
+            }
+            else -> {
+                privacyBalanceRaw = null
+                privacyBalanceVisible = false
+                privacyDecryptedCipher = null
+            }
+        }
+        privacyLoadedKey = "${activeWallet.address}|$rpcUrl"
+        privacyLoadedAt = System.currentTimeMillis()
+    }
+
+    private suspend fun readPrivacyKeyStatus(
+        activeWallet: Wallet,
+        encryptedBalance: PrivacyEncryptedBalance?,
+        rpcUrl: String,
+        forceRefresh: Boolean = false,
+    ): PrivacyKeyUpgradeStatus {
+        val identity = privacyCrypto.initialize(activeWallet)
+        val localKey = android.util.Base64.encodeToString(identity.publicKey, android.util.Base64.NO_WRAP)
+        val registeredKey = rpcRepository.fetchPvacPublicKey(activeWallet.address, rpcUrl)
+        val registeredKeyCurrent = registeredKey?.let {
+            privacyCrypto.publicKeyMatches(activeWallet, identity.publicKey, it)
+        } == true
+        if (registeredKeyCurrent) {
+            rpcRepository.rememberVerifiedPvacRegistration(
+                address = activeWallet.address,
+                pvacPublicKey = identity.publicKey,
+                url = rpcUrl,
+            )
+        } else {
+            rpcRepository.invalidatePvacRegistration(activeWallet.address, rpcUrl)
+        }
+        val cipher = encryptedBalance?.cipher
+        val diagnostics = cipher?.let { privacyCrypto.inspectCipher(activeWallet, it) }
+        val compatibility = registeredKey
+            ?.takeUnless { registeredKeyCurrent }
+            ?.let { privacyCrypto.keyCompatibility(activeWallet, it) }
+            ?: PrivacyKeyCompatibility(
+                extendsLocalKey = registeredKeyCurrent,
+                legacyV1Profile = false,
+                proofProfile = registeredKeyCurrent,
+            )
+
+        var localBalance: Long? = null
+        var registeredKeyBalance: Long? = null
+        var legacyOwnerBalance: Long? = null
+        var migration: com.poctra.wallet.privacy.PrivacyMigrationNetworkStatus? = null
+        if (cipher != null && diagnostics != null) {
+            if (diagnostics.keyBound) {
+                if (registeredKeyCurrent) {
+                    localBalance = runCatching {
+                        privacyCrypto.decryptBalance(activeWallet, cipher)
+                    }.getOrNull()
+                } else if (registeredKey != null && compatibility.proofProfile) {
+                    registeredKeyBalance = runCatching {
+                        privacyCrypto.decryptBalanceWithRegisteredKey(
+                            activeWallet,
+                            cipher,
+                            registeredKey,
+                            legacyProfile = false,
+                        )
+                    }.getOrNull()
+                }
+            } else {
+                legacyOwnerBalance = if (registeredKey != null && compatibility.legacyV1Profile) {
+                    runCatching {
+                        privacyCrypto.decryptBalanceWithRegisteredKey(
+                            activeWallet,
+                            cipher,
+                            registeredKey,
+                            legacyProfile = true,
+                        )
+                    }.getOrNull()
+                } else {
+                    null
+                } ?: runCatching {
+                    privacyCrypto.decryptBalance(activeWallet, cipher)
+                }.getOrNull()
+                migration = rpcRepository.fetchPvacMigrationStatus(activeWallet.address, rpcUrl)
+            }
+        }
+        var status = PrivacyUpgradePolicy.evaluate(
+            PrivacyUpgradeFacts(
+                cipherPresent = cipher != null,
+                diagnostics = diagnostics,
+                localPublicKey = localKey,
+                registeredPublicKey = registeredKey,
+                registeredPublicKeyMatchesLocal = registeredKeyCurrent,
+                compatibility = compatibility,
+                localBalanceRaw = localBalance,
+                registeredKeyBalanceRaw = registeredKeyBalance,
+                legacyOwnerBalanceRaw = legacyOwnerBalance,
+                migration = migration,
+                forceRefresh = forceRefresh,
+            ),
+        )
+        if (status.canSubmit) {
+            val fee = try {
+                rpcRepository.fetchRecommendedFeeStrict("key_switch", rpcUrl)
+            } catch (_: java.io.IOException) {
+                PrivacyUpgradePolicy.FallbackFeeRaw
+            }
+            val publicBalanceRaw = runCatching {
+                BigDecimal.valueOf(rpcRepository.fetchBalance(activeWallet.address, rpcUrl).balance)
+                    .movePointRight(6)
+                    .setScale(0, RoundingMode.DOWN)
+                    .longValueExact()
+            }.getOrNull()
+            status = PrivacyUpgradePolicy.applyFeeGate(status, fee, publicBalanceRaw)
+        }
+        return status
+    }
+
+    private suspend fun ensurePrivacyKeyRegistered(
+        activeWallet: Wallet,
+        identity: PrivacyIdentity,
+        rpcUrl: String,
+    ) {
+        rpcRepository.ensurePvacRegistered(
+            wallet = activeWallet,
+            pvacPublicKey = identity.publicKey,
+            aesKat = identity.aesKat,
+            url = rpcUrl,
+            matchesRegisteredKey = { registeredKey ->
+                privacyCrypto.publicKeyMatches(
+                    wallet = activeWallet,
+                    expectedPublicKey = identity.publicKey,
+                    registeredPublicKeyBase64 = registeredKey,
+                )
+            },
+        )
     }
 
     fun togglePrivacyBalance() {
@@ -3318,8 +3718,8 @@ class PoctraController(private val activity: Activity) {
             } catch (exception: Exception) {
                 showError(exception.message ?: "Unable to decrypt encrypted balance.")
             } finally {
-                runCatching { privacyCrypto.clear() }
                 privacyBalanceDecrypting = false
+                releasePrivacyCryptoIfLocked()
             }
         }
     }
@@ -3327,6 +3727,246 @@ class PoctraController(private val activity: Activity) {
     fun openPrivacyEncrypt() {
         openPrivacyAction(AppRoute.PrivacyEncrypt, PrivacyOperationType.Encrypt)
     }
+
+    fun openPrivacySettings() {
+        if (privacyOperationBlockingNavigation || privacyBalanceDecrypting) {
+            showError("Finish or minimize the active Privacy process first.")
+            return
+        }
+        dashboardTab = DashboardTab.Privacy
+        route = AppRoute.PrivacySettings
+        refreshPrivacyKeyStatus()
+    }
+
+    fun closePrivacySettings() {
+        dashboardTab = DashboardTab.Privacy
+        route = AppRoute.Dashboard
+    }
+
+    fun refreshPrivacyNetworkState() {
+        if (privacyOperationActive) {
+            showError("A Privacy process is already running.")
+            return
+        }
+        privacyForceRefreshRequested = false
+        recheckPrivacyKeyState()
+    }
+
+    fun startPrivacyKeyUpgrade(resetConfirmation: String = "") {
+        val activeWallet = wallet ?: return showError("Unlock wallet first.")
+        if (privacyOperationActive || privacyBalanceDecrypting) {
+            return showError("A Privacy process is already running.")
+        }
+        val requestedStatus = privacyKeyStatus
+        if (!requestedStatus.canSubmit) {
+            return showError(requestedStatus.reason)
+        }
+        if (
+            requestedStatus.mode == PrivacyKeyUpgradeMode.LegacyZeroReset &&
+            resetConfirmation.trim() != PrivacyUpgradePolicy.ResetPhrase
+        ) {
+            return showError("Type the exact reset phrase before continuing.")
+        }
+        requestedStatus.requiredPublicFeeRaw
+            ?: return showError("Refresh the Privacy key status to load the network fee.")
+        val requestRpcUrl = currentRpcUrl
+        val forceRefresh = privacyForceRefreshRequested
+        val operationId = ++privacyOperationSerial
+        privacyOperation = PrivacyOperationState(
+            id = operationId,
+            type = PrivacyOperationType.KeySwitch,
+            stage = PrivacyOperationStage.Checking,
+            amountOct = requestedStatus.encryptedBalanceRaw?.let(::formatPrivacyAmount).orEmpty(),
+            message = "Checking encrypted balance and key switch fee...",
+            dialogVisible = true,
+        )
+        scope.launch {
+            var migrationBlinding: ByteArray? = null
+            try {
+                val currentBalance = rpcRepository.fetchEncryptedBalance(activeWallet, requestRpcUrl)
+                val freshStatus = readPrivacyKeyStatus(
+                    activeWallet = activeWallet,
+                    encryptedBalance = currentBalance,
+                    rpcUrl = requestRpcUrl,
+                    forceRefresh = forceRefresh,
+                )
+                ensurePrivacyOperationCurrent(operationId)
+                require(freshStatus.canSubmit && freshStatus.mode == requestedStatus.mode) {
+                    if (freshStatus.isReadyForPrivateOperations) {
+                        "Privacy key is already current."
+                    } else {
+                        freshStatus.reason
+                    }
+                }
+                val feeOu = freshStatus.requiredPublicFeeRaw
+                    ?: throw IllegalStateException("Key switch fee is unavailable.")
+                val identity = privacyCrypto.initialize(activeWallet)
+                val newPublicKeyBase64 = android.util.Base64.encodeToString(
+                    identity.publicKey,
+                    android.util.Base64.NO_WRAP,
+                )
+                val registeredKey = rpcRepository.fetchPvacPublicKey(activeWallet.address, requestRpcUrl)
+                val cipher = currentBalance?.cipher
+                val amountRaw = freshStatus.encryptedBalanceRaw ?: 0L
+
+                if (freshStatus.mode == PrivacyKeyUpgradeMode.LegacyCommitmentMigration) {
+                    updatePrivacyOperation(
+                        operationId,
+                        PrivacyOperationStage.BuildingProof,
+                        "Reconstructing legacy commitment history...",
+                    )
+                    val outputs = rpcRepository.fetchStealthOutputs(requestRpcUrl)
+                    migrationBlinding = privacyScanner.reconstructMigrationBlinding(
+                        wallet = activeWallet,
+                        outputs = outputs,
+                        crypto = privacyCrypto,
+                        encryptedBalanceRaw = amountRaw,
+                        expectedCommitmentBase64 = freshStatus.legacyCommitmentNet
+                            ?: throw IllegalStateException("Network migration commitment is missing."),
+                    )
+                }
+
+                val migrationPayload = if (
+                    freshStatus.mode == PrivacyKeyUpgradeMode.EmptyKeySwitch
+                ) {
+                    null
+                } else {
+                    updatePrivacyOperation(
+                        operationId,
+                        PrivacyOperationStage.BuildingProof,
+                        when {
+                            freshStatus.repairRequired -> "Building encrypted balance repair proof..."
+                            freshStatus.compactRefresh -> "Building compact encrypted balance refresh proof..."
+                            else -> "Building encrypted balance migration proof..."
+                        },
+                    )
+                    privacyCrypto.createMigrationPayload(
+                        wallet = activeWallet,
+                        mode = freshStatus.mode,
+                        amountRaw = amountRaw,
+                        currentCipher = cipher,
+                        registeredPublicKeyBase64 = registeredKey,
+                        migrationBlinding = migrationBlinding,
+                    )
+                }
+                ensurePrivacyOperationCurrent(operationId)
+
+                val encryptedData = JSONObject()
+                    .put("new_pubkey", newPublicKeyBase64)
+                    .put("aes_kat", identity.aesKat.toHex())
+                    .apply {
+                        migrationPayload?.let { payload ->
+                            put("new_cipher", payload.newCipher)
+                            put("new_zero_proof", payload.newZeroProof)
+                            put("amount_commitment", payload.amountCommitment)
+                            when (freshStatus.mode) {
+                                PrivacyKeyUpgradeMode.KeyBoundMigration -> {
+                                    put(
+                                        "old_zero_proof",
+                                        payload.oldZeroProof
+                                            ?: throw IllegalStateException("Old balance proof is missing."),
+                                    )
+                                    val sourceCipher = cipher
+                                        ?: throw IllegalStateException("Encrypted balance source is missing.")
+                                    put("source_cipher_hash", sha256Hex(sourceCipher))
+                                }
+                                PrivacyKeyUpgradeMode.LegacyPublicMigration -> {
+                                    put("legacy_public_migration", true)
+                                    put(
+                                        "amount_blinding",
+                                        payload.amountBlinding
+                                            ?: throw IllegalStateException("Migration blinding is missing."),
+                                    )
+                                }
+                                PrivacyKeyUpgradeMode.LegacyCommitmentMigration -> {
+                                    put("legacy_commitment_migration", true)
+                                }
+                                PrivacyKeyUpgradeMode.LegacyZeroReset -> {
+                                    put("legacy_zero_reset", true)
+                                    put(
+                                        "amount_blinding",
+                                        payload.amountBlinding
+                                            ?: throw IllegalStateException("Reset blinding is missing."),
+                                    )
+                                }
+                                else -> Unit
+                            }
+                        }
+                    }
+                    .toWebcliJson()
+
+                if (freshStatus.mode == PrivacyKeyUpgradeMode.KeyBoundMigration) {
+                    val latestCipher = rpcRepository.fetchEncryptedBalance(activeWallet, requestRpcUrl)?.cipher
+                    require(latestCipher != null && sha256Hex(latestCipher) == sha256Hex(cipher.orEmpty())) {
+                        "Encrypted balance changed while building the refresh proof. Retry."
+                    }
+                }
+
+                updatePrivacyOperation(
+                    operationId,
+                    PrivacyOperationStage.Submitting,
+                    "Submitting key switch transaction...",
+                )
+                val result = rpcRepository.submitPrivacyKeySwitch(
+                    wallet = activeWallet,
+                    feeOu = feeOu,
+                    encryptedData = encryptedData,
+                    newPublicKey = identity.publicKey,
+                    url = requestRpcUrl,
+                )
+                ensurePrivacyOperationCurrent(operationId)
+                if (!result.success || result.hash.isNullOrBlank()) {
+                    throw IllegalStateException(result.error ?: "Privacy key switch was rejected.")
+                }
+                updatePrivacyOperation(
+                    operationId,
+                    PrivacyOperationStage.Accepted,
+                    "Key switch accepted. Waiting for blockchain confirmation...",
+                    result.hash,
+                )
+                addPrivacyPending(result.hash, activeWallet, 0L, "key_switch")
+                awaitPrivacyConfirmation(operationId, result.hash, requestRpcUrl)
+                privacyForceRefreshRequested = false
+                val (settledBalance, settledStatus) = readPrivacyKeySnapshot(
+                    activeWallet = activeWallet,
+                    rpcUrl = requestRpcUrl,
+                    forceRefresh = false,
+                    attempts = PrivacyKeyRecheckAttempts,
+                )
+                ensurePrivacyOperationCurrent(operationId)
+                if (isActiveRpcSnapshot(activeWallet.address, requestRpcUrl)) {
+                    applyPrivacyKeySnapshot(
+                        activeWallet = activeWallet,
+                        rpcUrl = requestRpcUrl,
+                        encryptedBalance = settledBalance,
+                        status = settledStatus,
+                    )
+                }
+                val keyReady = settledStatus.isReadyForPrivateOperations
+                updatePrivacyOperation(
+                    operationId,
+                    PrivacyOperationStage.Confirmed,
+                    if (keyReady) {
+                        "Privacy key and encrypted balance are current."
+                    } else {
+                        "Key switch confirmed. Network state is still syncing; recheck Privacy Settings."
+                    },
+                    result.hash,
+                )
+                refreshAfterPrivacyConfirmation(refreshPrivacyState = false)
+            } catch (error: Exception) {
+                failPrivacyOperation(operationId, error.message ?: "Privacy key switch failed.")
+            } finally {
+                migrationBlinding?.fill(0)
+                releasePrivacyCryptoIfLocked()
+            }
+        }
+    }
+
+    private fun sha256Hex(value: String): String =
+        MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
     fun openPrivacyDecrypt() {
         openPrivacyAction(AppRoute.PrivacyDecrypt, PrivacyOperationType.Decrypt)
@@ -3337,8 +3977,9 @@ class PoctraController(private val activity: Activity) {
     }
 
     fun openPrivacyClaim() {
+        val processAlreadyRunning = privacyOperationActive
         if (!openPrivacyAction(AppRoute.PrivacyClaim, PrivacyOperationType.Claim)) return
-        scanPrivacyClaims(showDialog = false)
+        if (!processAlreadyRunning) scanPrivacyClaims(showDialog = false)
     }
 
     private fun openPrivacyAction(target: AppRoute, type: PrivacyOperationType): Boolean {
@@ -3346,8 +3987,13 @@ class PoctraController(private val activity: Activity) {
             showError("Privacy requires a 64-bit device with hardware AES support.")
             return false
         }
-        if (privacyOperationActive || privacyBalanceDecrypting) {
-            showError("A Privacy process is already running. Resume or finish it first.")
+        if (privacyOperationBlockingNavigation || privacyBalanceDecrypting) {
+            showError("Minimize the active Privacy process before opening another screen.")
+            return false
+        }
+        if (!privacyKeyStatus.isReadyForPrivateOperations) {
+            showError("Privacy key setup or encrypted balance refresh is required first.")
+            openPrivacySettings()
             return false
         }
         if (type in setOf(PrivacyOperationType.Decrypt, PrivacyOperationType.Stealth) && privacyEncryptedBalance?.cipher.isNullOrBlank()) {
@@ -3390,7 +4036,8 @@ class PoctraController(private val activity: Activity) {
             }
             PrivacyOperationType.Decrypt,
             PrivacyOperationType.Stealth -> privacyBalanceRaw?.coerceAtLeast(0L) ?: return ""
-            PrivacyOperationType.Claim -> return ""
+            PrivacyOperationType.Claim,
+            PrivacyOperationType.KeySwitch -> return ""
         }
         return formatPrivacyAmount(maximumRaw)
     }
@@ -3416,6 +4063,7 @@ class PoctraController(private val activity: Activity) {
 
     fun startPrivacyEncrypt(amountText: String, feeText: String) {
         val activeWallet = wallet ?: return showError("Unlock wallet first.")
+        if (!privacyKeyStatus.isReadyForPrivateOperations) return showError(privacyKeyStatus.reason)
         if (privacyOperationActive) return showError("A Privacy process is already running.")
         val amountRaw = parsePrivacyAmount(amountText)
             ?: return showError("Enter an OCT amount with no more than 6 decimal places.")
@@ -3444,7 +4092,9 @@ class PoctraController(private val activity: Activity) {
                 val identity = privacyCrypto.initialize(activeWallet)
                 ensurePrivacyOperationCurrent(operationId)
                 updatePrivacyOperation(operationId, PrivacyOperationStage.Registering, "Checking Privacy key registration...")
-                rpcRepository.ensurePvacRegistered(activeWallet, identity.publicKey, identity.aesKat, requestRpcUrl)
+                ensurePrivacyKeyRegistered(activeWallet, identity, requestRpcUrl)
+                ensurePrivacyOperationCurrent(operationId)
+                requirePrivacySpendableCipher(activeWallet, requestRpcUrl, allowMissing = true)
                 ensurePrivacyOperationCurrent(operationId)
                 updatePrivacyOperation(operationId, PrivacyOperationStage.Preparing, "Generating encrypted amount and proof locally...")
                 val payload = privacyCrypto.createEncryptPayload(activeWallet, amountRaw)
@@ -3478,17 +4128,20 @@ class PoctraController(private val activity: Activity) {
                 pollPrivacyTransaction(operationId, result.hash, requestRpcUrl)
             } catch (exception: Exception) {
                 failPrivacyOperation(operationId, exception.message ?: "Encrypt failed.")
+                markPrivacyRefreshRequired(exception)
             } finally {
-                runCatching { privacyCrypto.clear() }
+                releasePrivacyCryptoIfLocked()
             }
         }
     }
 
     fun startPrivacyDecrypt(amountText: String, feeText: String) {
         val activeWallet = wallet ?: return showError("Unlock wallet first.")
+        if (!privacyKeyStatus.isReadyForPrivateOperations) return showError(privacyKeyStatus.reason)
         if (privacyOperationActive) return showError("A Privacy process is already running.")
-        val cipher = privacyEncryptedBalance?.cipher
-            ?: return showError("No encrypted balance is available on the active network.")
+        if (privacyEncryptedBalance?.cipher.isNullOrBlank()) {
+            return showError("No encrypted balance is available on the active network.")
+        }
         val amountRaw = parsePrivacyAmount(amountText)
             ?: return showError("Enter an OCT amount with no more than 6 decimal places.")
         val feeOu = feeText.filter(Char::isDigit).toLongOrNull()?.takeIf { it > 0L }
@@ -3510,14 +4163,18 @@ class PoctraController(private val activity: Activity) {
                 val identity = privacyCrypto.initialize(activeWallet)
                 ensurePrivacyOperationCurrent(operationId)
                 updatePrivacyOperation(operationId, PrivacyOperationStage.Registering, "Checking Privacy key registration...")
-                rpcRepository.ensurePvacRegistered(activeWallet, identity.publicKey, identity.aesKat, requestRpcUrl)
+                ensurePrivacyKeyRegistered(activeWallet, identity, requestRpcUrl)
                 ensurePrivacyOperationCurrent(operationId)
-                val currentBalance = privacyCrypto.decryptBalance(activeWallet, cipher)
+                val spendCipher = requireNotNull(
+                    requirePrivacySpendableCipher(activeWallet, requestRpcUrl),
+                )
+                ensurePrivacyOperationCurrent(operationId)
+                val currentBalance = privacyCrypto.decryptBalance(activeWallet, spendCipher)
                 require(amountRaw <= currentBalance) {
                     "Insufficient encrypted balance. Available ${formatPrivacyAmount(currentBalance)} OCT."
                 }
                 privacyBalanceRaw = currentBalance
-                privacyDecryptedCipher = cipher
+                privacyDecryptedCipher = spendCipher
                 privacyBalanceVisible = true
                 updatePrivacyOperation(
                     operationId,
@@ -3526,7 +4183,7 @@ class PoctraController(private val activity: Activity) {
                 )
                 val payload = privacyCrypto.createDecryptPayload(
                     wallet = activeWallet,
-                    currentCipher = cipher,
+                    currentCipher = spendCipher,
                     currentBalanceRaw = currentBalance,
                     amountRaw = amountRaw,
                 )
@@ -3561,20 +4218,23 @@ class PoctraController(private val activity: Activity) {
                 pollPrivacyTransaction(operationId, result.hash, requestRpcUrl)
             } catch (exception: Exception) {
                 failPrivacyOperation(operationId, exception.message ?: "Decrypt failed.")
+                markPrivacyRefreshRequired(exception)
             } finally {
-                runCatching { privacyCrypto.clear() }
+                releasePrivacyCryptoIfLocked()
             }
         }
     }
 
     fun startPrivacyStealth(recipientInput: String, amountText: String, feeText: String) {
         val activeWallet = wallet ?: return showError("Unlock wallet first.")
+        if (!privacyKeyStatus.isReadyForPrivateOperations) return showError(privacyKeyStatus.reason)
         if (privacyOperationActive) return showError("A Privacy process is already running.")
         if (!isOctraRecipientInput(recipientInput)) {
             return showError("Enter foo.oct or a valid Octra recipient address.")
         }
-        val cipher = privacyEncryptedBalance?.cipher
-            ?: return showError("No encrypted balance is available on the active network.")
+        if (privacyEncryptedBalance?.cipher.isNullOrBlank()) {
+            return showError("No encrypted balance is available on the active network.")
+        }
         val amountRaw = parsePrivacyAmount(amountText)
             ?: return showError("Enter an OCT amount with no more than 6 decimal places.")
         val feeOu = feeText.filter(Char::isDigit).toLongOrNull()?.takeIf { it > 0L }
@@ -3605,24 +4265,28 @@ class PoctraController(private val activity: Activity) {
                 ensurePrivacyOperationCurrent(operationId)
                 val identity = privacyCrypto.initialize(activeWallet)
                 updatePrivacyOperation(operationId, PrivacyOperationStage.Registering, "Checking Privacy key registration...")
-                rpcRepository.ensurePvacRegistered(activeWallet, identity.publicKey, identity.aesKat, requestRpcUrl)
+                ensurePrivacyKeyRegistered(activeWallet, identity, requestRpcUrl)
                 ensurePrivacyOperationCurrent(operationId)
-                val currentBalance = privacyCrypto.decryptBalance(activeWallet, cipher)
+                val spendCipher = requireNotNull(
+                    requirePrivacySpendableCipher(activeWallet, requestRpcUrl),
+                )
+                ensurePrivacyOperationCurrent(operationId)
+                val currentBalance = privacyCrypto.decryptBalance(activeWallet, spendCipher)
                 require(amountRaw <= currentBalance) {
                     "Insufficient encrypted balance. Available ${formatPrivacyAmount(currentBalance)} OCT."
                 }
                 privacyBalanceRaw = currentBalance
-                privacyDecryptedCipher = cipher
+                privacyDecryptedCipher = spendCipher
                 privacyBalanceVisible = true
                 envelope = privacyStealthSender.createEnvelope(recipientAddress, recipientPublicKey, amountRaw)
                 updatePrivacyOperation(
                     operationId,
-                    PrivacyOperationStage.Preparing,
-                    "Generating two Stealth range proofs. This may take several minutes...",
+                    PrivacyOperationStage.BuildingProof,
+                    "Generating Stealth range proofs on this device...",
                 )
                 val proof = privacyCrypto.createStealthProofPayload(
                     wallet = activeWallet,
-                    currentCipher = cipher,
+                    currentCipher = spendCipher,
                     currentBalanceRaw = currentBalance,
                     amountRaw = amountRaw,
                     blinding = envelope.blinding,
@@ -3665,9 +4329,10 @@ class PoctraController(private val activity: Activity) {
                 pollPrivacyTransaction(operationId, result.hash, requestRpcUrl)
             } catch (exception: Exception) {
                 failPrivacyOperation(operationId, exception.message ?: "Stealth failed.")
+                markPrivacyRefreshRequired(exception)
             } finally {
                 envelope?.blinding?.fill(0)
-                runCatching { privacyCrypto.clear() }
+                releasePrivacyCryptoIfLocked()
             }
         }
     }
@@ -3677,6 +4342,7 @@ class PoctraController(private val activity: Activity) {
         force: Boolean = false,
     ) {
         val activeWallet = wallet ?: return showError("Unlock wallet first.")
+        if (!privacyKeyStatus.isReadyForPrivateOperations) return showError(privacyKeyStatus.reason)
         if (!privacySupported) return showError("Privacy requires a 64-bit device with hardware AES support.")
         if (privacyOperationActive || privacyBalanceDecrypting) {
             return showError("A Privacy process is already running. Resume or finish it first.")
@@ -3755,7 +4421,7 @@ class PoctraController(private val activity: Activity) {
                 val identity = privacyCrypto.initialize(activeWallet)
                 ensurePrivacyOperationCurrent(operationId)
                 updatePrivacyOperation(operationId, PrivacyOperationStage.Registering, "Checking Privacy key registration...")
-                rpcRepository.ensurePvacRegistered(activeWallet, identity.publicKey, identity.aesKat, requestRpcUrl)
+                ensurePrivacyKeyRegistered(activeWallet, identity, requestRpcUrl)
                 ensurePrivacyOperationCurrent(operationId)
                 updatePrivacyOperation(operationId, PrivacyOperationStage.Preparing, "Encrypting claimed amount and building proof...")
                 val payload = privacyCrypto.createClaimPayload(activeWallet, transfer)
@@ -3785,7 +4451,7 @@ class PoctraController(private val activity: Activity) {
             } catch (exception: Exception) {
                 failPrivacyOperation(operationId, exception.message ?: "Claim failed.")
             } finally {
-                runCatching { privacyCrypto.clear() }
+                releasePrivacyCryptoIfLocked()
             }
         }
     }
@@ -3824,7 +4490,7 @@ class PoctraController(private val activity: Activity) {
                 val identity = privacyCrypto.initialize(activeWallet)
                 ensurePrivacyOperationCurrent(operationId)
                 updatePrivacyOperation(operationId, PrivacyOperationStage.Registering, "Checking Privacy key registration...")
-                rpcRepository.ensurePvacRegistered(activeWallet, identity.publicKey, identity.aesKat, requestRpcUrl)
+                ensurePrivacyKeyRegistered(activeWallet, identity, requestRpcUrl)
 
                 transfers.forEachIndexed { index, transfer ->
                     ensurePrivacyOperationCurrent(operationId)
@@ -3873,7 +4539,7 @@ class PoctraController(private val activity: Activity) {
             } catch (exception: Exception) {
                 failPrivacyOperation(operationId, exception.message ?: "Bulk Claim failed.")
             } finally {
-                runCatching { privacyCrypto.clear() }
+                releasePrivacyCryptoIfLocked()
             }
         }
     }
@@ -3937,13 +4603,15 @@ class PoctraController(private val activity: Activity) {
         )
     }
 
-    private fun refreshAfterPrivacyConfirmation() {
+    private fun refreshAfterPrivacyConfirmation(refreshPrivacyState: Boolean = true) {
         privacyClaimCacheKey = null
         privacyClaimCacheAt = 0L
-        privacyLoadedAt = 0L
         refreshBalance()
         refreshHistory()
-        refreshPrivacy(force = true)
+        if (refreshPrivacyState) {
+            privacyLoadedAt = 0L
+            refreshPrivacy(force = true)
+        }
     }
 
     private fun updatePrivacySyncStep(index: Int, status: PrivacySyncStatus, detail: String? = null) {
@@ -3964,6 +4632,16 @@ class PoctraController(private val activity: Activity) {
             stage = stage,
             message = message,
             txHash = hash,
+            completedAt = if (stage in setOf(
+                    PrivacyOperationStage.Confirmed,
+                    PrivacyOperationStage.Empty,
+                    PrivacyOperationStage.Failed,
+                )
+            ) {
+                current.completedAt ?: System.currentTimeMillis()
+            } else {
+                current.completedAt
+            },
             progressIndex = if (stage == PrivacyOperationStage.Failed) {
                 current.progressIndex
             } else {
@@ -3973,7 +4651,55 @@ class PoctraController(private val activity: Activity) {
     }
 
     private fun failPrivacyOperation(operationId: Long, message: String) {
-        updatePrivacyOperation(operationId, PrivacyOperationStage.Failed, message)
+        updatePrivacyOperation(
+            operationId,
+            PrivacyOperationStage.Failed,
+            message.trim().ifBlank { "Privacy operation failed before submission." },
+        )
+    }
+
+    private fun markPrivacyRefreshRequired(error: Exception) {
+        val message = error.message.orEmpty().lowercase()
+        val requiresRefresh = listOf(
+            "compact refresh",
+            "privacy refresh",
+            "balance refresh",
+            "range proof",
+            "proof self-check",
+            "canonical",
+            "base layer",
+        ).any(message::contains)
+        if (!requiresRefresh || privacyKeyStatus.mode != PrivacyKeyUpgradeMode.Current) return
+        privacyForceRefreshRequested = true
+        refreshPrivacyKeyStatus(forceRefresh = true)
+    }
+
+    private suspend fun releasePrivacyCryptoIfLocked() {
+        if (wallet == null) runCatching { privacyCrypto.clear() }
+    }
+
+    private suspend fun requirePrivacySpendableCipher(
+        activeWallet: Wallet,
+        rpcUrl: String,
+        allowMissing: Boolean = false,
+    ): String? {
+        val encryptedBalance = rpcRepository.fetchEncryptedBalance(activeWallet, rpcUrl)
+        val cipher = encryptedBalance?.cipher
+        if (cipher.isNullOrBlank()) {
+            if (allowMissing) return null
+            throw IllegalStateException("No encrypted balance is available on the active network.")
+        }
+        val diagnostics = privacyCrypto.inspectCipher(activeWallet, cipher)
+        require(diagnostics.keyBound && diagnostics.canonicalRandomnessCommitment) {
+            "Encrypted balance privacy refresh is required before private spend. Open Privacy Settings to recrypt it."
+        }
+        require(diagnostics.baseLayerCount <= PrivacyUpgradePolicy.PrivateSpendMaxBaseLayers) {
+            "Encrypted balance compact refresh is required before private spend " +
+                "(${diagnostics.baseLayerCount} base layers; maximum " +
+                "${PrivacyUpgradePolicy.PrivateSpendMaxBaseLayers}). Open Privacy Settings to recrypt it."
+        }
+        privacyEncryptedBalance = encryptedBalance
+        return cipher
     }
 
     private fun ensurePrivacyOperationCurrent(operationId: Long) {
@@ -4001,7 +4727,14 @@ class PoctraController(private val activity: Activity) {
         )
         privacyHistory = (listOf(pending) + privacyHistory.filterNot { it.hash == hash })
             .take(InitialPrivacyHistoryLimit)
-        addPendingTransaction(hash, activeWallet.address, recipient, pending.amount, null, opType)
+    }
+
+    fun openPrivacyTransactionExplorer() {
+        val hash = privacyOperation?.txHash
+        if (hash.isNullOrBlank()) return showError("Transaction hash is not ready.")
+        val url = explorerTxUrl(hash)
+        if (url == null) showError("Explorer URL is not configured.")
+        else openDAppBrowser("Privacy Transaction", url)
     }
 
     private fun parsePrivacyAmount(value: String): Long? = runCatching {
@@ -4014,7 +4747,9 @@ class PoctraController(private val activity: Activity) {
     private fun privacyProgressIndex(stage: PrivacyOperationStage): Int = when (stage) {
         PrivacyOperationStage.Scanning -> 0
         PrivacyOperationStage.Review -> 1
+        PrivacyOperationStage.Checking -> 0
         PrivacyOperationStage.Preparing -> 1
+        PrivacyOperationStage.BuildingProof -> 1
         PrivacyOperationStage.Registering -> 0
         PrivacyOperationStage.Submitting -> 2
         PrivacyOperationStage.Accepted,
@@ -4071,6 +4806,7 @@ class PoctraController(private val activity: Activity) {
         privacySyncSerial++
         privacyOperationSerial++
         privacyFeeSerial++
+        privacyKeyStatusSerial++
         privacyLoadedKey = null
         privacyLoadedAt = 0L
         privacyClaimCacheKey = null
@@ -4083,6 +4819,9 @@ class PoctraController(private val activity: Activity) {
         privacyDecryptedCipher = null
         privacyBalanceDecrypting = false
         privacyHistory = emptyList()
+        privacyKeyStatus = PrivacyKeyUpgradeStatus()
+        privacyKeyStatusLoading = false
+        privacyForceRefreshRequested = false
         clearPrivacyClaimSecrets()
         privacyOperation = null
         scope.launch { runCatching { privacyCrypto.clear() } }
@@ -4212,6 +4951,38 @@ class PoctraController(private val activity: Activity) {
 
     fun openDAppBrowserTab(title: String, url: String) {
         openDAppBrowser(title, url, openInNewTab = true)
+    }
+
+    fun openDAppBrowserNewTab() {
+        prepareDAppBrowserTab(openInNewTab = true)
+        circleResolveSerial++
+        selectedDAppTitle = "New tab"
+        selectedDAppUrl = ""
+        selectedDAppDisplayUrl = null
+        selectedCircleTarget = null
+        selectedCircleError = null
+        circlePassphraseRequest = null
+        route = AppRoute.DAppBrowser
+        syncActiveDAppBrowserTab()
+        refreshDAppCatalog()
+    }
+
+    fun updateDAppBrowserPageTitle(title: String?, tabId: String? = activeDAppTabId) {
+        if (route != AppRoute.DAppBrowser || tabId == null) return
+        val cleanTitle = title
+            ?.trim()
+            ?.take(120)
+            ?.takeUnless { it.isBlank() || it.equals("about:blank", ignoreCase = true) }
+            ?: return
+        val existing = dAppBrowserTabs.firstOrNull { it.id == tabId }
+        if (existing != null && existing.title != cleanTitle) {
+            dAppBrowserTabs = dAppBrowserTabs.map { tab ->
+                if (tab.id == tabId) tab.copy(title = cleanTitle) else tab
+            }
+        }
+        if (activeDAppTabId == tabId && selectedDAppTitle != cleanTitle) {
+            selectedDAppTitle = cleanTitle
+        }
     }
 
     private fun openDAppBrowser(title: String, url: String, openInNewTab: Boolean) {
@@ -4368,8 +5139,26 @@ class PoctraController(private val activity: Activity) {
 
     fun isOctraCircleInput(value: String): Boolean = normalizeOctraBrowserInput(value) != null
 
-    fun isCircleBrowserUrl(value: String): Boolean =
-        value.startsWith("https://$CircleBrowserHost/", ignoreCase = true)
+    fun isCircleBrowserUrl(value: String): Boolean {
+        val host = runCatching { URI(value).host }.getOrNull()?.lowercase() ?: return false
+        return host == CircleBrowserHost || host.endsWith(".$CircleBrowserHost")
+    }
+
+    fun activeCircleAllowsGatewayRequests(): Boolean {
+        val circleId = selectedCircleTarget?.circleId ?: return true
+        val key = circleCacheKey(circleId)
+        val mode = circleBrowserModeCache[key] ?: runCatching {
+            cacheCircleInfo(circleId).optString("browser_mode")
+        }.getOrNull().orEmpty()
+        return mode == "gateway_allowed"
+    }
+
+    fun invalidateActiveCircleAssetCache() {
+        val target = selectedCircleTarget ?: return
+        val prefix = "${circleCacheKey(target.circleId)}:"
+        circleAssetCache.keys.removeAll { it.startsWith(prefix) }
+        circleAssetLocks.keys.removeAll { it.startsWith(prefix) }
+    }
 
     fun circleDisplayUrl(): String =
         selectedCircleTarget?.uri ?: selectedCircleError?.let { "oct://error" } ?: selectedDAppDisplayUrl ?: selectedDAppUrl
@@ -4377,29 +5166,52 @@ class PoctraController(private val activity: Activity) {
     fun fetchCircleAssetForBrowser(circleId: String, path: String): CircleAsset {
         val cacheKey = circleCacheKey(circleId)
         val resourceMode = circleResourceModeCache.getOrPut(cacheKey) {
-            rpcRepository.fetchCircleInfo(circleId).optString("resource_mode")
+            cacheCircleInfo(circleId).let(::resolvedCircleResourceMode).wireValue
         }
-        if (resourceMode == "sealed_read") {
+        val normalizedPath = normalizeCircleAssetPath(path)
+        val assetKey = "$cacheKey:$resourceMode:$normalizedPath"
+        if (circleAssetLocks.size >= MaxCircleAssetCacheEntries) circleAssetLocks.clear()
+        val assetLock = circleAssetLocks.getOrPut(assetKey) { Any() }
+        if (parseCircleResourceMode(resourceMode) == CircleResourceMode.SealedRead) {
             val passphrase = circlePassphrases[cacheKey]
             if (passphrase.isNullOrBlank()) {
                 requestCirclePassphrase(circleId)
                 throw IllegalStateException("Enter the sealed read passphrase to open this circle.")
             }
             val activeWallet = wallet ?: throw IllegalStateException("Unlock poctra to open this sealed circle.")
-            return runCatching { rpcRepository.fetchSealedCircleAsset(circleId, path, passphrase, activeWallet) }
-                .onSuccess { maybeUpdateCircleBrowserTitle(circleId, path, it) }
-                .getOrElse { error ->
-                    circlePassphrases.remove(cacheKey)
-                    requestCirclePassphrase(circleId)
-                    throw error
+            return synchronized(assetLock) {
+                runCatching { rpcRepository.fetchSealedCircleAsset(circleId, normalizedPath, passphrase, activeWallet) }
+                    .onSuccess { maybeUpdateCircleBrowserTitle(circleId, normalizedPath, it) }
+                    .getOrElse { error ->
+                        if (isCircleCredentialOrIntegrityFailure(error)) {
+                            circlePassphrases.remove(cacheKey)
+                            requestCirclePassphrase(circleId)
+                        }
+                        throw error
+                    }
                 }
         }
-        return rpcRepository.fetchCircleAsset(circleId, path)
-            .also { maybeUpdateCircleBrowserTitle(circleId, path, it) }
+        val now = System.currentTimeMillis()
+        circleAssetCache[assetKey]
+            ?.takeIf { now - it.fetchedAtMs <= CircleAssetCacheMillis }
+            ?.asset
+            ?.let { return it }
+        return synchronized(assetLock) {
+            val lockedNow = System.currentTimeMillis()
+            circleAssetCache[assetKey]
+                ?.takeIf { lockedNow - it.fetchedAtMs <= CircleAssetCacheMillis }
+                ?.asset
+                ?: rpcRepository.fetchCircleAsset(circleId, normalizedPath)
+                    .also { asset ->
+                        maybeUpdateCircleBrowserTitle(circleId, normalizedPath, asset)
+                        if (circleAssetCache.size >= MaxCircleAssetCacheEntries) circleAssetCache.clear()
+                        circleAssetCache[assetKey] = CircleAssetCacheEntry(asset, System.currentTimeMillis())
+                    }
+        }
     }
 
     fun downloadCircleAssets(
-        paths: List<String>,
+        resources: List<CircleDownloadResource>,
         fileName: String,
         mimeType: String,
         expectedSha256: String?,
@@ -4412,11 +5224,11 @@ class PoctraController(private val activity: Activity) {
             onError("No active Circle app.")
             return
         }
-        val cleanPaths = runCatching { validateCircleDownloadPaths(paths) }.getOrElse {
-            onError(it.message ?: "Invalid Circle download paths.")
+        val cleanResources = runCatching { validateCircleDownloadResources(resources) }.getOrElse {
+            onError(it.message ?: "Invalid Circle download resources.")
             return
         }
-        val safeName = sanitizeCircleDownloadName(fileName, cleanPaths.last())
+        val safeName = sanitizeCircleDownloadName(fileName, cleanResources.last().path)
         val safeMime = mimeType.trim().lowercase().takeIf {
             it.matches(Regex("^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$"))
         } ?: "application/octet-stream"
@@ -4424,7 +5236,10 @@ class PoctraController(private val activity: Activity) {
             ?.trim()
             ?.lowercase()
             ?.takeIf { it.matches(Regex("^[0-9a-f]{64}$")) }
-        val downloadKey = "${circleCacheKey(target.circleId)}:$safeName"
+        val downloadKey = buildString {
+            append(activeRpcNetwork?.id.orEmpty()).append(':').append(safeName)
+            cleanResources.forEach { append('|').append(it.circleId).append(':').append(it.path) }
+        }
         if (!activeCircleDownloads.add(downloadKey)) {
             onError("This file is already downloading.")
             return
@@ -4435,8 +5250,7 @@ class PoctraController(private val activity: Activity) {
             runCatching {
                 withContext(Dispatchers.IO) {
                     writeCircleDownload(
-                        circleId = target.circleId,
-                        paths = cleanPaths,
+                        resources = cleanResources,
                         fileName = safeName,
                         mimeType = safeMime,
                         expectedSha256 = cleanSha256,
@@ -4457,18 +5271,22 @@ class PoctraController(private val activity: Activity) {
         }
     }
 
-    private fun validateCircleDownloadPaths(paths: List<String>): List<String> {
-        require(paths.isNotEmpty()) { "Download has no resources." }
-        require(paths.size <= MaxCircleDownloadParts) { "Download contains too many parts." }
-        return paths.map { rawPath ->
-            val clean = rawPath.trim().substringBefore('?').substringBefore('#')
+    private fun validateCircleDownloadResources(resources: List<CircleDownloadResource>): List<CircleDownloadResource> {
+        require(resources.isNotEmpty()) { "Download has no resources." }
+        require(resources.size <= MaxCircleDownloadParts) { "Download contains too many parts." }
+        return resources.map { resource ->
+            val circleId = resource.circleId.trim()
+            require(circleId.startsWith("oct") && circleId.length == 47) {
+                "Invalid Circle download address."
+            }
+            val clean = resource.path.trim().substringBefore('?').substringBefore('#')
             require(clean.startsWith('/') && clean.length <= MaxCircleDownloadPathLength) {
                 "Invalid Circle download path."
             }
             require(clean.split('/').none { it == ".." }) { "Unsafe Circle download path." }
-            clean
+            CircleDownloadResource(circleId, clean)
         }.distinct().also {
-            require(it.size == paths.size) { "Download contains duplicate parts." }
+            require(it.size == resources.size) { "Download contains duplicate parts." }
         }
     }
 
@@ -4484,8 +5302,7 @@ class PoctraController(private val activity: Activity) {
     }
 
     private fun writeCircleDownload(
-        circleId: String,
-        paths: List<String>,
+        resources: List<CircleDownloadResource>,
         fileName: String,
         mimeType: String,
         expectedSha256: String?,
@@ -4505,13 +5322,13 @@ class PoctraController(private val activity: Activity) {
                 ?: throw IllegalStateException("Unable to create the download file.")
             try {
                 resolver.openOutputStream(uri, "w")?.use { output ->
-                    paths.forEachIndexed { index, path ->
-                        val bytes = fetchCircleAssetForBrowser(circleId, path).body
+                    resources.forEachIndexed { index, resource ->
+                        val bytes = fetchCircleAssetForBrowser(resource.circleId, resource.path).body
                         totalBytes += bytes.size
                         require(totalBytes <= MaxCircleDownloadBytes) { "Circle download is larger than 256 MB." }
                         digest.update(bytes)
                         output.write(bytes)
-                        onProgress(index + 1, paths.size)
+                        onProgress(index + 1, resources.size)
                     }
                 } ?: throw IllegalStateException("Unable to write the download file.")
                 verifyCircleDownloadHash(digest, expectedSha256)
@@ -4529,13 +5346,13 @@ class PoctraController(private val activity: Activity) {
             val temporary = File(directory, "$fileName.download")
             try {
                 temporary.outputStream().buffered().use { output ->
-                    paths.forEachIndexed { index, path ->
-                        val bytes = fetchCircleAssetForBrowser(circleId, path).body
+                    resources.forEachIndexed { index, resource ->
+                        val bytes = fetchCircleAssetForBrowser(resource.circleId, resource.path).body
                         totalBytes += bytes.size
                         require(totalBytes <= MaxCircleDownloadBytes) { "Circle download is larger than 256 MB." }
                         digest.update(bytes)
                         output.write(bytes)
-                        onProgress(index + 1, paths.size)
+                        onProgress(index + 1, resources.size)
                     }
                 }
                 verifyCircleDownloadHash(digest, expectedSha256)
@@ -4597,10 +5414,24 @@ class PoctraController(private val activity: Activity) {
         runCatching {
             val cacheKey = circleCacheKey(circleId)
             circleResourceModeCache.getOrPut(cacheKey) {
-                rpcRepository.fetchCircleInfo(circleId).optString("resource_mode")
+                cacheCircleInfo(circleId).let(::resolvedCircleResourceMode).wireValue
             }
         }.getOrNull()?.takeIf { it.isNotBlank() }
     }
+
+    private fun cacheCircleInfo(circleId: String): JSONObject {
+        val info = rpcRepository.fetchCircleInfo(circleId)
+        val cacheKey = circleCacheKey(circleId)
+        circleResourceModeCache[cacheKey] = resolvedCircleResourceMode(info).wireValue
+        info.optString("browser_mode").takeIf { it.isNotBlank() }?.let { circleBrowserModeCache[cacheKey] = it }
+        return info
+    }
+
+    private fun resolvedCircleResourceMode(info: JSONObject): CircleResourceMode = resolveCircleResourceMode(
+        resourceMode = info.optString("resource_mode").takeIf(String::isNotBlank),
+        privacyClass = info.optString("privacy_class").takeIf(String::isNotBlank),
+        browserMode = info.optString("browser_mode").takeIf(String::isNotBlank),
+    )
 
     private fun circleCacheKey(circleId: String): String =
         "${activeRpcNetwork?.id.orEmpty()}:$circleId"
@@ -4608,6 +5439,9 @@ class PoctraController(private val activity: Activity) {
     private fun resetCircleNetworkState() {
         circleResolveSerial++
         circleResourceModeCache.clear()
+        circleBrowserModeCache.clear()
+        circleAssetCache.clear()
+        circleAssetLocks.clear()
         circlePassphrases.clear()
         circlePassphraseRequest = null
         selectedCircleTarget = null
@@ -4847,6 +5681,10 @@ class PoctraController(private val activity: Activity) {
     }
 
     fun refreshRecentActivityIdentityNames(transactions: List<TransactionHistoryItem> = recentTransactions) {
+        refreshIdentityNamesForAddresses(transactions.flatMap { listOf(it.from, it.to) })
+    }
+
+    fun refreshIdentityNamesForAddresses(candidateAddresses: List<String>) {
         val provider = activeIdentityProvider
             ?: identityProviderRepository.activeProvider(currentIdentityNetwork())
             ?: run {
@@ -4861,8 +5699,7 @@ class PoctraController(private val activity: Activity) {
             addressIdentityMisses = emptySet()
             addressIdentityCacheKey = cacheKey
         }
-        val addresses = transactions
-            .flatMap { listOf(it.from, it.to) }
+        val addresses = candidateAddresses
             .map { it.trim() }
             .filter(::isOctraAddress)
             .distinctBy { it.lowercase() }
@@ -4926,20 +5763,57 @@ class PoctraController(private val activity: Activity) {
         }
     }
 
-    fun addRpcNetwork(name: String, url: String, networkType: String, explorerUrl: String) {
+    fun saveRpcNetworkDetails(name: String, url: String, networkType: String, explorerUrl: String) {
+        val editing = rpcEditingNetwork
+        val cleanName = name.trim()
+        val cleanUrl = url.trim().trimEnd('/')
+        val cleanExplorer = explorerUrl.trim().trimEnd('/')
+        when {
+            cleanName.isBlank() -> {
+                showError("RPC name is required.")
+                return
+            }
+            !rpcRepository.isValidRpcUrl(cleanUrl) -> {
+                showError("Enter a valid Octra RPC endpoint URL.")
+                return
+            }
+            networkType !in setOf("mainnet", "devnet") -> {
+                showError("Select Mainnet or Devnet.")
+                return
+            }
+            cleanExplorer.isNotBlank() && !rpcRepository.isValidRpcUrl(cleanExplorer) -> {
+                showError("Enter a valid explorer URL.")
+                return
+            }
+        }
         runBusy {
             val network = RpcNetwork(
-                id = "rpc-${System.currentTimeMillis()}",
-                name = name,
-                url = url,
+                id = editing?.id ?: "rpc-${System.currentTimeMillis()}",
+                name = cleanName,
+                url = cleanUrl,
                 networkType = networkType,
-                explorerUrl = explorerUrl,
+                explorerUrl = cleanExplorer,
             )
             rpcNetworks = rpcRepository.saveNetwork(network)
-            activeRpcNetwork = rpcRepository.activeNetwork()
-            showMessage("RPC network added.")
+            activeRpcNetwork = rpcRepository.setActiveNetwork(network.id)
+            rpcEditingNetwork = null
+            rpcStatus = RpcStatus(RpcStatus.State.Checking, network.url, network.networkType)
+            resetCircleNetworkState()
+            resetPrivacyState()
+            rpcStatus = rpcRepository.checkStatus(network.url)
+            refreshIdentityProviders()
+            refreshWalletIdentityNames()
+            refreshBalance()
+            refreshAssets()
+            refreshHistory()
+            refreshBridgeAfterNetworkChangeIfNeeded(rpcManagementReturnRoute)
+            showMessage(if (editing == null) "${network.name} added." else "${network.name} updated.")
             route = AppRoute.RpcManagement
         }
+    }
+
+    fun addRpcNetwork(name: String, url: String, networkType: String, explorerUrl: String) {
+        saveRpcNetworkDetails(name, url, networkType, explorerUrl)
     }
 
     fun activateRpcNetwork(id: String) {
@@ -5043,6 +5917,7 @@ class PoctraController(private val activity: Activity) {
     }
 
     private fun refreshConsumerInsights() {
+        runtimeSecurityAssessment = runtimeSecurity.assess()
         securityRisks = buildSecurityRisks()
         refreshUnifiedActivity()
     }
@@ -5482,6 +6357,7 @@ class PoctraController(private val activity: Activity) {
 
     private fun buildSecurityRisks(): List<ConsumerRiskItem> {
         val risks = mutableListOf<ConsumerRiskItem>()
+        risks += runtimeSecurityRiskItems(runtimeSecurityAssessment)
         val method = currentSecurityMethod
         risks += if (method == SecurityMethod.Biometric) {
             ConsumerRiskItem("Biometric lock enabled", "Sensitive actions require Android biometric authentication.", ConsumerRiskLevel.Safe)
@@ -5534,6 +6410,74 @@ class PoctraController(private val activity: Activity) {
         }
 
         return risks.sortedByDescending { it.level.ordinal }
+    }
+
+    private fun runtimeSecurityRiskItems(assessment: RuntimeSecurityAssessment): List<ConsumerRiskItem> {
+        val items = assessment.signals.map { signal ->
+            when (signal) {
+                RuntimeSecuritySignal.DebuggableRelease -> ConsumerRiskItem(
+                    "Debuggable release detected",
+                    "This release build exposes debugger access. Install an official signed build.",
+                    ConsumerRiskLevel.Critical,
+                )
+                RuntimeSecuritySignal.DebuggerAttached -> ConsumerRiskItem(
+                    "Debugger attached",
+                    "Sensitive wallet actions are observable while a debugger is attached.",
+                    ConsumerRiskLevel.Critical,
+                )
+                RuntimeSecuritySignal.SignatureMismatch -> ConsumerRiskItem(
+                    "App signature mismatch",
+                    "This APK is not signed by an allowed poctra release certificate.",
+                    ConsumerRiskLevel.Critical,
+                )
+                RuntimeSecuritySignal.SignerAllowlistMissing -> ConsumerRiskItem(
+                    "Release signer not pinned",
+                    "Configure POCTRA_ALLOWED_SIGNER_SHA256 before publishing the production build.",
+                    ConsumerRiskLevel.Notice,
+                )
+                RuntimeSecuritySignal.HookingFramework -> ConsumerRiskItem(
+                    "Runtime instrumentation detected",
+                    "A hooking framework may be observing wallet operations on this device.",
+                    ConsumerRiskLevel.Critical,
+                )
+                RuntimeSecuritySignal.RootIndicators -> ConsumerRiskItem(
+                    "Elevated device access detected",
+                    "Root indicators increase the risk of key extraction while the wallet is unlocked.",
+                    ConsumerRiskLevel.Warning,
+                )
+                RuntimeSecuritySignal.Emulator -> ConsumerRiskItem(
+                    "Emulated device",
+                    "Use a certified physical device for wallets that hold meaningful value.",
+                    ConsumerRiskLevel.Notice,
+                )
+            }
+        }.toMutableList()
+
+        when (PlayIntegrityState.status) {
+            PlayIntegrityStatus.Ready -> items += ConsumerRiskItem(
+                "Play Integrity ready",
+                "Official backend requests can include an app integrity verdict.",
+                ConsumerRiskLevel.Safe,
+            )
+            PlayIntegrityStatus.Preparing -> items += ConsumerRiskItem(
+                "Play Integrity preparing",
+                "Device integrity protection is warming up in the background.",
+                ConsumerRiskLevel.Notice,
+            )
+            PlayIntegrityStatus.Unavailable -> items += ConsumerRiskItem(
+                "Play Integrity unavailable",
+                "Wallet signing remains available, but backend attestation is currently unavailable.",
+                ConsumerRiskLevel.Warning,
+            )
+            PlayIntegrityStatus.Disabled -> if (BuildConfig.SECURITY_HARDENING_ENABLED) {
+                items += ConsumerRiskItem(
+                    "Play Integrity not configured",
+                    "Set POCTRA_PLAY_CLOUD_PROJECT_NUMBER before publishing the production build.",
+                    ConsumerRiskLevel.Notice,
+                )
+            }
+        }
+        return items
     }
 
     fun octraRecipientRiskItems(
@@ -5755,7 +6699,7 @@ class PoctraController(private val activity: Activity) {
         dApps = connectedDAppSessions()
     }
 
-    fun handleDAppBridgeRequest(
+    fun handleOctraDAppBridgeRequest(
         originRaw: String,
         payload: String,
         onSuccess: (String) -> Unit,
@@ -5789,15 +6733,25 @@ class PoctraController(private val activity: Activity) {
                         }
                     }
                     "octra_sendContractTransaction" -> {
-                        val session = dAppSession(origin, activeWallet.address)
-                            ?: throw SecurityException("Connect poctra before sending contract calls.")
+                        val session = octraDAppSession(origin, activeWallet.address)
+                            ?: throw DAppProviderException(
+                                4100,
+                                "Reconnect poctra on ${currentIdentityNetwork().replaceFirstChar(Char::uppercase)} before sending contract calls.",
+                            )
                         val needsContractPermission = !session.permissions.contains("contract_calls")
                         val call = contractCallRequest(request.opt("params"))
                         val contract = call.getString("address")
-                        val callMethod = call.getString("method")
-                        val amountOu = call.optString("amount", "0").ifBlank { "0" }
+                        val callMethod = call.getString("method").trim()
+                        val amountOu = call.optString("amount", "0").trim().ifBlank { "0" }
+                        require(amountOu.matches(Regex("^(0|[1-9][0-9]*)$"))) {
+                            "Contract amount must be a non-negative integer in ou."
+                        }
                         val params = call.optJSONArray("params") ?: JSONArray()
-                        val providedFee = call.optString("fee").takeIf { it.isNotBlank() }
+                        val providedFee = call.optString("fee").trim().takeIf { it.isNotBlank() }
+                        val providedFeeOu = providedFee?.toLongOrNull()?.takeIf { it > 0L }
+                        require(providedFee == null || providedFeeOu != null) {
+                            "Contract fee must be a positive integer in ou."
+                        }
                         val permissionDetails = if (needsContractPermission) {
                             listOf(DAppRequestDetail("Permission", "Grant contract_calls for this dApp."))
                         } else {
@@ -5824,7 +6778,7 @@ class PoctraController(private val activity: Activity) {
                             }
                             val amountOct = amountOu.toDoubleOrNull()?.div(MicroUnits.toDouble()) ?: 0.0
                             beginSubmittedTransaction(contract, amountOct, showDialog = false)
-                            val feeOu = providedFee?.toLongOrNull()
+                            val feeOu = providedFeeOu
                                 ?: withContext(Dispatchers.IO) { rpcRepository.fetchRecommendedFee("call") }
                             val result = rpcRepository.sendContractCall(
                                 wallet = activeWallet,
@@ -5882,6 +6836,251 @@ class PoctraController(private val activity: Activity) {
         }
     }
 
+    fun handleEvmDAppBridgeRequest(
+        originRaw: String,
+        payload: String,
+        onSuccess: (String) -> Unit,
+        onError: (Int, String) -> Unit,
+    ) {
+        scope.launch {
+            try {
+                val activeWallet = wallet ?: throw DAppProviderException(4100, "Wallet is locked.")
+                val request = JSONObject(payload)
+                val method = request.optString("method")
+                val params = request.optJSONArray("params") ?: JSONArray()
+                val origin = canonicalizeOrigin(originRaw.ifBlank { selectedDAppUrl })
+                dAppDebug("evm request method=${method.ifBlank { "<blank>" }} origin=$origin")
+                if (origin.isBlank()) throw DAppProviderException(4100, "Unable to verify the dApp origin.")
+                val appLabel = dAppSessionLabelForOrigin(origin)
+                val network = activeEvmNetwork ?: evmRepository.activeNetwork()
+                val evmAddress = evmRepository.deriveAddress(activeWallet)
+                when (method) {
+                    "eth_chainId" -> onSuccess(JSONObject.quote(network.chainId.toEvmQuantity()))
+                    "net_version" -> onSuccess(JSONObject.quote(network.chainId.toString()))
+                    "web3_clientVersion" -> onSuccess(JSONObject.quote("poctra/${BuildConfig.VERSION_NAME}/android"))
+                    "eth_accounts", "eth_coinbase" -> {
+                        val permitted = dAppHasPermission(origin, activeWallet.address, EvmAccountsPermission)
+                        val result = if (permitted) JSONArray().put(evmAddress) else JSONArray()
+                        if (method == "eth_coinbase") {
+                            onSuccess(if (permitted) JSONObject.quote(evmAddress) else "null")
+                        } else {
+                            onSuccess(result.toString())
+                        }
+                    }
+                    "eth_requestAccounts", "wallet_requestPermissions" -> {
+                        if (method == "wallet_requestPermissions") validateRequestedEvmPermissions(params)
+                        if (dAppHasPermission(origin, activeWallet.address, EvmAccountsPermission)) {
+                            onSuccess(evmAccountPermissionResult(method, evmAddress))
+                            return@launch
+                        }
+                        queueDAppApproval(
+                            origin = origin,
+                            title = "Connect EVM account",
+                            message = "$appLabel wants to connect to your EVM account.",
+                            details = listOf(
+                                DAppRequestDetail("Account", evmAddress),
+                                DAppRequestDetail("Network", network.name),
+                                DAppRequestDetail("Chain ID", network.chainId.toString()),
+                                DAppRequestDetail("Permission", "View the active EVM address"),
+                            ),
+                            approveLabel = "Connect",
+                            onSuccess = onSuccess,
+                            onError = onError,
+                        ) {
+                            authorizeDApp(origin, activeWallet.address, listOf(EvmAccountsPermission))
+                            evmAccountPermissionResult(method, evmAddress)
+                        }
+                    }
+                    "wallet_getPermissions" -> onSuccess(evmPermissions(origin, activeWallet.address).toString())
+                    "wallet_revokePermissions", "eth_disconnect" -> {
+                        removeDAppPermissions(origin, activeWallet.address, EvmPermissions)
+                        onSuccess("null")
+                    }
+                    "wallet_switchEthereumChain" -> {
+                        val chainId = parseRequestedChainId(params)
+                        val target = evmRepository.networkByChainId(chainId)
+                            ?: throw DAppProviderException(4902, "Chain ${chainId.toEvmQuantity()} is not configured in poctra.")
+                        if (target.id == network.id) {
+                            onSuccess("null")
+                            return@launch
+                        }
+                        queueDAppApproval(
+                            origin = origin,
+                            title = "Switch EVM network",
+                            message = "$appLabel wants to change the active EVM network.",
+                            details = listOf(
+                                DAppRequestDetail("Current", network.name),
+                                DAppRequestDetail("Requested", target.name),
+                                DAppRequestDetail("Chain ID", target.chainId.toString()),
+                                DAppRequestDetail("RPC", displayEvmRpcUrl(target.rpcUrl)),
+                            ),
+                            approveLabel = "Switch",
+                            onSuccess = onSuccess,
+                            onError = onError,
+                        ) {
+                            activeEvmNetwork = evmRepository.setActiveNetwork(target.id)
+                            evmNetworks = evmRepository.networks()
+                            refreshEvmDashboard()
+                            "null"
+                        }
+                    }
+                    "wallet_addEthereumChain" -> {
+                        val requested = requestedEvmNetwork(params)
+                        queueDAppApproval(
+                            origin = origin,
+                            title = "Add EVM network",
+                            message = "$appLabel wants to add and activate an EVM network.",
+                            details = listOf(
+                                DAppRequestDetail("Network", requested.name),
+                                DAppRequestDetail("Chain ID", requested.chainId.toString()),
+                                DAppRequestDetail("Currency", requested.symbol),
+                                DAppRequestDetail("RPC", displayEvmRpcUrl(requested.rpcUrl)),
+                                DAppRequestDetail("Explorer", requested.explorerUrl.ifBlank { "Not provided" }),
+                            ),
+                            approveLabel = "Add network",
+                            onSuccess = onSuccess,
+                            onError = onError,
+                        ) {
+                            evmRepository.verifyDAppNetwork(requested)
+                            evmNetworks = evmRepository.saveNetwork(requested)
+                            activeEvmNetwork = evmRepository.setActiveNetwork(requested.id)
+                            refreshEvmDashboard()
+                            "null"
+                        }
+                    }
+                    "wallet_watchAsset" -> {
+                        requireEvmAccountPermission(origin, activeWallet.address)
+                        val watched = requestedWatchedToken(params, network, evmAddress)
+                        queueDAppApproval(
+                            origin = origin,
+                            title = "Add ERC20 asset",
+                            message = "$appLabel wants to add ${watched.symbol} to poctra.",
+                            details = listOf(
+                                DAppRequestDetail("Token", watched.name),
+                                DAppRequestDetail("Symbol", watched.symbol),
+                                DAppRequestDetail("Contract", watched.address),
+                                DAppRequestDetail("Decimals", watched.decimals.toString()),
+                                DAppRequestDetail("Network", network.name),
+                            ),
+                            approveLabel = "Add asset",
+                            onSuccess = onSuccess,
+                            onError = onError,
+                        ) {
+                            evmTokens = evmRepository.saveToken(watched)
+                            refreshEvmAssets()
+                            "true"
+                        }
+                    }
+                    "eth_sendTransaction" -> {
+                        requireEvmAccountPermission(origin, activeWallet.address)
+                        val transaction = requestedEvmTransaction(params, evmAddress, network)
+                        val review = evmRepository.reviewDAppTransaction(activeWallet, transaction, network)
+                        val dataBytes = transaction.dataHex.removePrefix("0x").length / 2
+                        queueDAppApproval(
+                            origin = origin,
+                            title = "Review EVM transaction",
+                            message = if (dataBytes > 0) {
+                                "$appLabel wants to interact with an EVM contract."
+                            } else {
+                                "$appLabel wants to send ${network.symbol}."
+                            },
+                            details = listOf(
+                                DAppRequestDetail("From", transaction.from),
+                                DAppRequestDetail("To", transaction.to),
+                                DAppRequestDetail("Network", network.name),
+                                DAppRequestDetail("Value", "${EvmCrypto.formatEther(transaction.valueWei)} ${network.symbol}"),
+                                DAppRequestDetail("Network fee", "${EvmCrypto.formatEther(review.feeWei)} ${network.symbol}"),
+                                DAppRequestDetail("Gas limit", review.gasLimit.toString()),
+                                DAppRequestDetail("Calldata", transaction.calldataReview()),
+                            ),
+                            approveLabel = "Proceed",
+                            onSuccess = onSuccess,
+                            onError = onError,
+                        ) {
+                            val result = evmRepository.sendDAppTransaction(activeWallet, review, network)
+                            if (!result.success || result.hash.isNullOrBlank()) {
+                                throw IllegalStateException(result.error ?: "EVM transaction was rejected by the RPC.")
+                            }
+                            refreshEvmDashboard()
+                            JSONObject.quote(result.hash)
+                        }
+                    }
+                    "personal_sign" -> {
+                        requireEvmAccountPermission(origin, activeWallet.address)
+                        val message = requestedPersonalSignMessage(params, evmAddress)
+                        queueDAppApproval(
+                            origin = origin,
+                            title = "Sign EVM message",
+                            message = "$appLabel is requesting a personal signature. This does not submit a transaction.",
+                            details = listOf(
+                                DAppRequestDetail("Account", evmAddress),
+                                DAppRequestDetail("Network", network.name),
+                                DAppRequestDetail("Message", message.signingPreview()),
+                                DAppRequestDetail("Bytes", message.size.toString()),
+                                DAppRequestDetail("Digest", "0x${MessageDigest.getInstance("SHA-256").digest(message).toHex()}"),
+                            ),
+                            approveLabel = "Sign",
+                            onSuccess = onSuccess,
+                            onError = onError,
+                        ) {
+                            JSONObject.quote(evmRepository.signPersonalMessage(activeWallet, message))
+                        }
+                    }
+                    "eth_signTypedData_v4" -> {
+                        requireEvmAccountPermission(origin, activeWallet.address)
+                        val typedData = requestedEip712TypedData(params, evmAddress)
+                        typedData.review.chainId?.let { requestedChainId ->
+                            if (requestedChainId != BigInteger.valueOf(network.chainId)) {
+                                throw DAppProviderException(
+                                    4901,
+                                    "Typed data is for chain ${requestedChainId.toString()}, but ${network.name} uses chain ${network.chainId}. Switch networks before signing.",
+                                )
+                            }
+                        }
+                        val review = typedData.review
+                        val details = buildList {
+                            add(DAppRequestDetail("Account", evmAddress))
+                            add(DAppRequestDetail("Network", network.name))
+                            add(DAppRequestDetail("Domain", review.domainSummary))
+                            add(DAppRequestDetail("Primary type", review.primaryType))
+                            add(DAppRequestDetail("Type schema", review.typeSummary))
+                            add(DAppRequestDetail("Message", review.messagePreview))
+                            add(DAppRequestDetail("Signing hash", review.signingHash))
+                            review.warnings.forEach { warning ->
+                                add(DAppRequestDetail("Security warning", warning))
+                            }
+                        }
+                        queueDAppApproval(
+                            origin = origin,
+                            title = "Sign typed data",
+                            message = "$appLabel is requesting an EIP-712 signature. This does not submit a transaction.",
+                            details = details,
+                            approveLabel = "Sign",
+                            onSuccess = onSuccess,
+                            onError = onError,
+                        ) {
+                            JSONObject.quote(evmRepository.signTypedDataHash(activeWallet, typedData.signingHash))
+                        }
+                    }
+                    "eth_sign", "eth_signTransaction" -> throw DAppProviderException(
+                        4200,
+                        "$method is disabled because it can sign opaque or reusable payloads.",
+                    )
+                    "eth_signTypedData", "eth_signTypedData_v1", "eth_signTypedData_v3" ->
+                        throw DAppProviderException(4200, "Typed-data signing is not available in this security release.")
+                    "wallet_getCapabilities" -> onSuccess(JSONObject().toString())
+                    "wallet_sendCalls", "wallet_getCallsStatus", "wallet_showCallsStatus" ->
+                        throw DAppProviderException(4200, "Batch wallet calls are not supported. Use eth_sendTransaction.")
+                    else -> onSuccess(jsonLiteral(evmRepository.requestDAppRpc(method, params, network)))
+                }
+            } catch (exception: Exception) {
+                val (code, message) = dAppError(exception)
+                dAppDebug("evm request rejected code=$code message=$message")
+                onError(code, message)
+            }
+        }
+    }
+
     fun handleCircleBridgeRequest(
         payload: String,
         onSuccess: (String) -> Unit,
@@ -5889,17 +7088,30 @@ class PoctraController(private val activity: Activity) {
     ) {
         scope.launch {
             try {
-                require(payload.length <= MaxCircleBridgePayloadBytes) { "Circle request payload is too large." }
+                require(payload.length <= MaxCircleAssetBridgePayloadBytes) { "Circle request payload is too large." }
                 val request = JSONObject(payload)
                 val method = request.optString("method")
-                val requestPayload = request.opt("payload") ?: JSONObject()
-                val requestedCircleId = request.optString("circleId").ifBlank {
-                    (requestPayload as? JSONObject)?.optString("circle_id").orEmpty()
+                if (method != "circle.asset_plain") {
+                    require(payload.length <= MaxCircleBridgePayloadBytes) { "Circle request payload is too large." }
                 }
+                val requestPayload = request.opt("payload") ?: JSONObject()
+                val requestedCircleId = request.optString("circleId")
                 selectedCircleTarget?.circleId?.let { activeCircleId ->
                     if (requestedCircleId.isNotBlank() && !requestedCircleId.equals(activeCircleId, ignoreCase = true)) {
                         throw SecurityException("Circle target override denied.")
                     }
+                }
+                if (method == "program.call") {
+                    queueCircleProgramCall(requestPayload, onSuccess, onError)
+                    return@launch
+                }
+                if (method == "circle.deploy") {
+                    queuePublicCircleDeploy(requestPayload, onSuccess, onError)
+                    return@launch
+                }
+                if (method == "circle.asset_plain") {
+                    queuePublicCircleAsset(requestPayload, onSuccess, onError)
+                    return@launch
                 }
                 val result = withContext(Dispatchers.IO) {
                     resolveCircleBridgeRequest(method, requestPayload)
@@ -5912,20 +7124,248 @@ class PoctraController(private val activity: Activity) {
         }
     }
 
+    private fun queuePublicCircleDeploy(
+        payload: Any,
+        onSuccess: (String) -> Unit,
+        onError: (Int, String) -> Unit,
+    ) {
+        val activeCircle = selectedCircleTarget ?: throw IllegalStateException("No active Circle app.")
+        val activeWallet = wallet ?: throw IllegalStateException("Wallet is locked.")
+        val value = payload as? JSONObject ?: throw IllegalArgumentException("Circle deployment payload is required.")
+        val profile = value.optString("profile", "public").trim().lowercase()
+        require(profile == "public") { "Browser Circle deployment currently supports only the public profile." }
+        val providedFee = value.optString("ou").ifBlank { value.optString("fee") }.takeIf(String::isNotBlank)
+        val parsedFee = providedFee?.toLongOrNull()
+        require(providedFee == null || parsedFee != null && parsedFee > 0L) {
+            "Circle deployment fee must be a positive unsigned integer in ou."
+        }
+        queueDAppApproval(
+            origin = activeCircle.uri,
+            title = "Deploy child Circle",
+            message = "${activeCircle.label} wants to create a public Circle owned by your active wallet.",
+            details = listOf(
+                DAppRequestDetail("Parent Circle", activeCircle.circleId),
+                DAppRequestDetail("Owner", activeWallet.address),
+                DAppRequestDetail("Profile", "Public"),
+                DAppRequestDetail("Runtime", "OCTB"),
+                DAppRequestDetail("Browser", "Gateway allowed"),
+                DAppRequestDetail("Resources", "Public"),
+                DAppRequestDetail("Fee", parsedFee?.let { "$it ou" } ?: "Auto"),
+            ),
+            approveLabel = "Deploy",
+            onSuccess = onSuccess,
+            onError = onError,
+        ) {
+            val feeOu = parsedFee ?: runCatching {
+                rpcRepository.fetchRecommendedFee("deploy_circle")
+            }.getOrDefault(DefaultCircleDeployFeeOu).coerceAtLeast(DefaultCircleDeployFeeOu)
+            val submission = rpcRepository.deployPublicCircle(activeWallet, feeOu)
+            if (!submission.result.success) {
+                throw IllegalStateException(submission.result.error ?: "Circle deployment rejected.")
+            }
+            pendingCircleDeployments += circleDeploymentKey(activeWallet.address, submission.circleId)
+            JSONObject()
+                .put("circle_id", submission.circleId)
+                .put("status", submission.result.finality ?: "accepted")
+                .put("tx_hash", submission.result.hash ?: JSONObject.NULL)
+                .put("hash", submission.result.hash ?: JSONObject.NULL)
+                .toString()
+        }
+    }
+
+    private fun queuePublicCircleAsset(
+        payload: Any,
+        onSuccess: (String) -> Unit,
+        onError: (Int, String) -> Unit,
+    ) {
+        val activeCircle = selectedCircleTarget ?: throw IllegalStateException("No active Circle app.")
+        val activeWallet = wallet ?: throw IllegalStateException("Wallet is locked.")
+        val value = payload as? JSONObject ?: throw IllegalArgumentException("Circle asset payload is required.")
+        val circleId = value.optString("circle_id").trim()
+        require(circleId.startsWith("oct") && circleId.length == 47) { "A valid target Circle address is required." }
+        val path = validateCircleWritePath(value.optString("path"))
+        val contentType = validateCircleContentType(value.optString("content_type"))
+        val bodyBase64 = validateCircleAssetBody(value.optString("body_b64"))
+        val encoding = value.optString("encoding").trim().lowercase().ifBlank { null }
+        require(encoding == null || encoding in setOf("identity", "gzip")) {
+            "Circle asset encoding must be identity or gzip."
+        }
+        val providedFee = value.optString("ou").ifBlank { value.optString("fee") }.takeIf(String::isNotBlank)
+        val parsedFee = providedFee?.toLongOrNull()
+        require(providedFee == null || parsedFee != null && parsedFee > 0L) {
+            "Circle asset fee must be a positive unsigned integer in ou."
+        }
+        val decodedSize = ((bodyBase64.length.toLong() * 3L) / 4L - bodyBase64.takeLast(2).count { it == '=' })
+            .coerceAtLeast(0L)
+        queueDAppApproval(
+            origin = activeCircle.uri,
+            title = "Upload Circle asset",
+            message = "${activeCircle.label} wants to write a public resource to a Circle owned by your wallet.",
+            details = listOf(
+                DAppRequestDetail("Target Circle", circleId),
+                DAppRequestDetail("Path", path),
+                DAppRequestDetail("Content type", contentType),
+                DAppRequestDetail("Size", formatByteCount(decodedSize)),
+                DAppRequestDetail("Encoding", encoding ?: "identity"),
+                DAppRequestDetail("Fee", parsedFee?.let { "$it ou" } ?: "Auto"),
+            ),
+            approveLabel = "Upload",
+            onSuccess = onSuccess,
+            onError = onError,
+        ) {
+            awaitOwnedPublicCircle(circleId, activeWallet.address)
+            val feeOu = parsedFee ?: circleAssetFeeOu(bodyBase64.length)
+            val result = rpcRepository.putPublicCircleAsset(
+                wallet = activeWallet,
+                circleId = circleId,
+                path = path,
+                contentType = contentType,
+                bodyBase64 = bodyBase64,
+                encoding = encoding,
+                feeOu = feeOu,
+            )
+            if (!result.success) throw IllegalStateException(result.error ?: "Circle asset upload rejected.")
+            JSONObject()
+                .put("circle_id", circleId)
+                .put("path", path)
+                .put("status", result.finality ?: "accepted")
+                .put("tx_hash", result.hash ?: JSONObject.NULL)
+                .put("hash", result.hash ?: JSONObject.NULL)
+                .toString()
+        }
+    }
+
+    private suspend fun awaitOwnedPublicCircle(circleId: String, walletAddress: String) {
+        val key = circleDeploymentKey(walletAddress, circleId)
+        var lastError: Throwable? = null
+        for (attempt in 0 until CircleOwnershipConfirmationAttempts) {
+            val info = runCatching { withContext(Dispatchers.IO) { rpcRepository.fetchCircleInfo(circleId) } }
+                .onFailure { lastError = it }
+                .getOrNull()
+            if (info != null) {
+                val owner = info.optString("owner").ifBlank { info.optString("owner_address") }
+                require(owner.equals(walletAddress, ignoreCase = true)) {
+                    "Circle asset uploads require a Circle owned by the active wallet."
+                }
+                val resourceMode = info.optString("resource_mode")
+                require(resourceMode.isBlank() || resourceMode == "public_resources") {
+                    "Public asset upload is unavailable for this Circle resource mode."
+                }
+                pendingCircleDeployments.remove(key)
+                return
+            }
+            if (key !in pendingCircleDeployments) break
+            if (attempt + 1 < CircleOwnershipConfirmationAttempts) delay(CircleOwnershipConfirmationIntervalMs)
+        }
+        throw IllegalStateException(lastError?.message ?: "Target Circle is not confirmed yet. Retry after deployment is confirmed.")
+    }
+
+    private fun circleDeploymentKey(walletAddress: String, circleId: String): String =
+        "${currentRpcUrl.trimEnd('/')}|${walletAddress.lowercase()}|${circleId.lowercase()}"
+
+    private fun formatByteCount(bytes: Long): String = when {
+        bytes < 1_024L -> "$bytes B"
+        bytes < 1_048_576L -> "${BigDecimal(bytes).divide(BigDecimal(1_024), 1, RoundingMode.HALF_UP)} KiB"
+        else -> "${BigDecimal(bytes).divide(BigDecimal(1_048_576), 2, RoundingMode.HALF_UP)} MiB"
+    }
+
+    private fun queueCircleProgramCall(
+        payload: Any,
+        onSuccess: (String) -> Unit,
+        onError: (Int, String) -> Unit,
+    ) {
+        val activeCircle = selectedCircleTarget ?: throw IllegalStateException("No active Circle app.")
+        val activeWallet = wallet ?: throw IllegalStateException("Wallet is locked.")
+        val value = payload as? JSONObject ?: throw IllegalArgumentException("Circle program call payload is required.")
+        val target = value.optString("circle_id").ifBlank { activeCircle.circleId }
+        if (!target.equals(activeCircle.circleId, ignoreCase = true)) {
+            throw SecurityException("Circle target override denied.")
+        }
+        val method = value.optString("method").trim()
+        require(method.isNotBlank()) { "Circle program method is required." }
+        val params = value.optJSONArray("params") ?: JSONArray()
+        val amountOu = value.optString("amount", "0").ifBlank { "0" }
+        require(amountOu.all(Char::isDigit)) { "Circle program amount must be an unsigned integer in ou." }
+        val providedFee = value.optString("ou").ifBlank { value.optString("fee") }.takeIf { it.isNotBlank() }
+        require(providedFee == null || providedFee.all(Char::isDigit)) { "Circle program fee must be an unsigned integer in ou." }
+        val amountOct = amountOu.toDoubleOrNull()?.div(MicroUnits.toDouble()) ?: 0.0
+        queueDAppApproval(
+            origin = activeCircle.uri,
+            title = "Approve Circle call",
+            message = "${activeCircle.label} wants to call $method on its Circle program.",
+            details = listOf(
+                DAppRequestDetail("From", activeWallet.address),
+                DAppRequestDetail("Circle", activeCircle.circleId),
+                DAppRequestDetail("Method", method),
+                DAppRequestDetail("Amount", "$amountOu ou (${formatOuAmount(amountOu)} OCT)"),
+                DAppRequestDetail("Fee", providedFee?.let { "$it ou" } ?: "Auto"),
+                DAppRequestDetail("Params", if (params.length() == 0) "[]" else params.toString(2)),
+            ),
+            approveLabel = "Approve",
+            onSuccess = onSuccess,
+            onError = onError,
+        ) {
+            beginSubmittedTransaction(activeCircle.circleId, amountOct, showDialog = false)
+            val feeOu = providedFee?.toLongOrNull()?.takeIf { it > 0L } ?: try {
+                withContext(Dispatchers.IO) { rpcRepository.fetchRecommendedFee("circle_call") }
+            } catch (_: Exception) {
+                withContext(Dispatchers.IO) { rpcRepository.fetchRecommendedFee("call") }
+            }
+            val result = rpcRepository.sendCircleProgramCall(
+                wallet = activeWallet,
+                circleId = activeCircle.circleId,
+                method = method,
+                params = params,
+                amountOu = amountOu,
+                feeOu = feeOu,
+            )
+            if (!result.success) {
+                updateSubmittedTransactionResult(
+                    hash = result.hash,
+                    recipientAddress = activeCircle.circleId,
+                    amount = amountOct,
+                    status = TransactionFinality.Rejected,
+                    reason = result.error ?: "Circle program call rejected.",
+                )
+                throw IllegalStateException(result.error ?: "Circle program call rejected.")
+            }
+            updateSubmittedTransactionResult(
+                hash = result.hash,
+                recipientAddress = activeCircle.circleId,
+                amount = amountOct,
+                status = TransactionFinality.Accepted,
+            )
+            JSONObject()
+                .put("status", result.finality ?: "accepted")
+                .put("tx_hash", result.hash ?: JSONObject.NULL)
+                .put("hash", result.hash ?: JSONObject.NULL)
+                .toString()
+        }
+    }
+
     private fun resolveCircleBridgeRequest(method: String, payload: Any): String {
         val activeCircle = selectedCircleTarget
         val payloadObject = payload as? JSONObject ?: JSONObject()
         return when (method) {
-            "circle.context" -> JSONObject()
-                .put("circle_id", activeCircle?.circleId ?: payloadObject.optString("circle_id"))
-                .put("path", activeCircle?.path ?: payloadObject.optString("path", "/index.html"))
-                .put("uri", activeCircle?.uri ?: payloadObject.optString("uri"))
-                .put("network", activeRpcNetwork?.networkType ?: networkFor(currentRpcUrl))
-                .put("rpc", currentRpcUrl)
-                .toString()
+            "circle.context" -> {
+                val circleId = activeCircle?.circleId ?: payloadObject.optString("circle_id")
+                val info = circleId.takeIf { it.isNotBlank() }?.let(::cacheCircleInfo)
+                JSONObject()
+                    .put("circle_id", circleId)
+                    .put("path", activeCircle?.path ?: payloadObject.optString("path", "/index.html"))
+                    .put("uri", activeCircle?.uri ?: payloadObject.optString("uri"))
+                    .put("network", activeRpcNetwork?.networkType ?: networkFor(currentRpcUrl))
+                    .put("rpc", currentRpcUrl)
+                    .put("runtime", info?.optString("runtime"))
+                    .put("owner", info?.optString("owner"))
+                    .put("privacy_class", info?.optString("privacy_class"))
+                    .put("browser_mode", info?.optString("browser_mode"))
+                    .put("resource_mode", info?.optString("resource_mode"))
+                    .toString()
+            }
             "program.info" -> {
                 val circleId = circleBridgeTarget(payloadObject)
-                rpcRepository.fetchCircleInfo(circleId).toString()
+                rpcRepository.circleProgramInfo(circleId).toString()
             }
             "program.view" -> {
                 val viewMethod = payloadObject.optString("method")
@@ -5936,7 +7376,8 @@ class PoctraController(private val activity: Activity) {
                 jsonLiteral(rpcRepository.circleProgramView(address, viewMethod, params))
             }
             "rpc" -> circleRpcResponse(payload)
-            "program.call" -> throw SecurityException("Circle program writes are not supported yet.")
+            "program.call", "circle.deploy", "circle.asset_plain" ->
+                throw SecurityException("Circle writes require interactive approval.")
             else -> throw NoSuchMethodException("Unsupported circle method: $method")
         }
     }
@@ -6009,7 +7450,7 @@ class PoctraController(private val activity: Activity) {
     fun rejectPendingDAppRequest() {
         val onError = pendingDAppError
         clearPendingDAppRequest()
-        onError?.invoke(4001, "User rejected the poctra request.")
+        onError?.invoke(4001, "User rejected the wallet request.")
     }
 
     fun switchWallet(address: String) {
@@ -6248,6 +7689,37 @@ class PoctraController(private val activity: Activity) {
         return resolveOctraRecipient(clean, activeWallet)
     }
 
+    suspend fun previewOctraIdentityName(address: String): String? {
+        val clean = address.trim()
+        if (!isOctraAddress(clean)) return null
+        val provider = activeIdentityProvider
+            ?: identityProviderRepository.activeProvider(currentIdentityNetwork())
+            ?: return null
+        val cacheKey = "${provider.network}:${provider.id}"
+        if (addressIdentityCacheKey != cacheKey) {
+            identityNamesByAddress = emptyMap()
+            addressIdentityMisses = emptySet()
+            addressIdentityCacheKey = cacheKey
+        }
+        identityNameForAddress(clean)?.let { return it }
+        val key = clean.lowercase()
+        if (key in addressIdentityMisses) return null
+        val name = withContext(Dispatchers.IO) {
+            runCatching { rpcRepository.walletIdentityName(provider, clean) }
+                .getOrNull()
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+        }
+        if (addressIdentityCacheKey != cacheKey) return null
+        if (name != null) {
+            identityNamesByAddress = identityNamesByAddress + (key to name)
+            addressIdentityMisses = addressIdentityMisses - key
+        } else {
+            addressIdentityMisses = addressIdentityMisses + key
+        }
+        return name
+    }
+
     fun maxOctraTokenAmount(token: OctraToken): String = token.formattedBalance
 
     fun dismissSubmittedTransaction() {
@@ -6407,6 +7879,11 @@ class PoctraController(private val activity: Activity) {
     fun refreshEvmDashboard() {
         refreshEvmDashboardSnapshot()
     }
+
+    fun currentEvmAddress(): String? =
+        evmAccount?.address ?: wallet?.let { activeWallet ->
+            runCatching { evmRepository.deriveAddress(activeWallet) }.getOrNull()
+        }
 
     private fun refreshEvmDashboardSnapshot() {
         val activeWallet = wallet ?: return
@@ -6589,12 +8066,17 @@ class PoctraController(private val activity: Activity) {
 
     fun addEvmTokenPreview() {
         val token = evmTokenPreview ?: return
+        val returnToTrade = evmAddTokenReturnTab == DashboardTab.Trade
         evmTokens = evmRepository.saveToken(token)
         syncPortfolioHoldingsAfterDataChange()
         evmTokenPreview = null
         showMessage("${token.symbol} added.")
-        route = AppRoute.Evm
+        restoreEvmAddTokenDestination()
         refreshEvmAssets()
+        if (returnToTrade) {
+            clearTradeQuote()
+            refreshTrade()
+        }
     }
 
     fun clearEvmAssetPreviews() {
@@ -6645,12 +8127,17 @@ class PoctraController(private val activity: Activity) {
         showMessage("${nft.symbol} #${nft.tokenId} removed.")
     }
 
-    fun prepareEvmSendDialog(recipientAddress: String, amountText: String) {
+    fun prepareEvmSendDialog(
+        recipientAddress: String,
+        amountText: String,
+        recipientIdentityName: String? = null,
+    ) {
         if (evmSending) return
         val cleanRecipient = recipientAddress.trim()
         val cleanAmount = if (evmSelectedSendNft != null) "1" else amountText.replace(",", ".").trim()
         resetEvmSendDialogProgress()
         evmSendDialogRecipient = cleanRecipient
+        evmSendDialogRecipientIdentity = recipientIdentityName?.trim()?.takeIf { it.isNotBlank() }
         evmSendDialogAmount = cleanAmount
         evmSendDialogStarted = false
         evmSendDialogVisible = true
@@ -6664,6 +8151,7 @@ class PoctraController(private val activity: Activity) {
         if (submittedTransaction?.showDialog == false) submittedTransaction = null
         resetEvmSendDialogProgress()
         evmSendDialogRecipient = ""
+        evmSendDialogRecipientIdentity = null
         evmSendDialogAmount = ""
     }
 
@@ -6865,6 +8353,20 @@ class PoctraController(private val activity: Activity) {
         }
     }
 
+    suspend fun previewEvmRecipientIdentity(address: String): String? {
+        val clean = address.trim()
+        if (!clean.matches(Regex("^0x[a-fA-F0-9]{40}$"))) return null
+        val account = evmAccount
+        if (account?.address.equals(clean, ignoreCase = true) && !account?.ensName.isNullOrBlank()) {
+            return account?.ensName
+        }
+        val network = activeEvmNetwork ?: evmRepository.activeNetwork()
+        if (network.chainId != 1L) return null
+        return withContext(Dispatchers.IO) {
+            evmRepository.resolveRecipientIdentity(clean, network)
+        }
+    }
+
     private fun evmGasCostAmount(token: EvmToken?): BigDecimal {
         val gasPrice = evmAccount?.gasPriceGwei?.toBigDecimalOrNull() ?: return BigDecimal.ZERO
         val limit = if (token == null) EvmNativeGasLimit else EvmTokenGasLimit
@@ -6992,6 +8494,11 @@ class PoctraController(private val activity: Activity) {
     }
 
     fun dispose() {
+        replacePinSessionKey(null)
+        circlePassphrases.clear()
+        pendingVault = null
+        vault = null
+        wallet = null
         privacyCrypto.close()
         scope.cancel()
     }
@@ -7056,6 +8563,10 @@ class PoctraController(private val activity: Activity) {
             AppRoute.PrivacyStealth,
             AppRoute.PrivacyClaim -> {
                 closePrivacyAction()
+                true
+            }
+            AppRoute.PrivacySettings -> {
+                closePrivacySettings()
                 true
             }
             AppRoute.Send -> {
@@ -7162,14 +8673,18 @@ class PoctraController(private val activity: Activity) {
     private fun persistVault(next: WalletVault, message: String) {
         when (secureStore.currentMethod()) {
             SecurityMethod.Pin -> {
-                val pin = sessionPin ?: run {
+                val sessionKey = pinSessionKey?.copyOf() ?: run {
                     showError("Unlock with PIN again before saving wallet changes.")
                     return
                 }
                 runBusy {
-                    withContext(Dispatchers.IO) { secureStore.saveVaultWithPin(next, pin) }
-                    completeVaultSetup(next)
-                    showMessage(message)
+                    try {
+                        withContext(Dispatchers.IO) { secureStore.saveVaultWithPinSession(next, sessionKey) }
+                        completeVaultSetup(next)
+                        showMessage(message)
+                    } finally {
+                        sessionKey.fill(0)
+                    }
                 }
             }
             SecurityMethod.Biometric -> {
@@ -7196,6 +8711,11 @@ class PoctraController(private val activity: Activity) {
             }
             null -> showError("No current security method found.")
         }
+    }
+
+    private fun replacePinSessionKey(next: ByteArray?) {
+        if (pinSessionKey !== next) pinSessionKey?.fill(0)
+        pinSessionKey = next
     }
 
     private fun persistWalletMetadata(next: WalletVault, message: String) {
@@ -7522,11 +9042,11 @@ class PoctraController(private val activity: Activity) {
     private fun resolveDAppReadRequest(origin: String, activeWallet: Wallet, request: JSONObject): String {
         return when (val method = request.optString("method")) {
             "octra_accounts" -> {
-                if (dAppSession(origin, activeWallet.address) != null) JSONArray().put(activeWallet.address).toString()
+                if (octraDAppSession(origin, activeWallet.address) != null) JSONArray().put(activeWallet.address).toString()
                 else JSONArray().toString()
             }
             "octra_permissions" -> {
-                JSONArray(dAppSession(origin, activeWallet.address)?.permissions ?: emptyList<String>()).toString()
+                JSONArray(octraDAppSession(origin, activeWallet.address)?.permissions ?: emptyList<String>()).toString()
             }
             "octra_disconnect" -> {
                 revokeDAppByOrigin(origin, activeWallet.address)
@@ -7564,9 +9084,11 @@ class PoctraController(private val activity: Activity) {
         action: suspend () -> String,
     ) {
         if (pendingDAppRequest != null) {
-            onError(-32002, "Another poctra request is waiting for approval.")
+            dAppDebug("approval busy origin=$origin title=$title")
+            onError(-32002, "Another wallet request is waiting for approval.")
             return
         }
+        dAppDebug("approval queued origin=$origin title=$title details=${details.size}")
         pendingDAppRequest = PendingDAppRequest(
             origin = origin,
             title = title,
@@ -7590,13 +9112,16 @@ class PoctraController(private val activity: Activity) {
         val sessionUrl = dAppSessionUrlForOrigin(origin)
         val sessionOrigin = canonicalizeOrigin(sessionUrl)
         val originKeys = dAppSessionOriginKeys(origin) + sessionOrigin
+        val existing = dAppSessionRepository.listSessions().firstOrNull {
+            it.walletAddress == walletAddress && canonicalizeOrigin(it.url) in originKeys
+        }
         val session = DAppSession(
             name = hostLabel(sessionUrl),
             url = sessionUrl,
             walletAddress = walletAddress,
-            permissions = permissions,
+            permissions = (existing?.permissions.orEmpty() + permissions).distinct(),
             network = activeRpcNetwork?.networkType ?: networkFor(currentRpcUrl),
-            connectedAt = System.currentTimeMillis(),
+            connectedAt = existing?.connectedAt?.takeIf { it > 0L } ?: System.currentTimeMillis(),
         )
         val next = dAppSessionRepository.listSessions()
             .filterNot { it.walletAddress == walletAddress && canonicalizeOrigin(it.url) in originKeys } + session
@@ -7608,6 +9133,256 @@ class PoctraController(private val activity: Activity) {
         dAppSessionRepository.listSessions().firstOrNull { session ->
             session.walletAddress == walletAddress && canonicalizeOrigin(session.url) in dAppSessionOriginKeys(origin)
         }
+
+    private fun octraDAppSession(origin: String, walletAddress: String): DAppSession? =
+        dAppSession(origin, walletAddress)?.takeIf { session ->
+            session.network.equals(currentIdentityNetwork(), ignoreCase = true)
+        }
+
+    private fun dAppHasPermission(origin: String, walletAddress: String, permission: String): Boolean =
+        dAppSession(origin, walletAddress)?.permissions?.contains(permission) == true
+
+    private fun requireEvmAccountPermission(origin: String, walletAddress: String) {
+        if (!dAppHasPermission(origin, walletAddress, EvmAccountsPermission)) {
+            throw DAppProviderException(4100, "Connect the EVM account before requesting this action.")
+        }
+    }
+
+    private fun dAppDebug(message: String) {
+        if (BuildConfig.DEBUG) Log.d("PoctraDApp", message)
+    }
+
+    private fun removeDAppPermissions(origin: String, walletAddress: String, permissions: Set<String>) {
+        val originKeys = dAppSessionOriginKeys(origin)
+        val next = dAppSessionRepository.listSessions().mapNotNull { session ->
+            if (session.walletAddress != walletAddress || canonicalizeOrigin(session.url) !in originKeys) {
+                return@mapNotNull session
+            }
+            val remaining = session.permissions.filterNot { it in permissions }
+            session.copy(permissions = remaining).takeIf { remaining.isNotEmpty() }
+        }
+        dAppSessionRepository.persist(next)
+        dApps = connectedDAppSessions()
+    }
+
+    private fun evmPermissions(origin: String, walletAddress: String): JSONArray {
+        val permissions = dAppSession(origin, walletAddress)?.permissions.orEmpty()
+        return JSONArray().apply {
+            if (EvmAccountsPermission in permissions) {
+                put(
+                    JSONObject()
+                        .put("parentCapability", "eth_accounts")
+                        .put("caveats", JSONArray()),
+                )
+            }
+        }
+    }
+
+    private fun evmAccountPermissionResult(method: String, evmAddress: String): String =
+        if (method == "wallet_requestPermissions") {
+            JSONArray()
+                .put(JSONObject().put("parentCapability", "eth_accounts").put("caveats", JSONArray()))
+                .toString()
+        } else {
+            JSONArray().put(evmAddress).toString()
+        }
+
+    private fun parseRequestedChainId(params: JSONArray): Long {
+        val raw = params.optJSONObject(0)?.opt("chainId")
+            ?: throw DAppProviderException(-32602, "chainId is required.")
+        val value = parseEvmQuantity(raw)
+        if (value <= BigInteger.ZERO || value > BigInteger.valueOf(Long.MAX_VALUE)) {
+            throw DAppProviderException(-32602, "Enter a valid EVM chain ID.")
+        }
+        return value.toLong()
+    }
+
+    private fun validateRequestedEvmPermissions(params: JSONArray) {
+        val requested = params.optJSONObject(0)
+            ?: throw DAppProviderException(-32602, "Permission details are required.")
+        val keys = buildList {
+            val iterator = requested.keys()
+            while (iterator.hasNext()) add(iterator.next())
+        }
+        if (keys.isEmpty() || keys.any { it != "eth_accounts" }) {
+            throw DAppProviderException(4200, "Only the eth_accounts permission is supported.")
+        }
+    }
+
+    private fun requestedEvmNetwork(params: JSONArray): EvmNetwork {
+        val request = params.optJSONObject(0)
+            ?: throw DAppProviderException(-32602, "Network details are required.")
+        val chainId = parseRequestedChainId(params)
+        evmRepository.networkByChainId(chainId)?.let { return it }
+        val chainName = request.optString("chainName").trim()
+        val currency = request.optJSONObject("nativeCurrency")
+            ?: throw DAppProviderException(-32602, "Native currency details are required.")
+        val symbol = currency.optString("symbol").trim().uppercase()
+        val decimals = currency.optInt("decimals", 18)
+        val rpcUrl = request.optJSONArray("rpcUrls")?.optString(0).orEmpty().trim().trimEnd('/')
+        val explorerUrl = request.optJSONArray("blockExplorerUrls")?.optString(0).orEmpty().trim().trimEnd('/')
+        if (chainName.isBlank() || chainName.length > 64 || chainName.any(Char::isISOControl)) {
+            throw DAppProviderException(-32602, "Enter a valid network name.")
+        }
+        if (!symbol.matches(Regex("^[A-Z0-9]{2,12}$")) || decimals !in 0..36) {
+            throw DAppProviderException(-32602, "Native currency metadata is invalid.")
+        }
+        requireSecureDAppNetworkUrl(rpcUrl, "RPC")
+        if (explorerUrl.isNotBlank()) requireSecureDAppNetworkUrl(explorerUrl, "Explorer")
+        return EvmNetwork(
+            id = "dapp-$chainId-${MessageDigest.getInstance("SHA-256").digest(rpcUrl.toByteArray()).toHex().take(10)}",
+            name = chainName,
+            chainId = chainId,
+            rpcUrl = rpcUrl,
+            symbol = symbol,
+            explorerUrl = explorerUrl,
+            isTestnet = chainName.contains("test", ignoreCase = true),
+        )
+    }
+
+    private suspend fun requestedWatchedToken(
+        params: JSONArray,
+        network: EvmNetwork,
+        ownerAddress: String,
+    ): EvmToken {
+        val request = params.optJSONObject(0)
+            ?: throw DAppProviderException(-32602, "Asset details are required.")
+        if (!request.optString("type", "ERC20").equals("ERC20", ignoreCase = true)) {
+            throw DAppProviderException(4200, "Only ERC20 assets can be added from a dApp.")
+        }
+        val address = request.optJSONObject("options")?.optString("address").orEmpty().trim()
+        if (!address.matches(Regex("^0x[a-fA-F0-9]{40}$"))) {
+            throw DAppProviderException(-32602, "Enter a valid ERC20 contract address.")
+        }
+        return evmRepository.lookupErc20Token(address, ownerAddress, network)
+            ?: throw DAppProviderException(-32602, "The ERC20 contract could not be verified on ${network.name}.")
+    }
+
+    private fun requestedEvmTransaction(
+        params: JSONArray,
+        activeAddress: String,
+        network: EvmNetwork,
+    ): EvmDAppTransaction {
+        val request = params.optJSONObject(0)
+            ?: throw DAppProviderException(-32602, "Transaction details are required.")
+        val from = request.optString("from").ifBlank { activeAddress }
+        if (!from.equals(activeAddress, ignoreCase = true)) {
+            throw DAppProviderException(4100, "The transaction sender does not match the connected account.")
+        }
+        val to = request.optString("to").trim()
+        if (!to.matches(Regex("^0x[a-fA-F0-9]{40}$"))) {
+            throw DAppProviderException(-32602, "Contract creation and invalid recipients are blocked.")
+        }
+        request.opt("chainId")?.takeUnless { it == JSONObject.NULL }?.let { rawChainId ->
+            val chainId = parseEvmQuantity(rawChainId)
+            if (chainId != BigInteger.valueOf(network.chainId)) {
+                throw DAppProviderException(4901, "Switch to chain ${chainId.toString()} before signing.")
+            }
+        }
+        val data = request.optString("data", request.optString("input", "0x")).ifBlank { "0x" }
+        if (!data.matches(Regex("^0x(?:[a-fA-F0-9]{2})*$"))) {
+            throw DAppProviderException(-32602, "Transaction calldata must be valid even-length hex.")
+        }
+        return EvmDAppTransaction(
+            from = activeAddress,
+            to = to,
+            valueWei = parseEvmQuantity(request.opt("value") ?: "0x0"),
+            dataHex = data,
+            gasLimit = request.opt("gas")?.takeUnless { it == JSONObject.NULL }?.let(::parseEvmQuantity),
+            gasPriceWei = listOf("gasPrice", "maxFeePerGas")
+                .firstNotNullOfOrNull { key -> request.opt(key)?.takeUnless { it == JSONObject.NULL } }
+                ?.let(::parseEvmQuantity),
+        )
+    }
+
+    private fun requestedPersonalSignMessage(params: JSONArray, activeAddress: String): ByteArray {
+        if (params.length() < 2) throw DAppProviderException(-32602, "Message and account are required.")
+        val first = params.optString(0)
+        val second = params.optString(1)
+        val firstIsAddress = first.matches(Regex("^0x[a-fA-F0-9]{40}$"))
+        val address = if (firstIsAddress) first else second
+        val rawMessage = if (firstIsAddress) second else first
+        if (!address.equals(activeAddress, ignoreCase = true)) {
+            throw DAppProviderException(4100, "The signing account does not match the connected account.")
+        }
+        val bytes = if (rawMessage.startsWith("0x", ignoreCase = true)) {
+            val clean = rawMessage.drop(2)
+            if (!clean.matches(Regex("^(?:[a-fA-F0-9]{2})*$"))) {
+                throw DAppProviderException(-32602, "Message must contain valid even-length hex.")
+            }
+            ByteArray(clean.length / 2) { index -> clean.substring(index * 2, index * 2 + 2).toInt(16).toByte() }
+        } else {
+            rawMessage.toByteArray(Charsets.UTF_8)
+        }
+        if (bytes.isEmpty() || bytes.size > MaxDAppSigningBytes) {
+            throw DAppProviderException(-32602, "Message must contain 1 to $MaxDAppSigningBytes bytes.")
+        }
+        return bytes
+    }
+
+    private fun requestedEip712TypedData(params: JSONArray, activeAddress: String): Eip712TypedData {
+        if (params.length() < 2) throw DAppProviderException(-32602, "Typed data and account are required.")
+        val first = params.opt(0)
+        val second = params.opt(1)
+        val firstAddress = first as? String
+        val secondAddress = second as? String
+        val address = when {
+            firstAddress?.matches(Regex("^0x[a-fA-F0-9]{40}$")) == true -> firstAddress
+            secondAddress?.matches(Regex("^0x[a-fA-F0-9]{40}$")) == true -> secondAddress
+            else -> throw DAppProviderException(-32602, "A valid EVM account is required for typed-data signing.")
+        }
+        if (!address.equals(activeAddress, ignoreCase = true)) {
+            throw DAppProviderException(4100, "The signing account does not match the connected account.")
+        }
+        val rawTypedData = if (firstAddress?.equals(address, ignoreCase = true) == true) second else first
+        return try {
+            Eip712TypedDataCodec.parse(rawTypedData)
+        } catch (exception: Exception) {
+            throw DAppProviderException(-32602, exception.message ?: "Typed data is invalid.")
+        }
+    }
+
+    private fun parseEvmQuantity(raw: Any): BigInteger {
+        val clean = raw.toString().trim()
+        val value = runCatching {
+            when {
+                clean.startsWith("0x", ignoreCase = true) -> clean.drop(2).ifBlank { "0" }.toBigInteger(16)
+                else -> clean.toBigInteger()
+            }
+        }.getOrNull() ?: throw DAppProviderException(-32602, "Invalid EVM quantity.")
+        if (value < BigInteger.ZERO || value.bitLength() > 256) {
+            throw DAppProviderException(-32602, "EVM quantity is outside the uint256 range.")
+        }
+        return value
+    }
+
+    private fun requireSecureDAppNetworkUrl(value: String, label: String) {
+        val uri = runCatching { URI(value) }.getOrNull()
+            ?: throw DAppProviderException(-32602, "$label URL is invalid.")
+        if (uri.scheme?.lowercase() != "https" || uri.host.isNullOrBlank() || !uri.userInfo.isNullOrBlank()) {
+            throw DAppProviderException(-32602, "$label URL must use HTTPS without embedded credentials.")
+        }
+    }
+
+    private fun Long.toEvmQuantity(): String = "0x${toString(16)}"
+
+    private fun EvmDAppTransaction.calldataReview(): String {
+        if (dataHex.equals("0x", ignoreCase = true)) return "None"
+        val clean = dataHex.drop(2)
+        val bytes = clean.length / 2
+        val selector = "0x${clean.take(8)}"
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(ByteArray(bytes) { index -> clean.substring(index * 2, index * 2 + 2).toInt(16).toByte() })
+            .toHex()
+        return "$selector, $bytes bytes, SHA-256 $digest"
+    }
+
+    private fun ByteArray.signingPreview(): String {
+        val decoded = toString(Charsets.UTF_8)
+        val printable = decoded.isNotBlank() && !decoded.contains('\uFFFD') && decoded.all { !it.isISOControl() || it in "\r\n\t" }
+        val value = if (printable) decoded else "0x${toHex()}"
+        return if (value.length <= 1_024) value else "${value.take(768)}...${value.takeLast(128)}"
+    }
 
     private fun revokeDAppByOrigin(origin: String, walletAddress: String) {
         val originKeys = dAppSessionOriginKeys(origin)
@@ -7685,8 +9460,12 @@ class PoctraController(private val activity: Activity) {
             is JSONObject -> raw
             else -> null
         } ?: throw IllegalArgumentException("Contract call payload is required.")
-        require(obj.optString("address").isNotBlank()) { "Contract address is required." }
-        require(obj.optString("method").isNotBlank()) { "Contract method is required." }
+        require(obj.optString("address").matches(Regex("^oct[1-9A-HJ-NP-Za-km-z]{44}$"))) {
+            "Enter a valid Octra contract address."
+        }
+        require(obj.optString("method").trim().matches(Regex("^[A-Za-z_][A-Za-z0-9_]{0,63}$"))) {
+            "Enter a valid contract method."
+        }
         return obj
     }
 
@@ -7705,9 +9484,11 @@ class PoctraController(private val activity: Activity) {
     }
 
     private fun dAppError(exception: Exception): Pair<Int, String> = when (exception) {
+        is DAppProviderException -> exception.providerCode to (exception.message ?: "Wallet request failed")
         is SecurityException -> 4100 to (exception.message ?: "Unauthorized")
         is NoSuchMethodException -> 4200 to (exception.message ?: "Unsupported method")
-        else -> -32000 to (exception.message ?: "poctra request failed")
+        is IllegalArgumentException -> -32602 to (exception.message ?: "Invalid parameters")
+        else -> -32000 to (exception.message ?: "Wallet request failed")
     }
 
     private fun shortAddress(address: String): String {
@@ -7809,7 +9590,7 @@ class PoctraController(private val activity: Activity) {
             .filter { it.isNotBlank() }
             .joinToString("/") { encodeUrlPart(it) }
         val suffix = if (segments.isBlank()) "index.html" else segments
-        return "https://$CircleBrowserHost/oct/${encodeUrlPart(circleId)}/$suffix"
+        return "https://${circleId.lowercase()}.$CircleBrowserHost/oct/${encodeUrlPart(circleId)}/$suffix"
     }
 
     private fun circleLoadingUrl(rawInput: String): String =
@@ -7864,7 +9645,7 @@ class PoctraController(private val activity: Activity) {
         else -> "$${"%.2f".format(value)}"
     }
 
-    private fun runBusy(block: suspend () -> Unit) {
+    private fun runBusy(onComplete: () -> Unit = {}, block: suspend () -> Unit) {
         scope.launch {
             beginBusyOperation()
             clearError()
@@ -7875,6 +9656,7 @@ class PoctraController(private val activity: Activity) {
                 showError(exception.message ?: "Something went wrong.")
             } finally {
                 endBusyOperation()
+                onComplete()
             }
         }
     }
@@ -7943,14 +9725,24 @@ class PoctraController(private val activity: Activity) {
         private const val ActivityCenterSyncTimeoutMs = 8_000L
         private const val InitialPrivacyHistoryLimit = 7
         private const val PrivacyCacheMillis = 30_000L
+        private const val PrivacyKeyRecheckAttempts = 3
+        private const val PrivacyKeyRecheckDelayMs = 2_500L
         private const val PrivacyClaimCacheMillis = 5 * 60_000L
         private const val PrivacyConfirmationAttempts = 45
         private const val IdentityLookupBatchSize = 4
         private const val MaxCircleBridgePayloadBytes = 64_000
+        private const val MaxCircleAssetBridgePayloadBytes = 1_500_000
+        private const val DefaultCircleDeployFeeOu = 200_000L
+        private const val CircleOwnershipConfirmationAttempts = 40
+        private const val CircleOwnershipConfirmationIntervalMs = 1_500L
+        private const val CircleAssetCacheMillis = 30_000L
+        private const val MaxCircleAssetCacheEntries = 64
         private const val MaxCircleDownloadParts = 32
         private const val MaxCircleDownloadPathLength = 512
         private const val MaxCircleDownloadNameLength = 128
         private const val MaxCircleDownloadBytes = 256L * 1024L * 1024L
+        private const val MaxDAppSigningBytes = 65_536
+        private const val EvmAccountsPermission = "evm_accounts"
         private const val KeyBridgeHistory = "bridge_history"
         private const val MaxBridgeHistoryItems = 25
         private const val KeyPortfolioHoldings = "portfolio_holdings"
@@ -7975,6 +9767,7 @@ class PoctraController(private val activity: Activity) {
         private const val Permit2Address = "0x000000000022D473030F116dDEE9F6B43aC78BA3"
         private const val UniversalRouterAddress = "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af"
         private val ApprovalLargeAllowanceRaw = BigInteger("1000000000000000000000000")
+        private val EvmPermissions = setOf("evm_accounts")
         const val CircleBrowserHost = "octra-circle.local"
     }
 }
@@ -7984,6 +9777,7 @@ private fun nativeAssetName(symbol: String): String = when (symbol.uppercase()) 
     "BNB" -> "BNB"
     "POL" -> "Polygon"
     "MATIC" -> "Polygon"
+    "HYPE" -> "Hyperliquid"
     else -> symbol.uppercase()
 }
 

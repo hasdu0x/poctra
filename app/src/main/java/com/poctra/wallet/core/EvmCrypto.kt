@@ -27,6 +27,20 @@ class EvmCrypto {
     fun exportPrivateKeyHex(wallet: Wallet): String =
         "0x${wallet.evmPrivateKey().toFixedBytes(32).toHex()}"
 
+    fun signPersonalMessage(wallet: Wallet, message: ByteArray): String {
+        val prefix = "\u0019Ethereum Signed Message:\n${message.size}".toByteArray(Charsets.UTF_8)
+        return signRecoverableHash(wallet, keccak(prefix + message))
+    }
+
+    fun signRecoverableHash(wallet: Wallet, hash: ByteArray): String {
+        require(hash.size == 32) { "EVM signing hash must be 32 bytes." }
+        val signature = signHash(hash, wallet.evmPrivateKey())
+        val bytes = signature.r.toFixedBytes(32) +
+            signature.s.toFixedBytes(32) +
+            byteArrayOf((signature.recoveryId + 27).toByte())
+        return "0x${bytes.toHex()}"
+    }
+
     fun signLegacyTransaction(
         wallet: Wallet,
         nonce: BigInteger,

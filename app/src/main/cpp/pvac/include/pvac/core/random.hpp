@@ -7,16 +7,24 @@
 
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
     #include <stdlib.h>
-#elif defined(__linux__)
+#elif defined(__linux__) && !defined(__ANDROID__)
     #include <unistd.h>
     #include <sys/random.h>
     #include <fcntl.h>
     #include <errno.h>
+#elif defined(__ANDROID__)
+    #include <unistd.h>
+    #include <fcntl.h>
+    #include <errno.h>
 #elif defined(_WIN32)
+    #ifndef NOMINMAX
     #define NOMINMAX
+    #endif
     #include <windows.h>
     #include <bcrypt.h>
+    #if defined(_MSC_VER)
     #pragma comment(lib, "bcrypt.lib")
+    #endif
 #else
     #include <random>
 #endif
@@ -41,24 +49,7 @@ inline void csprng_bytes(uint8_t * out, size_t n) {
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
     arc4random_buf(out, n);
 
-#elif defined(__ANDROID__)
-    size_t off = 0;
-    int fd = ::open("/dev/urandom", O_RDONLY);
-    if (fd < 0) std::abort();
-    while (off < n) {
-        ssize_t count = ::read(fd, out + off, n - off);
-        if (count > 0) {
-            off += static_cast<size_t>(count);
-        } else if (count < 0 && errno == EINTR) {
-            continue;
-        } else {
-            break;
-        }
-    }
-    ::close(fd);
-    if (off != n) std::abort();
-
-#elif defined(__linux__)
+#elif defined(__linux__) && !defined(__ANDROID__)
     size_t off = 0;
 
     while (off < n) {
@@ -97,6 +88,27 @@ inline void csprng_bytes(uint8_t * out, size_t n) {
         break;
     }
 
+    if (off != n) {
+        std::abort();
+    }
+
+#elif defined(__ANDROID__)
+    size_t off = 0;
+    int fd = ::open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        std::abort();
+    }
+    while (off < n) {
+        const ssize_t count = ::read(fd, out + off, n - off);
+        if (count > 0) {
+            off += static_cast<size_t>(count);
+        } else if (count < 0 && errno == EINTR) {
+            continue;
+        } else {
+            break;
+        }
+    }
+    ::close(fd);
     if (off != n) {
         std::abort();
     }

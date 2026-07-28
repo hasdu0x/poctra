@@ -60,12 +60,15 @@ import com.poctra.wallet.privacy.PrivacyClaimableTransfer
 import com.poctra.wallet.privacy.PrivacyOperationStage
 import com.poctra.wallet.privacy.PrivacyOperationState
 import com.poctra.wallet.privacy.PrivacyOperationType
+import com.poctra.wallet.privacy.PrivacyKeyUpgradeMode
+import com.poctra.wallet.privacy.PrivacyUpgradePolicy
 import com.poctra.wallet.privacy.PrivacySyncStatus
 import com.poctra.wallet.privacy.PrivacySyncStep
 import com.poctra.wallet.privacy.formatPrivacyAmount
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.delay
 
 @Composable
 fun PrivacyContent(controller: PoctraController) {
@@ -87,13 +90,32 @@ fun PrivacyContent(controller: PoctraController) {
                     style = MaterialTheme.typography.labelSmall,
                 )
             }
-            PrivacyHeaderAction(
-                loading = controller.privacySyncing,
-                onClick = { controller.refreshPrivacy(force = true) },
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(Space.x3)) {
+                PrivacyHeaderAction(
+                    label = "Settings",
+                    glyph = Glyph.Settings,
+                    onClick = controller::openPrivacySettings,
+                )
+                PrivacyHeaderAction(
+                    label = "Refresh",
+                    glyph = Glyph.Refresh,
+                    loading = controller.privacySyncing,
+                    onClick = { controller.refreshPrivacy(force = true) },
+                )
+            }
         }
 
         PrivacyBalanceCard(controller)
+
+        controller.privacyKeyStatus
+            .takeIf { it.requiresAction }
+            ?.let { status ->
+                PrivacyKeyAttentionCard(
+                    status = status,
+                    loading = controller.privacyKeyStatusLoading,
+                    onClick = controller::openPrivacySettings,
+                )
+            }
 
         controller.privacyOperation?.takeIf { !it.dialogVisible }?.let { operation ->
             PrivacyResumeCard(operation, controller::resumePrivacyOperation)
@@ -152,6 +174,57 @@ fun PrivacyContent(controller: PoctraController) {
 }
 
 @Composable
+private fun PrivacyKeyAttentionCard(
+    status: com.poctra.wallet.privacy.PrivacyKeyUpgradeStatus,
+    loading: Boolean,
+    onClick: () -> Unit,
+) {
+    val blocked = status.mode in setOf(
+        PrivacyKeyUpgradeMode.Blocked,
+        PrivacyKeyUpgradeMode.KeyMismatch,
+        PrivacyKeyUpgradeMode.FeeBlocked,
+    )
+    val tone = if (blocked) ErrorRed else Warning
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(Radius.md))
+            .background(tone.copy(alpha = 0.09f))
+            .clickable(enabled = !loading, onClick = onClick)
+            .padding(horizontal = Space.x5, vertical = Space.x4),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (loading) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(18.dp),
+                color = tone,
+                strokeWidth = 2.dp,
+            )
+        } else {
+            GlyphIcon(Glyph.Key, Modifier.size(18.dp), tone)
+        }
+        Spacer(Modifier.width(Space.x4))
+        Column(Modifier.weight(1f)) {
+            Text(
+                privacyUpgradeModeLabel(status.mode),
+                color = tone,
+                style = MaterialTheme.typography.labelMedium,
+            )
+            Spacer(Modifier.height(Space.x1))
+            Text(
+                status.reason,
+                color = TextSecondary,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.width(Space.x3))
+        GlyphIcon(Glyph.Go, Modifier.size(16.dp), TextSecondary)
+    }
+}
+
+@Composable
 fun PrivacyOverlay(controller: PoctraController) {
     controller.privacyOperation?.takeIf { it.dialogVisible && it.stage != PrivacyOperationStage.Review }?.let { operation ->
         PrivacyOperationSheet(controller, operation)
@@ -159,7 +232,12 @@ fun PrivacyOverlay(controller: PoctraController) {
 }
 
 @Composable
-private fun PrivacyHeaderAction(loading: Boolean, onClick: () -> Unit) {
+private fun PrivacyHeaderAction(
+    label: String,
+    glyph: Glyph,
+    loading: Boolean = false,
+    onClick: () -> Unit,
+) {
     Column(
         modifier = Modifier
             .width(50.dp)
@@ -174,11 +252,11 @@ private fun PrivacyHeaderAction(loading: Boolean, onClick: () -> Unit) {
         if (loading) {
             CircularProgressIndicator(modifier = Modifier.size(15.dp), color = PrivacyPrimary, strokeWidth = 2.dp)
         } else {
-            GlyphIcon(Glyph.Refresh, modifier = Modifier.size(16.dp), color = PrivacyPrimary)
+            GlyphIcon(glyph, modifier = Modifier.size(16.dp), color = PrivacyPrimary)
         }
         Spacer(Modifier.height(2.dp))
         Text(
-            "Refresh",
+            label,
             color = TextSecondary,
             style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
             maxLines = 1,
@@ -462,6 +540,278 @@ private fun PrivacyEmptyState(text: String) {
 private enum class PrivacyFeeMode { Auto, Fast, Custom }
 private enum class PrivacyNoticeTone { Info, Caution, Error }
 
+private fun privacyFailureTone(message: String): PrivacyNoticeTone {
+    val normalized = message.lowercase()
+    return if (
+        normalized.contains("timeout") ||
+        normalized.contains("timed out") ||
+        normalized.contains("still pending")
+    ) {
+        PrivacyNoticeTone.Caution
+    } else {
+        PrivacyNoticeTone.Error
+    }
+}
+
+@Composable
+fun PrivacySettingsScreen(controller: PoctraController) {
+    val status = controller.privacyKeyStatus
+    val walletAddress = controller.wallet?.address.orEmpty()
+    val walletIdentity = walletAddress.takeIf(String::isNotBlank)?.let(controller::walletIdentityDomain)
+    var resetPhrase by remember(status.mode) { mutableStateOf("") }
+    var reviewVisible by remember { mutableStateOf(false) }
+    val actionLabel = privacyUpgradeActionLabel(status.mode, status.repairRequired, status.compactRefresh)
+    val statusColor = when (status.mode) {
+        PrivacyKeyUpgradeMode.Current -> PrivacyPrimary
+        PrivacyKeyUpgradeMode.Blocked,
+        PrivacyKeyUpgradeMode.KeyMismatch,
+        PrivacyKeyUpgradeMode.FeeBlocked -> ErrorRed
+        else -> Warning
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .verticalScroll(rememberScrollState())
+            .padding(Space.x8),
+    ) {
+        PrivacyScreenHeader(
+            title = "Privacy Settings",
+            description = "Manage encryption keys and balance compatibility.",
+            onBack = controller::closePrivacySettings,
+            action = {
+                PrivacyHeaderAction(
+                    label = "Refresh",
+                    glyph = Glyph.Refresh,
+                    loading = controller.privacyKeyStatusLoading,
+                    onClick = controller::refreshPrivacyKeyStatus,
+                )
+            },
+        )
+        Spacer(Modifier.height(Space.x7))
+
+        Card(
+            colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
+            shape = RoundedCornerShape(Radius.md),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(Space.x7),
+                verticalArrangement = Arrangement.spacedBy(Space.x5),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .background(statusColor.copy(alpha = 0.12f), RoundedCornerShape(Radius.md)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        GlyphIcon(
+                            if (status.mode == PrivacyKeyUpgradeMode.Current) Glyph.Check else Glyph.Key,
+                            Modifier.size(18.dp),
+                            statusColor,
+                        )
+                    }
+                    Spacer(Modifier.width(Space.x5))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            privacyUpgradeModeLabel(status.mode),
+                            color = TextTertiary,
+                            style = MaterialTheme.typography.titleSmall,
+                        )
+                        Spacer(Modifier.height(Space.x1))
+                        Text(
+                            status.reason,
+                            color = TextSecondary,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+                PrivacyKeyDetail(
+                    "Registered key",
+                    when {
+                        status.registeredKeyCurrent -> "Current"
+                        status.registeredKeyCompatible -> "Compatible"
+                        status.registeredKeyPresent -> "Different"
+                        else -> "Not registered"
+                    },
+                )
+                if (status.cipherPresent) {
+                    PrivacyKeyDetail(
+                        "Encrypted balance",
+                        status.encryptedBalanceRaw?.let { "${formatPrivacyAmount(it)} OCT" } ?: "Protected",
+                    )
+                    PrivacyKeyDetail(
+                        "Cipher",
+                        if (status.canonicalRandomnessCommitment) "Key-bound" else "Refresh required",
+                    )
+                    if (status.baseLayerCount > 0) {
+                        PrivacyKeyDetail("Base layers", status.baseLayerCount.toString())
+                    }
+                }
+                status.requiredPublicFeeRaw?.let {
+                    PrivacyKeyDetail("Network fee", "${formatPrivacyAmount(it)} OCT")
+                }
+            }
+        }
+
+        if (status.mode == PrivacyKeyUpgradeMode.LegacyZeroReset) {
+            Spacer(Modifier.height(Space.x6))
+            PrivacyContextBanner(
+                text = "This replaces the legacy ciphertext with verified zero. Hidden funds cannot be recovered after confirmation.",
+                tone = PrivacyNoticeTone.Error,
+            )
+            Spacer(Modifier.height(Space.x4))
+            Text(
+                "Type ${PrivacyUpgradePolicy.ResetPhrase}",
+                color = TextSecondary,
+                style = MaterialTheme.typography.labelSmall,
+            )
+            Spacer(Modifier.height(Space.x3))
+            PoctraTextField(
+                value = resetPhrase,
+                onValueChange = { resetPhrase = it.take(48) },
+                label = "Confirmation phrase",
+                placeholder = PrivacyUpgradePolicy.ResetPhrase,
+                focusColor = PrivacyPrimary,
+            )
+        }
+
+        Spacer(Modifier.height(Space.x7))
+        when {
+            status.canSubmit -> PrivacyPrimaryButton(
+                text = actionLabel,
+                enabled = status.mode != PrivacyKeyUpgradeMode.LegacyZeroReset ||
+                    resetPhrase.trim() == PrivacyUpgradePolicy.ResetPhrase,
+                onClick = { reviewVisible = true },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            status.mode == PrivacyKeyUpgradeMode.Current -> PoctraButton(
+                text = "Refresh encrypted balance",
+                onClick = controller::refreshPrivacyNetworkState,
+                enabled = !controller.privacyKeyStatusLoading,
+                loading = controller.privacyKeyStatusLoading,
+                leadingGlyph = Glyph.Refresh,
+                compact = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            else -> {
+                PrivacyContextBanner(status.reason, PrivacyNoticeTone.Error)
+                Spacer(Modifier.height(Space.x4))
+                PoctraButton(
+                    text = "Recheck network state",
+                    onClick = controller::recheckPrivacyKeyState,
+                    enabled = !controller.privacyKeyStatusLoading,
+                    loading = controller.privacyKeyStatusLoading,
+                    variant = ButtonVariant.Ghost,
+                    leadingGlyph = Glyph.Refresh,
+                    compact = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (status.mode == PrivacyKeyUpgradeMode.KeyMismatch) {
+                    Spacer(Modifier.height(Space.x4))
+                    Text(
+                        "Poctra will never overwrite a foreign Privacy key. If the mismatch remains, restore the wallet that created the registered key or verify that the active RPC is correct.",
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(Space.x5))
+        Text(
+            "Key switching is explicit. Proofs are built and verified locally before the transaction is signed.",
+            color = TextSecondary,
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+
+    if (reviewVisible) {
+        PrivacyReviewSheet(
+            title = actionLabel,
+            glyph = Glyph.Key,
+            source = ReviewFlowEndpoint(
+                "Current encrypted balance",
+                walletAddress,
+                walletIdentity,
+            ),
+            destination = ReviewFlowEndpoint(
+                "Current Privacy key",
+                walletAddress,
+                walletIdentity,
+            ),
+            actionLabel = actionLabel,
+            details = buildList {
+                add("Mode" to privacyUpgradeModeLabel(status.mode))
+                status.encryptedBalanceRaw?.let {
+                    add("Balance preserved" to "${formatPrivacyAmount(it)} OCT")
+                }
+                status.requiredPublicFeeRaw?.let {
+                    add("Network fee" to "${formatPrivacyAmount(it)} OCT")
+                }
+            },
+            notice = if (status.mode == PrivacyKeyUpgradeMode.LegacyZeroReset) {
+                "The zero reset is irreversible."
+            } else {
+                "Poctra rechecks the source cipher before broadcast to prevent a stale migration."
+            },
+            noticeTone = if (status.mode == PrivacyKeyUpgradeMode.LegacyZeroReset) {
+                PrivacyNoticeTone.Error
+            } else {
+                PrivacyNoticeTone.Info
+            },
+            onDismiss = { reviewVisible = false },
+            onProceed = {
+                reviewVisible = false
+                controller.startPrivacyKeyUpgrade(resetPhrase)
+            },
+        )
+    }
+}
+
+@Composable
+private fun PrivacyKeyDetail(label: String, value: String) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+        Spacer(Modifier.weight(1f))
+        Text(
+            value,
+            color = TextTertiary,
+            style = MaterialTheme.typography.labelSmall,
+            textAlign = TextAlign.End,
+        )
+    }
+}
+
+private fun privacyUpgradeModeLabel(mode: PrivacyKeyUpgradeMode): String = when (mode) {
+    PrivacyKeyUpgradeMode.Current -> "Encryption ready"
+    PrivacyKeyUpgradeMode.EmptyKeySwitch -> "Key setup required"
+    PrivacyKeyUpgradeMode.KeyBoundMigration -> "Recrypt required"
+    PrivacyKeyUpgradeMode.LegacyPublicMigration -> "Legacy upgrade available"
+    PrivacyKeyUpgradeMode.LegacyCommitmentMigration -> "History migration available"
+    PrivacyKeyUpgradeMode.LegacyZeroReset -> "Verified zero reset"
+    PrivacyKeyUpgradeMode.KeyMismatch -> "Key mismatch"
+    PrivacyKeyUpgradeMode.FeeBlocked -> "Network fee required"
+    PrivacyKeyUpgradeMode.Blocked -> "Migration blocked"
+    PrivacyKeyUpgradeMode.Unavailable -> "Status unavailable"
+}
+
+private fun privacyUpgradeActionLabel(
+    mode: PrivacyKeyUpgradeMode,
+    repairRequired: Boolean,
+    compactRefresh: Boolean,
+): String = when {
+    repairRequired -> "Repair encrypted balance"
+    compactRefresh -> "Compact encrypted balance"
+    mode == PrivacyKeyUpgradeMode.EmptyKeySwitch -> "Activate Privacy key"
+    mode == PrivacyKeyUpgradeMode.LegacyZeroReset -> "Reset encrypted balance"
+    mode == PrivacyKeyUpgradeMode.KeyBoundMigration -> "Recrypt encrypted balance"
+    else -> "Upgrade encrypted balance"
+}
+
 @Composable
 fun PrivacyEncryptScreen(controller: PoctraController) {
     PrivacyTransferActionScreen(
@@ -658,17 +1008,57 @@ private fun PrivacyTransferActionScreen(
     }
 
     if (showReview && selectedFee != null) {
+        val ownerAddress = controller.wallet?.address.orEmpty()
+        val ownerIdentity = controller.wallet?.address?.let(controller::walletIdentityDomain)
+        val recipientIdentity = recipientLookup.resolution?.name
+            ?: controller.identityNameForAddress(resolvedRecipient)
+        val source = when (type) {
+            PrivacyOperationType.Encrypt -> ReviewFlowEndpoint(
+                label = "Public balance",
+                address = ownerAddress,
+                identityName = ownerIdentity,
+            )
+            PrivacyOperationType.Decrypt -> ReviewFlowEndpoint(
+                label = "Encrypted balance",
+                address = ownerAddress,
+                identityName = ownerIdentity,
+            )
+            PrivacyOperationType.Stealth -> ReviewFlowEndpoint(
+                label = "Encrypted balance",
+                address = ownerAddress,
+                identityName = ownerIdentity,
+            )
+            PrivacyOperationType.Claim -> ReviewFlowEndpoint("Private output", ownerAddress, ownerIdentity)
+            PrivacyOperationType.KeySwitch -> ReviewFlowEndpoint("Encrypted balance", ownerAddress, ownerIdentity)
+        }
+        val destination = when (type) {
+            PrivacyOperationType.Encrypt -> ReviewFlowEndpoint(
+                label = "Encrypted balance",
+                address = ownerAddress,
+                identityName = ownerIdentity,
+            )
+            PrivacyOperationType.Decrypt -> ReviewFlowEndpoint(
+                label = "Public balance",
+                address = ownerAddress,
+                identityName = ownerIdentity,
+            )
+            PrivacyOperationType.Stealth -> ReviewFlowEndpoint(
+                label = "Private recipient",
+                address = resolvedRecipient,
+                identityName = recipientIdentity,
+            )
+            PrivacyOperationType.Claim -> ReviewFlowEndpoint("Encrypted balance", ownerAddress, ownerIdentity)
+            PrivacyOperationType.KeySwitch -> ReviewFlowEndpoint("Privacy key", ownerAddress, ownerIdentity)
+        }
         PrivacyReviewSheet(
             title = "Review ${type.label}",
             glyph = glyph,
+            source = source,
+            destination = destination,
+            actionLabel = type.label,
             details = buildList {
                 add("Network" to privacyNetworkLabel(controller))
                 add("Amount" to "$amount OCT")
-                if (requiresRecipient) {
-                    val recipientLabel = recipientLookup.resolution?.name?.let { "$it (${shortPrivacyAddress(resolvedRecipient)})" }
-                        ?: shortPrivacyAddress(resolvedRecipient)
-                    add("Recipient" to recipientLabel)
-                }
                 add("Network fee" to "$selectedFee OU (${formatPrivacyAmount(selectedFee)} OCT)")
             },
             notice = when {
@@ -676,7 +1066,7 @@ private fun PrivacyTransferActionScreen(
                 feeMode == PrivacyFeeMode.Fast -> "Fast uses twice the RPC-recommended network fee."
                 else -> "The transaction is signed locally and broadcast only after confirmation."
             },
-            noticeTone = if (type == PrivacyOperationType.Stealth || feeMode == PrivacyFeeMode.Fast) PrivacyNoticeTone.Caution else PrivacyNoticeTone.Info,
+            noticeTone = if (feeMode == PrivacyFeeMode.Fast) PrivacyNoticeTone.Caution else PrivacyNoticeTone.Info,
             onDismiss = { showReview = false },
             onProceed = {
                 showReview = false
@@ -696,13 +1086,17 @@ fun PrivacyClaimScreen(controller: PoctraController) {
     val operation = controller.privacyOperation
     val transfers = controller.privacyClaimableTransfers
 
+    LaunchedEffect(transfers.map { it.sender }) {
+        controller.refreshIdentityNamesForAddresses(transfers.map { it.sender })
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
             .navigationBarsPadding(),
         contentPadding = PaddingValues(Space.x8),
-        verticalArrangement = Arrangement.spacedBy(Space.x5),
+        verticalArrangement = Arrangement.spacedBy(Space.x4),
     ) {
         item {
             PrivacyScreenHeader(
@@ -711,6 +1105,8 @@ fun PrivacyClaimScreen(controller: PoctraController) {
                 onBack = controller::closePrivacyAction,
                 action = {
                     PrivacyHeaderAction(
+                        label = "Refresh",
+                        glyph = Glyph.Refresh,
                         loading = operation?.stage == PrivacyOperationStage.Scanning,
                         onClick = { controller.scanPrivacyClaims(showDialog = false, force = true) },
                     )
@@ -731,7 +1127,7 @@ fun PrivacyClaimScreen(controller: PoctraController) {
         if (transfers.isNotEmpty() && totalClaimFee != null && !controller.privacyFeeAffordable(totalClaimFee)) {
             item {
                 PrivacyContextBanner(
-                    text = if (selectedFee != null && controller.privacyFeeAffordable(selectedFee)) {
+                    text = if (controller.privacyFeeAffordable(selectedFee)) {
                         "Public OCT balance is insufficient for all ${transfers.size} Claim fees. Claim individually or add OCT for fees."
                     } else {
                         "Public OCT balance is insufficient for the selected Claim fee."
@@ -758,6 +1154,8 @@ fun PrivacyClaimScreen(controller: PoctraController) {
                         PrivacyPrimaryButton(
                             text = "Claim All",
                             onClick = { reviewBulk = true },
+                            modifier = Modifier.width(112.dp),
+                            compact = true,
                             enabled = selectedFee != null &&
                                 !controller.privacyFeeLoading &&
                                 privacyBulkFee(selectedFee, transfers.size)?.let(controller::privacyFeeAffordable) == true,
@@ -781,6 +1179,17 @@ fun PrivacyClaimScreen(controller: PoctraController) {
             PrivacyReviewSheet(
                 title = "Review Claim",
                 glyph = Glyph.Download,
+                source = ReviewFlowEndpoint(
+                    label = "Private output",
+                    address = transfer.sender,
+                    identityName = controller.identityNameForAddress(transfer.sender),
+                ),
+                destination = ReviewFlowEndpoint(
+                    label = "Encrypted balance",
+                    address = controller.wallet?.address.orEmpty(),
+                    identityName = controller.wallet?.address?.let(controller::walletIdentityDomain),
+                ),
+                actionLabel = "Claim",
                 details = listOf(
                     "Network" to privacyNetworkLabel(controller),
                     "Amount" to "${transfer.amountOct} OCT",
@@ -806,6 +1215,16 @@ fun PrivacyClaimScreen(controller: PoctraController) {
             PrivacyReviewSheet(
                 title = "Review Claim All",
                 glyph = Glyph.Download,
+                source = ReviewFlowEndpoint(
+                    label = "Private outputs",
+                    address = "${transfers.size} claimable outputs",
+                ),
+                destination = ReviewFlowEndpoint(
+                    label = "Encrypted balance",
+                    address = controller.wallet?.address.orEmpty(),
+                    identityName = controller.wallet?.address?.let(controller::walletIdentityDomain),
+                ),
+                actionLabel = "Claim All",
                 details = listOf(
                     "Network" to privacyNetworkLabel(controller),
                     "Outputs" to transfers.size.toString(),
@@ -814,7 +1233,7 @@ fun PrivacyClaimScreen(controller: PoctraController) {
                     "Maximum total fee" to "$totalFee OU (${formatPrivacyAmount(totalFee)} OCT)",
                 ),
                 notice = "Claim All submits transactions sequentially and waits for each confirmation before continuing.",
-                noticeTone = PrivacyNoticeTone.Caution,
+                noticeTone = PrivacyNoticeTone.Info,
                 onDismiss = { reviewBulk = false },
                 onProceed = {
                     reviewBulk = false
@@ -1025,6 +1444,9 @@ private fun PrivacyContextBanner(text: String, tone: PrivacyNoticeTone) {
 private fun PrivacyReviewSheet(
     title: String,
     glyph: Glyph,
+    source: ReviewFlowEndpoint,
+    destination: ReviewFlowEndpoint,
+    actionLabel: String,
     details: List<Pair<String, String>>,
     notice: String,
     noticeTone: PrivacyNoticeTone,
@@ -1033,6 +1455,14 @@ private fun PrivacyReviewSheet(
 ) {
     PrivacyBottomSheet(onDismiss = onDismiss) {
         PrivacySheetHeader(title, "Verify every detail before signing.", glyph)
+        ReviewProcessFlow(
+            source = source,
+            destination = destination,
+            actionLabel = actionLabel,
+            actionGlyph = glyph,
+            modifier = Modifier.padding(top = Space.x5),
+            accentColor = PrivacyPrimary,
+        )
         Spacer(Modifier.height(Space.x6))
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -1156,11 +1586,6 @@ private fun privacyClaimTotalAmount(transfers: List<PrivacyClaimableTransfer>): 
     runCatching { transfers.fold(0L) { total, transfer -> Math.addExact(total, transfer.amountRaw) } }
         .getOrDefault(Long.MAX_VALUE)
 
-private fun shortPrivacyAddress(address: String): String = when {
-    address.length <= 19 -> address
-    else -> "${address.take(8)}...${address.takeLast(8)}"
-}
-
 private fun privacyUsdEstimate(balanceRaw: Long?, usdPrice: Double?): String {
     if (balanceRaw == null || usdPrice == null || !usdPrice.isFinite()) return "~ -- USD"
     val value = (balanceRaw / 1_000_000.0) * usdPrice
@@ -1183,10 +1608,15 @@ private fun PrivacyOperationSheet(controller: PoctraController, operation: Priva
                 PrivacyOperationType.Decrypt -> Glyph.Eye
                 PrivacyOperationType.Stealth -> Glyph.EyeOff
                 PrivacyOperationType.Encrypt -> Glyph.Privacy
+                PrivacyOperationType.KeySwitch -> Glyph.Key
             },
         )
         Spacer(Modifier.height(Space.x6))
         PrivacyStepper(operation)
+        if (operation.stage == PrivacyOperationStage.Failed) {
+            Spacer(Modifier.height(Space.x4))
+            PrivacyContextBanner(operation.message, privacyFailureTone(operation.message))
+        }
 
         if (operation.stage == PrivacyOperationStage.Review && operation.type == PrivacyOperationType.Claim) {
             Spacer(Modifier.height(Space.x5))
@@ -1196,9 +1626,16 @@ private fun PrivacyOperationSheet(controller: PoctraController, operation: Priva
                 Spacer(Modifier.height(Space.x5))
                 PrivacyInfoLine("Amount", "$it OCT")
             }
-            operation.txHash?.let {
+            Spacer(Modifier.height(Space.x3))
+            PrivacyElapsedInfo(operation)
+            operation.txHash?.takeIf { it.isNotBlank() }?.let {
                 Spacer(Modifier.height(Space.x3))
-                PrivacyInfoLine("Transaction", it.take(10) + "..." + it.takeLast(8))
+                PrivacyInfoLine(
+                    label = "Transaction",
+                    value = it.take(10) + "..." + it.takeLast(8),
+                    actionLabel = "View",
+                    onAction = controller::openPrivacyTransactionExplorer,
+                )
             }
             operation.recipient?.let {
                 Spacer(Modifier.height(Space.x3))
@@ -1223,6 +1660,25 @@ private fun PrivacyOperationSheet(controller: PoctraController, operation: Priva
                         modifier = Modifier.weight(1f),
                         variant = ButtonVariant.Ghost,
                         fullHeight = true,
+                    )
+                } else if (
+                    operation.stage == PrivacyOperationStage.Failed &&
+                    operation.message.contains("compact refresh", ignoreCase = true)
+                ) {
+                    PoctraButton(
+                        text = "Close",
+                        onClick = controller::finishPrivacyOperation,
+                        modifier = Modifier.weight(1f),
+                        variant = ButtonVariant.Ghost,
+                        fullHeight = true,
+                    )
+                    PrivacyPrimaryButton(
+                        text = "Recrypt",
+                        onClick = {
+                            controller.finishPrivacyOperation()
+                            controller.openPrivacySettings()
+                        },
+                        modifier = Modifier.weight(1f),
                     )
                 } else {
                     PrivacyPrimaryButton(
@@ -1316,44 +1772,123 @@ private fun PrivacySheetHeader(title: String, subtitle: String, glyph: Glyph) {
 
 @Composable
 private fun PrivacyStepper(operation: PrivacyOperationState) {
-    val labels = when (operation.type) {
-        PrivacyOperationType.Encrypt -> listOf("Initialize keys", "Build encrypt proof", "Submit", "Confirm")
-        PrivacyOperationType.Decrypt -> listOf("Initialize keys", "Build balance proof", "Submit", "Confirm")
-        PrivacyOperationType.Stealth -> listOf("Resolve & initialize", "Build range proofs", "Submit", "Confirm")
-        PrivacyOperationType.Claim -> listOf("Scan outputs", "Build claim", "Submit", "Confirm")
+    val steps = when (operation.type) {
+        PrivacyOperationType.Encrypt -> listOf(
+            "Initialize keys" to "Prepare the encrypted balance context",
+            "Build proof" to "Generate and verify the encrypt proof",
+            "Submit" to "Sign and broadcast the private transaction",
+            "Confirmed" to "Wait for final blockchain confirmation",
+        )
+        PrivacyOperationType.Decrypt -> listOf(
+            "Initialize keys" to "Open the encrypted balance context",
+            "Build proof" to "Generate and verify the balance proof",
+            "Submit" to "Sign and broadcast the private transaction",
+            "Confirmed" to "Wait for final blockchain confirmation",
+        )
+        PrivacyOperationType.Stealth -> listOf(
+            "Resolve recipient" to "Resolve keys and prepare the transfer",
+            "Build proofs" to "Generate and verify range proofs",
+            "Submit" to "Sign and broadcast the stealth transfer",
+            "Confirmed" to "Wait for final blockchain confirmation",
+        )
+        PrivacyOperationType.Claim -> listOf(
+            "Scan outputs" to "Find claimable private outputs",
+            "Build claim" to "Generate and verify the claim proof",
+            "Submit" to "Sign and broadcast the claim",
+            "Confirmed" to "Wait for final blockchain confirmation",
+        )
+        PrivacyOperationType.KeySwitch -> listOf(
+            "Check key" to "Check the key state and required fee",
+            "Build proof" to "Generate and verify the migration proof",
+            "Submit" to "Sign and broadcast the key switch",
+            "Confirmed" to "Wait for final blockchain confirmation",
+        )
     }
     val activeIndex = operation.progressIndex
-    Card(
+    val failureColor = when (privacyFailureTone(operation.message)) {
+        PrivacyNoticeTone.Caution -> Warning
+        PrivacyNoticeTone.Info -> InfoBlue
+        PrivacyNoticeTone.Error -> ErrorRed
+    }
+    Column(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(Radius.md),
-        colors = CardDefaults.cardColors(containerColor = SurfaceBase),
+        verticalArrangement = Arrangement.spacedBy(0.dp),
     ) {
-        Column(Modifier.padding(horizontal = Space.x5, vertical = Space.x4)) {
-            labels.forEachIndexed { index, label ->
-                val done = operation.stage == PrivacyOperationStage.Confirmed || index < activeIndex
-                val active = !operation.isTerminal && operation.stage != PrivacyOperationStage.Review && index == activeIndex
-                Row(
-                    modifier = Modifier.padding(vertical = Space.x2),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    when {
-                        done -> GlyphIcon(Glyph.Check, Modifier.size(15.dp), PrivacyPrimary)
-                        active -> CircularProgressIndicator(Modifier.size(15.dp), color = PrivacyPrimary, strokeWidth = 2.dp)
-                        operation.stage == PrivacyOperationStage.Failed && index == activeIndex -> GlyphIcon(Glyph.Info, Modifier.size(15.dp), ErrorRed)
-                        else -> Box(
+        steps.forEachIndexed { index, (title, description) ->
+            val done = operation.stage == PrivacyOperationStage.Confirmed || index < activeIndex
+            val failed = operation.stage == PrivacyOperationStage.Failed && index == activeIndex
+            val active = !operation.isTerminal &&
+                operation.stage != PrivacyOperationStage.Review &&
+                index == activeIndex
+            Row(Modifier.fillMaxWidth()) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(
+                        modifier = Modifier
+                            .size(24.dp)
+                            .background(
+                                when {
+                                    done -> PrivacyPrimary
+                                    active -> PrivacyPrimary.copy(alpha = 0.14f)
+                                    failed -> failureColor.copy(alpha = 0.14f)
+                                    else -> SurfaceMuted
+                                },
+                                CircleShape,
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        when {
+                            done -> GlyphIcon(Glyph.Check, Modifier.size(13.dp), Color.White)
+                            active -> CircularProgressIndicator(
+                                Modifier.size(14.dp),
+                                color = PrivacyPrimary,
+                                strokeWidth = 2.dp,
+                            )
+                            failed -> GlyphIcon(Glyph.Info, Modifier.size(13.dp), failureColor)
+                            else -> Box(
+                                Modifier
+                                    .size(6.dp)
+                                    .background(TextSecondary.copy(alpha = 0.38f), CircleShape),
+                            )
+                        }
+                    }
+                    if (index != steps.lastIndex) {
+                        Box(
                             Modifier
-                                .size(10.dp)
+                                .width(2.dp)
+                                .height(34.dp)
+                                .background(
+                                    if (done) PrivacyPrimary.copy(alpha = 0.70f)
+                                    else SurfaceMuted,
+                                ),
                         )
                     }
-                    Spacer(Modifier.width(Space.x4))
+                }
+                Spacer(Modifier.width(Space.x4))
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(top = Space.x1),
+                ) {
                     Text(
-                        label,
+                        title,
                         color = when {
-                            operation.stage == PrivacyOperationStage.Failed && index == activeIndex -> ErrorRed
+                            failed -> ErrorRed
                             done || active -> TextTertiary
                             else -> TextSecondary
                         },
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(Modifier.height(Space.x1))
+                    Text(
+                        description,
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontSize = 10.sp,
+                            lineHeight = 13.sp,
+                        ),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
@@ -1372,7 +1907,7 @@ private fun PrivacyClaimRow(
             .fillMaxWidth()
             .background(SurfaceBase, RoundedCornerShape(Radius.md))
             .clickable(enabled = enabled, onClick = onClaim)
-            .padding(Space.x5),
+            .padding(horizontal = Space.x5, vertical = Space.x4),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
@@ -1398,11 +1933,40 @@ private fun PrivacyClaimRow(
 }
 
 @Composable
-private fun PrivacyInfoLine(label: String, value: String) {
+private fun PrivacyElapsedInfo(operation: PrivacyOperationState) {
+    var now by remember(operation.id) { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(operation.id, operation.isTerminal, operation.completedAt) {
+        if (operation.isTerminal) {
+            now = operation.completedAt ?: System.currentTimeMillis()
+        } else {
+            while (true) {
+                now = System.currentTimeMillis()
+                delay(1_000)
+            }
+        }
+    }
+    val elapsedSeconds = ((operation.completedAt ?: now) - operation.startedAt)
+        .coerceAtLeast(0L) / 1_000L
+    val minutes = elapsedSeconds / 60L
+    val seconds = elapsedSeconds % 60L
+    PrivacyInfoLine(
+        label = if (operation.isTerminal) "Completed in" else "Elapsed",
+        value = if (minutes > 0L) "${minutes}m ${seconds}s" else "${seconds}s",
+    )
+}
+
+@Composable
+private fun PrivacyInfoLine(
+    label: String,
+    value: String,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(PrivacyPrimary.copy(alpha = 0.06f), RoundedCornerShape(Radius.md))
+            .then(if (onAction != null) Modifier.clickable(onClick = onAction) else Modifier)
             .padding(horizontal = Space.x5, vertical = Space.x4),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1416,6 +1980,17 @@ private fun PrivacyInfoLine(label: String, value: String) {
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
+        if (actionLabel != null && onAction != null) {
+            Spacer(Modifier.width(Space.x3))
+            Text(
+                actionLabel,
+                color = PrivacyPrimary,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.width(Space.x2))
+            GlyphIcon(Glyph.External, Modifier.size(14.dp), PrivacyPrimary)
+        }
     }
 }
 
@@ -1425,11 +2000,14 @@ private fun PrivacyPrimaryButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    compact: Boolean = false,
 ) {
     val shape = RoundedCornerShape(Radius.md)
+    val containerHeight = if (compact) 44.dp else 56.dp
+    val buttonHeight = if (compact) 42.dp else 54.dp
     Box(
         modifier = modifier
-            .height(56.dp)
+            .height(containerHeight)
             .clip(shape)
             .background(Color(0xFF00009E).copy(alpha = if (enabled) 1f else 0.30f)),
         contentAlignment = Alignment.TopCenter,
@@ -1439,7 +2017,7 @@ private fun PrivacyPrimaryButton(
             enabled = enabled,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(54.dp),
+                .height(buttonHeight),
             shape = shape,
             colors = ButtonDefaults.buttonColors(
                 containerColor = PrivacyPrimary,

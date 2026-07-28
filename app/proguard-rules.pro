@@ -1,8 +1,13 @@
 -keepattributes *Annotation*
+-allowaccessmodification
+-adaptclassstrings
+-renamesourcefileattribute SourceFile
+
 -keepclassmembers class * {
     @android.webkit.JavascriptInterface <methods>;
 }
 
--keep class com.poctra.wallet.privacy.NativePvacBridge {
-    *;
+-keepnames class com.poctra.wallet.privacy.NativePvacBridge
+-keepclassmembers class com.poctra.wallet.privacy.NativePvacBridge {
+    native <methods>;
 }

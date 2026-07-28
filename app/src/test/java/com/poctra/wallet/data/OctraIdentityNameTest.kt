@@ -9,7 +9,9 @@ import org.junit.Test
 class OctraIdentityNameTest {
     @Test
     fun acceptsRootAndSubdomainNamesWithMiddleHyphens() {
+        assertTrue(OctraIdentityName.isValidDomain("ab.oct"))
         assertTrue(OctraIdentityName.isValidDomain("foo.oct"))
+        assertTrue(OctraIdentityName.isValidDomain("x.ab.oct"))
         assertTrue(OctraIdentityName.isValidDomain("dev-id.poctra.oct"))
         assertTrue(OctraIdentityName.isValidDomain("a.poctra.oct"))
         assertTrue(OctraIdentityName.isValidDomain("app.po-ctra.oct"))
@@ -17,8 +19,8 @@ class OctraIdentityNameTest {
 
     @Test
     fun rejectsInvalidLengthsAndBoundaryHyphens() {
-        assertFalse(OctraIdentityName.isValidDomain("ab.oct"))
-        assertFalse(OctraIdentityName.isValidDomain("app.ab.oct"))
+        assertFalse(OctraIdentityName.isValidDomain("a.oct"))
+        assertFalse(OctraIdentityName.isValidDomain("app.a.oct"))
         assertFalse(OctraIdentityName.isValidDomain("-dev.poctra.oct"))
         assertFalse(OctraIdentityName.isValidDomain("dev-.poctra.oct"))
         assertFalse(OctraIdentityName.isValidDomain("dev.poctra-.oct"))

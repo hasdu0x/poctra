@@ -3,8 +3,10 @@
 #include <cstdint>
 #include <vector>
 #include <cassert>
+#include <cstdlib>
 #include "transcript.hpp"
 #include "generators.hpp"
+#include "../../core/parallel.hpp"
 #include "../ristretto255.hpp"
 
 namespace pvac {
@@ -17,50 +19,115 @@ struct InnerProductProof {
     Scalar b;
 };
 
-inline RistrettoPoint multi_scalar_mul(
+inline size_t msm_window_for_size(size_t n) {
+    static int forced = []() {
+        const char* env = std::getenv("PVAC_MSM_WINDOW");
+        if (!env || !*env) return 0;
+        char* end = nullptr;
+        long v = std::strtol(env, &end, 10);
+        if (end != env && v >= 2 && v <= 12)
+            return static_cast<int>(v);
+        return 0;
+    }();
+    if (forced > 0)
+        return static_cast<size_t>(forced);
+
+    if (n < 32) return 3;
+    if (n < 128) return 4;
+    if (n < 512) return 5;
+    if (n < 2048) return 6;
+    if (n < 8192) return 7;
+    return 9;
+}
+
+inline ExtPoint two_scalar_mul(
+    const Scalar& a,
+    const ExtPoint& P,
+    const Scalar& b,
+    const ExtPoint& Q
+) {
+    uint8_t ab[32], bb[32];
+    sc_tobytes(ab, a);
+    sc_tobytes(bb, b);
+
+    std::array<ExtPoint, 4> ptab = {
+        ext_identity(),
+        P,
+        ext_double(P),
+        ext_identity()
+    };
+    ptab[3] = ext_add(ptab[1], ptab[2]);
+
+    std::array<ExtPoint, 4> qtab = {
+        ext_identity(),
+        Q,
+        ext_double(Q),
+        ext_identity()
+    };
+    qtab[3] = ext_add(qtab[1], qtab[2]);
+
+    std::array<ExtPoint, 16> table;
+    std::array<Fe25519, 16> table_t2d;
+    table[0] = ext_identity();
+    for (uint8_t ai = 0; ai < 4; ++ai) {
+        for (uint8_t bi = 0; bi < 4; ++bi) {
+            uint8_t idx = ai | (bi << 2);
+            if (idx == 0) continue;
+            if (ai == 0) table[idx] = qtab[bi];
+            else if (bi == 0) table[idx] = ptab[ai];
+            else table[idx] = ext_add(ptab[ai], qtab[bi]);
+        }
+    }
+    for (size_t i = 0; i < table.size(); ++i)
+        table_t2d[i] = fe_mul(table[i].T, ed_2d());
+
+    ExtPoint acc = ext_identity();
+    for (int chunk = 127; chunk >= 0; --chunk) {
+        acc = ext_double(acc);
+        acc = ext_double(acc);
+        int bit = chunk * 2;
+        uint8_t ai = (ab[bit >> 3] >> (bit & 7)) & 3;
+        uint8_t bi = (bb[bit >> 3] >> (bit & 7)) & 3;
+        uint8_t idx = ai | (bi << 2);
+        if (idx)
+            acc = ext_add_with_t2d(acc, table[idx], table_t2d[idx]);
+    }
+    return acc;
+}
+
+inline ExtPoint multi_scalar_mul_extpoint(
     const std::vector<Scalar>& scalars,
-    const std::vector<RistrettoPoint>& points
+    const std::vector<ExtPoint>& points
 ) {
     assert(scalars.size() == points.size());
     size_t n = scalars.size();
-    if (n == 0) return rist_identity();
+    if (n == 0) return ext_identity();
 
-    std::vector<ExtPoint> pts(n);
-    for (size_t i = 0; i < n; i++)
-        pts[i] = rist_decode_or_throw(points[i]);
+    if (n == 1)
+        return ext_scalarmul(points[0], scalars[0]);
+
+    if (n == 2)
+        return two_scalar_mul(scalars[0], points[0], scalars[1], points[1]);
 
     std::vector<std::array<uint8_t, 32>> sbytes(n);
     for (size_t i = 0; i < n; i++)
         sc_tobytes(sbytes[i].data(), scalars[i]);
+    std::vector<Fe25519> point_t2d(n);
+    detail::parallel_for(0, n, 256, [&](size_t i) {
+        point_t2d[i] = fe_mul(points[i].T, ed_2d());
+    });
 
-    if (n <= 2) {
-        ExtPoint acc = ext_identity();
-        for (size_t i = 0; i < n; i++)
-            acc = ext_add(acc, ext_scalarmul(pts[i], scalars[i]));
-        return rist_encode(acc);
-    }
-
-    size_t w = 1;
-    { size_t tmp = n; while (tmp >>= 1) w++; }
-    if (w > 16) w = 16;
-
+    size_t w = msm_window_for_size(n);
     size_t num_buckets = (1ULL << w) - 1;
-
     size_t num_windows = (256 + w - 1) / w;
 
-    ExtPoint result = ext_identity();
-
-    for (size_t win_idx = num_windows; win_idx > 0; win_idx--) {
-
-        for (size_t d = 0; d < w; d++)
-            result = ext_double(result);
-
-        std::vector<ExtPoint> buckets(num_buckets, ext_identity());
-
-        size_t bit_start = (win_idx - 1) * w;
+    const ExtPoint identity = ext_identity();
+    std::vector<ExtPoint> window_sums(num_windows, identity);
+    detail::parallel_for(0, num_windows, 1, [&](size_t window) {
+        std::vector<ExtPoint> buckets(num_buckets, identity);
+        const size_t bit_start = window * w;
 
         for (size_t i = 0; i < n; i++) {
-
             uint32_t bucket_idx = 0;
             for (size_t b = 0; b < w; b++) {
                 size_t bit = bit_start + b;
@@ -72,7 +139,11 @@ inline RistrettoPoint multi_scalar_mul(
             }
 
             if (bucket_idx == 0) continue;
-            buckets[bucket_idx - 1] = ext_add(buckets[bucket_idx - 1], pts[i]);
+            buckets[bucket_idx - 1] = ext_add_with_t2d(
+                buckets[bucket_idx - 1],
+                points[i],
+                point_t2d[i]
+            );
         }
 
         ExtPoint running_sum = ext_identity();
@@ -82,11 +153,39 @@ inline RistrettoPoint multi_scalar_mul(
             running_sum = ext_add(running_sum, buckets[k - 1]);
             window_sum = ext_add(window_sum, running_sum);
         }
+        window_sums[window] = window_sum;
+    });
 
-        result = ext_add(result, window_sum);
+    ExtPoint result = identity;
+    for (size_t window = num_windows; window > 0; --window) {
+        for (size_t d = 0; d < w; ++d)
+            result = ext_double(result);
+        result = ext_add(result, window_sums[window - 1]);
     }
 
-    return rist_encode(result);
+    return result;
+}
+
+inline RistrettoPoint multi_scalar_mul_ext(
+    const std::vector<Scalar>& scalars,
+    const std::vector<ExtPoint>& points
+) {
+    return rist_encode(multi_scalar_mul_extpoint(scalars, points));
+}
+
+inline RistrettoPoint multi_scalar_mul(
+    const std::vector<Scalar>& scalars,
+    const std::vector<RistrettoPoint>& points
+) {
+    assert(scalars.size() == points.size());
+    size_t n = scalars.size();
+    if (n == 0) return rist_identity();
+
+    std::vector<ExtPoint> decoded(n);
+    for (size_t i = 0; i < n; i++)
+        decoded[i] = rist_decode_or_throw(points[i]);
+
+    return multi_scalar_mul_ext(scalars, decoded);
 }
 
 inline Scalar inner_product(const std::vector<Scalar>& a, const std::vector<Scalar>& b) {
@@ -97,18 +196,20 @@ inline Scalar inner_product(const std::vector<Scalar>& a, const std::vector<Scal
     return result;
 }
 
-inline InnerProductProof ipp_prove(
+inline InnerProductProof ipp_prove_ext(
     Transcript& transcript,
-    const RistrettoPoint& Q,
+    const ExtPoint& Q,
     std::vector<Scalar> a,
     std::vector<Scalar> b,
-    std::vector<RistrettoPoint> G_vec,
-    std::vector<RistrettoPoint> H_vec
+    std::vector<ExtPoint> G_vec,
+    std::vector<ExtPoint> H_vec,
+    std::vector<Scalar> H_scale = {}
 ) {
     size_t n = a.size();
     assert(n == b.size());
     assert(n == G_vec.size());
     assert(n == H_vec.size());
+    assert(H_scale.empty() || n == H_scale.size());
     assert(n > 0 && (n & (n - 1)) == 0);
 
     size_t lg = log2_size(n);
@@ -118,6 +219,7 @@ inline InnerProductProof ipp_prove(
 
     for (size_t k = 0; k < lg; k++) {
         size_t half = n / 2;
+        const bool has_H_scale = !H_scale.empty();
 
         Scalar c_L = sc_zero();
         Scalar c_R = sc_zero();
@@ -128,7 +230,7 @@ inline InnerProductProof ipp_prove(
 
         {
             std::vector<Scalar> scalars;
-            std::vector<RistrettoPoint> points;
+            std::vector<ExtPoint> points;
             scalars.reserve(n + 1);
             points.reserve(n + 1);
 
@@ -137,18 +239,22 @@ inline InnerProductProof ipp_prove(
                 points.push_back(G_vec[half + i]);
             }
             for (size_t i = 0; i < half; i++) {
-                scalars.push_back(b[half + i]);
+                scalars.push_back(
+                    has_H_scale
+                        ? sc_mul(b[half + i], H_scale[i])
+                        : b[half + i]
+                );
                 points.push_back(H_vec[i]);
             }
             scalars.push_back(c_L);
             points.push_back(Q);
 
-            proof.L[k] = multi_scalar_mul(scalars, points);
+            proof.L[k] = multi_scalar_mul_ext(scalars, points);
         }
 
         {
             std::vector<Scalar> scalars;
-            std::vector<RistrettoPoint> points;
+            std::vector<ExtPoint> points;
             scalars.reserve(n + 1);
             points.reserve(n + 1);
 
@@ -157,13 +263,17 @@ inline InnerProductProof ipp_prove(
                 points.push_back(G_vec[i]);
             }
             for (size_t i = 0; i < half; i++) {
-                scalars.push_back(b[i]);
+                scalars.push_back(
+                    has_H_scale
+                        ? sc_mul(b[i], H_scale[half + i])
+                        : b[i]
+                );
                 points.push_back(H_vec[half + i]);
             }
             scalars.push_back(c_R);
             points.push_back(Q);
 
-            proof.R[k] = multi_scalar_mul(scalars, points);
+            proof.R[k] = multi_scalar_mul_ext(scalars, points);
         }
 
         transcript.append_point("L", proof.L[k]);
@@ -173,28 +283,36 @@ inline InnerProductProof ipp_prove(
 
         std::vector<Scalar> a_new(half);
         std::vector<Scalar> b_new(half);
-        std::vector<RistrettoPoint> G_new(half);
-        std::vector<RistrettoPoint> H_new(half);
+        std::vector<ExtPoint> G_new(half);
+        std::vector<ExtPoint> H_new(half);
 
-        for (size_t i = 0; i < half; i++) {
+        detail::parallel_for(0, half, 128, [&](size_t i) {
             a_new[i] = sc_add(sc_mul(a[i], u_k), sc_mul(a[half + i], u_k_inv));
             b_new[i] = sc_add(sc_mul(b[i], u_k_inv), sc_mul(b[half + i], u_k));
 
-            G_new[i] = multi_scalar_mul(
-                {u_k_inv, u_k},
-                {G_vec[i], G_vec[half + i]}
-            );
-
-            H_new[i] = multi_scalar_mul(
-                {u_k, u_k_inv},
-                {H_vec[i], H_vec[half + i]}
-            );
-        }
+            G_new[i] = two_scalar_mul(u_k_inv, G_vec[i], u_k, G_vec[half + i]);
+            if (has_H_scale) {
+                H_new[i] = two_scalar_mul(
+                    sc_mul(u_k, H_scale[i]),
+                    H_vec[i],
+                    sc_mul(u_k_inv, H_scale[half + i]),
+                    H_vec[half + i]
+                );
+            } else {
+                H_new[i] = two_scalar_mul(
+                    u_k,
+                    H_vec[i],
+                    u_k_inv,
+                    H_vec[half + i]
+                );
+            }
+        });
 
         a = std::move(a_new);
         b = std::move(b_new);
         G_vec = std::move(G_new);
         H_vec = std::move(H_new);
+        H_scale.clear();
         n = half;
     }
 
@@ -202,6 +320,33 @@ inline InnerProductProof ipp_prove(
     proof.a = a[0];
     proof.b = b[0];
     return proof;
+}
+
+inline InnerProductProof ipp_prove(
+    Transcript& transcript,
+    const RistrettoPoint& Q,
+    std::vector<Scalar> a,
+    std::vector<Scalar> b,
+    std::vector<RistrettoPoint> G_vec,
+    std::vector<RistrettoPoint> H_vec
+) {
+    ExtPoint Q_ext = rist_decode_or_throw(Q);
+
+    std::vector<ExtPoint> G_ext(G_vec.size());
+    std::vector<ExtPoint> H_ext(H_vec.size());
+    for (size_t i = 0; i < G_vec.size(); i++)
+        G_ext[i] = rist_decode_or_throw(G_vec[i]);
+    for (size_t i = 0; i < H_vec.size(); i++)
+        H_ext[i] = rist_decode_or_throw(H_vec[i]);
+
+    return ipp_prove_ext(
+        transcript,
+        Q_ext,
+        std::move(a),
+        std::move(b),
+        std::move(G_ext),
+        std::move(H_ext)
+    );
 }
 
 inline std::vector<Scalar> ipp_verification_scalars(

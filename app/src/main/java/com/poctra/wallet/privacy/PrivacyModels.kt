@@ -20,12 +20,15 @@ enum class PrivacyOperationType(val label: String) {
     Decrypt("Decrypt"),
     Stealth("Stealth"),
     Claim("Claim"),
+    KeySwitch("Key Switch"),
 }
 
 enum class PrivacyOperationStage {
     Scanning,
     Review,
+    Checking,
     Preparing,
+    BuildingProof,
     Registering,
     Submitting,
     Accepted,
@@ -46,6 +49,7 @@ data class PrivacyOperationState(
     val txHash: String? = null,
     val dialogVisible: Boolean = true,
     val startedAt: Long = System.currentTimeMillis(),
+    val completedAt: Long? = null,
 ) {
     val isTerminal: Boolean
         get() = stage in setOf(
@@ -64,6 +68,74 @@ data class PrivacyOperationState(
 
 data class PrivacyEncryptedBalance(
     val cipher: String,
+)
+
+data class PrivacyCipherDiagnostics(
+    val keyBound: Boolean,
+    val canonicalRandomnessCommitment: Boolean,
+    val baseLayerCount: Long,
+)
+
+data class PrivacyKeyCompatibility(
+    val extendsLocalKey: Boolean,
+    val legacyV1Profile: Boolean,
+    val proofProfile: Boolean,
+)
+
+data class PrivacyMigrationNetworkStatus(
+    val auditClass: String = "",
+    val reason: String = "",
+    val cipherClass: String = "",
+    val canPublicMigrate: Boolean = false,
+    val publicNetRaw: Long? = null,
+    val commitmentNet: String? = null,
+)
+
+enum class PrivacyKeyUpgradeMode {
+    Current,
+    EmptyKeySwitch,
+    KeyBoundMigration,
+    LegacyPublicMigration,
+    LegacyCommitmentMigration,
+    LegacyZeroReset,
+    KeyMismatch,
+    FeeBlocked,
+    Blocked,
+    Unavailable,
+}
+
+data class PrivacyKeyUpgradeStatus(
+    val mode: PrivacyKeyUpgradeMode = PrivacyKeyUpgradeMode.Unavailable,
+    val canSubmit: Boolean = false,
+    val reason: String = "Privacy key status is unavailable.",
+    val cipherPresent: Boolean = false,
+    val encryptedBalanceRaw: Long? = null,
+    val registeredKeyPresent: Boolean = false,
+    val registeredKeyCurrent: Boolean = false,
+    val registeredKeyCompatible: Boolean = false,
+    val repairRequired: Boolean = false,
+    val compactRefresh: Boolean = false,
+    val baseLayerCount: Long = 0,
+    val canonicalRandomnessCommitment: Boolean = false,
+    val legacyCommitmentNet: String? = null,
+    val requiredPublicFeeRaw: Long? = null,
+) {
+    val requiresAction: Boolean
+        get() = mode !in setOf(
+            PrivacyKeyUpgradeMode.Current,
+            PrivacyKeyUpgradeMode.Unavailable,
+        )
+
+    val isReadyForPrivateOperations: Boolean
+        get() = mode == PrivacyKeyUpgradeMode.Current
+}
+
+data class PrivacyMigrationPayload(
+    val newCipher: String,
+    val newZeroProof: String,
+    val amountCommitment: String,
+    val oldZeroProof: String? = null,
+    val amountBlinding: String? = null,
 )
 
 data class PrivacyIdentity(

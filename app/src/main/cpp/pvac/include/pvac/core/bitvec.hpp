@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <vector>
 #include <algorithm>
+#include "simd.hpp"
 
 namespace pvac {
 
@@ -19,21 +20,11 @@ struct BitVec {
 
     void xor_with(const BitVec & b) {
         size_t L = std::min(w.size(), b.w.size());
-        for (size_t i = 0; i < L; i++) {
-            w[i] ^= b.w[i];
-        }
+        simd::xor_u64(w.data(), b.w.data(), L);
     }
 
     size_t popcnt() const {
-        auto pc = [](uint64_t x) {
-            return (uint32_t)__builtin_popcountll(x);
-        };
-
-        size_t s = 0;
-        for (uint64_t t : w) {
-            s += (size_t)pc(t);
-        }
-        return s;
+        return simd::popcnt_u64(w.data(), w.size());
     }
 };
 

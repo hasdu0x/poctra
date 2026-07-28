@@ -24,9 +24,9 @@ class DAppSessionRepository(context: Context) {
                         add(DAppSession.fromJson(map.getJSONObject(key)))
                     }
                 }
-            }.distinctBy { it.url }
+            }
         }.getOrDefault(emptyList())
-            .distinctBy { "${canonicalizeOrigin(it.url)}:${it.walletAddress}" }
+            .distinctBy { dAppSessionIdentity(it.url, it.walletAddress) }
             .sortedByDescending { it.connectedAt }
     }
 
@@ -53,3 +53,6 @@ class DAppSessionRepository(context: Context) {
         private const val KeyConnectedDApps = "connectedDApps"
     }
 }
+
+internal fun dAppSessionIdentity(url: String, walletAddress: String): String =
+    "${canonicalizeOrigin(url)}:$walletAddress"

@@ -1,6 +1,8 @@
 package com.poctra.wallet.data
 
 import android.content.Context
+import com.poctra.wallet.security.BackendRequestSecurity
+import com.poctra.wallet.security.EvmDAppRpcPolicy
 import com.poctra.wallet.core.EvmCalldata
 import com.poctra.wallet.core.EvmCrypto
 import kotlinx.coroutines.Dispatchers
@@ -15,10 +17,12 @@ import java.math.BigDecimal
 import java.math.BigInteger
 import java.math.RoundingMode
 import java.net.HttpURLConnection
+import java.net.InetAddress
 import java.net.URI
 import java.net.URL
 
 class EvmRepository(context: Context) {
+    private val requestSecurity = BackendRequestSecurity.get(context)
     private val prefs = context.applicationContext.getSharedPreferences("poctra_evm", Context.MODE_PRIVATE)
     private val crypto = EvmCrypto()
 
@@ -51,6 +55,9 @@ class EvmRepository(context: Context) {
         return network
     }
 
+    fun networkByChainId(chainId: Long): EvmNetwork? =
+        networks().firstOrNull { it.chainId == chainId }
+
     fun saveNetworkRpc(id: String, rpcUrl: String): List<EvmNetwork> {
         require(isValidRpcUrl(rpcUrl)) { "Enter an HTTPS EVM RPC endpoint or an approved local/dev endpoint." }
         val next = networks().map { network ->
@@ -71,7 +78,9 @@ class EvmRepository(context: Context) {
         require(clean.chainId > 0L) { "Enter a valid chain ID." }
         require(clean.symbol.isNotBlank()) { "Network symbol is required." }
         require(isValidRpcUrl(clean.rpcUrl)) { "Enter an HTTPS EVM RPC endpoint or an approved local/dev endpoint." }
-        require(isValidRpcUrl(clean.explorerUrl)) { "Explorer URL must be HTTPS or an approved local/dev endpoint." }
+        require(clean.explorerUrl.isBlank() || isValidRpcUrl(clean.explorerUrl)) {
+            "Explorer URL must be HTTPS or an approved local/dev endpoint."
+        }
         val next = networks().filterNot { it.id == clean.id } + clean
         persistNetworks(next)
         return next
@@ -79,11 +88,114 @@ class EvmRepository(context: Context) {
 
     fun deriveAddress(wallet: Wallet): String = crypto.deriveAddress(wallet)
 
+    fun signPersonalMessage(wallet: Wallet, message: ByteArray): String =
+        crypto.signPersonalMessage(wallet, message)
+
+    fun signTypedDataHash(wallet: Wallet, signingHash: ByteArray): String =
+        crypto.signRecoverableHash(wallet, signingHash)
+
+    suspend fun requestDAppRpc(
+        method: String,
+        params: JSONArray,
+        network: EvmNetwork = activeNetwork(),
+    ): Any? = withContext(Dispatchers.IO) {
+        if (!EvmDAppRpcPolicy.canForward(method)) {
+            throw NoSuchMethodException("Unsupported EVM RPC method: $method")
+        }
+        require(isValidRpcUrl(network.rpcUrl)) {
+            "Set an HTTPS or approved local/dev EVM RPC endpoint for ${network.name}."
+        }
+        rpcRaw(network.rpcUrl, method, params)
+    }
+
+    suspend fun verifyDAppNetwork(network: EvmNetwork) = withContext(Dispatchers.IO) {
+        require(isValidRpcUrl(network.rpcUrl)) { "The requested network RPC must use HTTPS." }
+        val host = URI(network.rpcUrl).host.orEmpty()
+        require(host.isNotBlank()) { "The requested network RPC host is invalid." }
+        val addresses = runCatching { InetAddress.getAllByName(host).toList() }
+            .getOrElse { throw IllegalArgumentException("The requested network RPC host could not be resolved.") }
+        require(addresses.isNotEmpty() && addresses.none(::isPrivateAddress)) {
+            "dApps cannot add local or private-network RPC endpoints."
+        }
+        val reportedChainId = rpcQuantity(network.rpcUrl, "eth_chainId", JSONArray())
+        require(reportedChainId == BigInteger.valueOf(network.chainId)) {
+            "RPC chain ID ${reportedChainId.toQuantity()} does not match ${BigInteger.valueOf(network.chainId).toQuantity()}."
+        }
+    }
+
+    suspend fun reviewDAppTransaction(
+        wallet: Wallet,
+        transaction: EvmDAppTransaction,
+        network: EvmNetwork = activeNetwork(),
+    ): EvmDAppTransactionReview = withContext(Dispatchers.IO) {
+        require(isValidRpcUrl(network.rpcUrl)) {
+            "Set an HTTPS or approved local/dev EVM RPC endpoint for ${network.name}."
+        }
+        val activeAddress = deriveAddress(wallet)
+        require(activeAddress.equals(transaction.from, ignoreCase = true)) {
+            "The transaction sender does not match the active EVM account."
+        }
+        require(isValidEvmAddress(transaction.to)) { "Contract creation is not supported in the dApp browser." }
+        require(transaction.valueWei >= BigInteger.ZERO) { "Transaction value cannot be negative." }
+        val data = transaction.dataHex.hexToBytes()
+        require(data.size <= MaxDAppCalldataBytes) { "Transaction data is too large to review safely." }
+        val requestedGas = transaction.gasLimit?.takeIf { it > BigInteger.ZERO }
+        val gasLimit = estimateGas(
+            rpcUrl = network.rpcUrl,
+            from = activeAddress,
+            to = transaction.to,
+            valueWei = transaction.valueWei,
+            data = data,
+            fallbackGas = requestedGas ?: if (data.isEmpty()) DefaultNativeGasLimit else DefaultTokenGasLimit,
+        )
+        val gasPrice = transaction.gasPriceWei?.takeIf { it > BigInteger.ZERO }
+            ?: rpcQuantity(network.rpcUrl, "eth_gasPrice", JSONArray())
+        val fee = gasPrice.multiply(gasLimit)
+        val balance = rpcQuantity(network.rpcUrl, "eth_getBalance", JSONArray().put(activeAddress).put("latest"))
+        require(balance >= transaction.valueWei.add(fee)) {
+            "Insufficient ${network.symbol} for transaction value plus gas."
+        }
+        EvmDAppTransactionReview(
+            transaction = transaction,
+            gasLimit = gasLimit,
+            gasPriceWei = gasPrice,
+            feeWei = fee,
+        )
+    }
+
+    suspend fun sendDAppTransaction(
+        wallet: Wallet,
+        review: EvmDAppTransactionReview,
+        network: EvmNetwork = activeNetwork(),
+    ): EvmSendResult = withContext(Dispatchers.IO) {
+        runCatching {
+            sendEvmTransaction(
+                wallet = wallet,
+                network = network,
+                toAddress = review.transaction.to,
+                valueWei = review.transaction.valueWei,
+                data = review.transaction.dataHex.hexToBytes(),
+                fallbackGas = review.gasLimit,
+                gasPriceWeiOverride = review.gasPriceWei,
+                gasLimitOverride = review.gasLimit,
+                insufficientGasMessage = "Insufficient ${network.symbol} for transaction value plus gas.",
+            )
+        }.getOrElse { exception ->
+            EvmSendResult(success = false, error = exception.message ?: "EVM dApp transaction failed.")
+        }
+    }
+
     fun resolveRecipientAddress(value: String, network: EvmNetwork = activeNetwork()): String {
         val recipient = value.trim()
         if (isValidEvmAddress(recipient)) return recipient
         require(isLikelyEnsName(recipient)) { "Enter a valid EVM address or ENS name." }
         return resolveEnsName(recipient, network)
+    }
+
+    fun resolveRecipientIdentity(value: String, network: EvmNetwork = activeNetwork()): String? {
+        val recipient = value.trim()
+        if (!isValidEvmAddress(recipient)) return null
+        return resolveReverseEnsName(recipient, network)
     }
 
     suspend fun fetchAccount(wallet: Wallet, network: EvmNetwork = activeNetwork()): EvmAccountSnapshot =
@@ -591,6 +703,7 @@ class EvmRepository(context: Context) {
         data: ByteArray,
         fallbackGas: BigInteger,
         gasPriceWeiOverride: BigInteger? = null,
+        gasLimitOverride: BigInteger? = null,
         nonceOverride: BigInteger? = null,
         insufficientGasMessage: String,
     ): EvmSendResult {
@@ -598,7 +711,8 @@ class EvmRepository(context: Context) {
         val nonce = nonceOverride ?: rpcQuantity(network.rpcUrl, "eth_getTransactionCount", JSONArray().put(from).put("pending"))
         val gasPrice = gasPriceWeiOverride?.takeIf { it > BigInteger.ZERO }
             ?: rpcQuantity(network.rpcUrl, "eth_gasPrice", JSONArray())
-        val gasLimit = estimateGas(network.rpcUrl, from, toAddress, valueWei, data, fallbackGas)
+        val gasLimit = gasLimitOverride?.takeIf { it > BigInteger.ZERO }
+            ?: estimateGas(network.rpcUrl, from, toAddress, valueWei, data, fallbackGas)
         val nativeBalance = rpcQuantity(network.rpcUrl, "eth_getBalance", JSONArray().put(from).put("latest"))
         require(nativeBalance >= valueWei.add(gasPrice.multiply(gasLimit))) { insufficientGasMessage }
         val rawTx = crypto.signLegacyTransaction(
@@ -667,17 +781,8 @@ class EvmRepository(context: Context) {
         return result?.toString() ?: throw IllegalStateException("$method returned empty result.")
     }
 
-    private fun rpcRaw(rpcUrl: String, method: String, params: JSONArray): Any? {
-        var lastError: Throwable? = null
-        rpcUrlCandidates(rpcUrl).forEach { candidate ->
-            runCatching { return rpcRawOnce(candidate, method, params) }
-                .onFailure { error ->
-                    lastError = error
-                    if (!isRetryableRpcError(error)) throw error
-                }
-        }
-        throw lastError ?: IllegalStateException("EVM RPC unavailable.")
-    }
+    private fun rpcRaw(rpcUrl: String, method: String, params: JSONArray): Any? =
+        rpcRawOnce(rpcUrl.trim().trimEnd('/'), method, params)
 
     private fun rpcRawOnce(rpcUrl: String, method: String, params: JSONArray): Any? {
         val payload = JSONObject()
@@ -685,6 +790,7 @@ class EvmRepository(context: Context) {
             .put("id", System.currentTimeMillis())
             .put("method", method)
             .put("params", params)
+        val requestBody = payload.toString()
         val connection = (URL(rpcUrl.trim().trimEnd('/')).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 12_000
@@ -693,9 +799,15 @@ class EvmRepository(context: Context) {
             setRequestProperty("Content-Type", "application/json")
             setRequestProperty("User-Agent", PoctraUserAgent)
         }
+        requestSecurity.applyTo(
+            connection = connection,
+            url = rpcUrl,
+            requestBody = requestBody,
+            highValueAction = method == "eth_sendRawTransaction",
+        )
         return try {
             OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { writer ->
-                writer.write(payload.toString())
+                writer.write(requestBody)
             }
             val responseCode = connection.responseCode
             val stream = if (responseCode in 200..299) {
@@ -713,19 +825,6 @@ class EvmRepository(context: Context) {
         } finally {
             connection.disconnect()
         }
-    }
-
-    private fun rpcUrlCandidates(rpcUrl: String): List<String> =
-        listOf(rpcUrl.trim().trimEnd('/'))
-
-    private fun isRetryableRpcError(error: Throwable): Boolean {
-        val message = error.message.orEmpty().lowercase()
-        return message.contains("429") ||
-            message.contains("internal error") ||
-            message.contains("too many") ||
-            message.contains("rate") ||
-            message.contains("timeout") ||
-            message.contains("http 5")
     }
 
     private fun getJson(url: String): JSONObject {
@@ -1007,7 +1106,7 @@ class EvmRepository(context: Context) {
     }
 
     private fun poctraEtherscanApiUrl(network: EvmNetwork, action: String, address: String): String =
-        "$PoctraBackendUrl/api/etherscan/account?${etherscanAccountQuery(network.chainId, action, address)}"
+        "$PoctraBackendBaseUrl/api/etherscan/account?${etherscanAccountQuery(network.chainId, action, address)}"
 
     private fun explorerApiUrl(network: EvmNetwork, action: String, address: String): String? {
         val apiHost = explorerApiHost(network.explorerUrl) ?: return null
@@ -1069,6 +1168,7 @@ class EvmRepository(context: Context) {
             "ETH" -> "ethereum"
             "POL", "MATIC" -> "matic-network"
             "BNB" -> "binancecoin"
+            "HYPE" -> "hyperliquid"
             else -> return null
         }
         val now = System.currentTimeMillis()
@@ -1101,6 +1201,14 @@ class EvmRepository(context: Context) {
         }
     }
 
+    private fun isPrivateAddress(address: InetAddress): Boolean =
+        address.isAnyLocalAddress ||
+            address.isLoopbackAddress ||
+            address.isLinkLocalAddress ||
+            address.isSiteLocalAddress ||
+            address.isMulticastAddress ||
+            (address.address.size == 16 && (address.address[0].toInt() and 0xfe) == 0xfc)
+
     private fun isValidEvmAddress(address: String): Boolean =
         address.matches(Regex("^0x[a-fA-F0-9]{40}$"))
 
@@ -1109,7 +1217,11 @@ class EvmRepository(context: Context) {
 
     private fun persistNetworks(networks: List<EvmNetwork>) {
         val array = JSONArray().apply { networks.forEach { put(it.toJson()) } }
-        val activeId = prefs.getString(KeyActiveNetwork, null)
+        val activeId = when (prefs.getString(KeyActiveNetwork, null)) {
+            LegacyPublicNodeMainnetId -> "eth-mainnet"
+            LegacyPublicNodeSepoliaId -> "eth-sepolia"
+            else -> prefs.getString(KeyActiveNetwork, null)
+        }
         val active = networks.firstOrNull { it.id == activeId }
             ?: networks.firstOrNull { it.id == "eth-mainnet" }
             ?: networks.firstOrNull()
@@ -1152,25 +1264,38 @@ class EvmRepository(context: Context) {
 
     private fun mergeNetworks(networks: List<EvmNetwork>): List<EvmNetwork> {
         val merged = linkedMapOf<String, EvmNetwork>()
-        networks.forEach { network -> merged[network.id] = normalizeDefaultNetwork(network) }
+        networks.forEach { network ->
+            val normalized = normalizeDefaultNetwork(network)
+            merged[normalized.id] = normalized
+        }
         return merged.values.toList()
     }
 
     private fun normalizeDefaultNetwork(network: EvmNetwork): EvmNetwork = when {
         network.id == "eth-mainnet" && network.rpcUrl.contains("mainnet.infura.io/v3/", ignoreCase = true) -> defaultMainnetNetwork()
         network.id == "eth-sepolia" && network.rpcUrl.contains("sepolia.infura.io/v3/", ignoreCase = true) -> defaultSepoliaNetwork()
+        network.id == "eth-mainnet" && network.rpcUrl.equals(PublicNodeMainnetRpcUrl, ignoreCase = true) -> defaultMainnetNetwork()
+        network.id == "eth-sepolia" && network.rpcUrl.equals(PublicNodeSepoliaRpcUrl, ignoreCase = true) -> defaultSepoliaNetwork()
+        network.id == "eth-mainnet" && network.rpcUrl.contains(LegacyRpcBackendHost, ignoreCase = true) -> defaultMainnetNetwork()
+        network.id == "eth-sepolia" && network.rpcUrl.contains(LegacyRpcBackendHost, ignoreCase = true) -> defaultSepoliaNetwork()
         network.id == "eth-mainnet" && network.rpcUrl.contains(LegacyPoctraBackendHost, ignoreCase = true) -> defaultMainnetNetwork()
         network.id == "eth-sepolia" && network.rpcUrl.contains(LegacyPoctraBackendHost, ignoreCase = true) -> defaultSepoliaNetwork()
         network.id == "eth-mainnet" && network.rpcUrl.contains(LegacyNetBackendHost, ignoreCase = true) -> defaultMainnetNetwork()
         network.id == "eth-sepolia" && network.rpcUrl.contains(LegacyNetBackendHost, ignoreCase = true) -> defaultSepoliaNetwork()
-        network.id == "eth-mainnet-publicnode" -> publicNodeMainnetNetwork()
-        network.id == "eth-sepolia-publicnode" -> publicNodeSepoliaNetwork()
-        network.chainId == EthereumMainnetChainId && network.rpcUrl.contains("mainnet.infura.io/v3/", ignoreCase = true) -> network.copy(rpcUrl = MainnetBackendRpcUrl)
-        network.chainId == EthereumSepoliaChainId && network.rpcUrl.contains("sepolia.infura.io/v3/", ignoreCase = true) -> network.copy(rpcUrl = SepoliaBackendRpcUrl)
-        network.chainId == EthereumMainnetChainId && network.rpcUrl.contains(LegacyPoctraBackendHost, ignoreCase = true) -> network.copy(rpcUrl = MainnetBackendRpcUrl)
-        network.chainId == EthereumSepoliaChainId && network.rpcUrl.contains(LegacyPoctraBackendHost, ignoreCase = true) -> network.copy(rpcUrl = SepoliaBackendRpcUrl)
-        network.chainId == EthereumMainnetChainId && network.rpcUrl.contains(LegacyNetBackendHost, ignoreCase = true) -> network.copy(rpcUrl = MainnetBackendRpcUrl)
-        network.chainId == EthereumSepoliaChainId && network.rpcUrl.contains(LegacyNetBackendHost, ignoreCase = true) -> network.copy(rpcUrl = SepoliaBackendRpcUrl)
+        network.id == LegacyPublicNodeMainnetId -> defaultMainnetNetwork()
+        network.id == LegacyPublicNodeSepoliaId -> defaultSepoliaNetwork()
+        network.chainId == EthereumMainnetChainId && network.rpcUrl.contains(LegacyRpcBackendHost, ignoreCase = true) ->
+            network.copy(rpcUrl = MainnetBackendRpcUrl)
+        network.chainId == EthereumSepoliaChainId && network.rpcUrl.contains(LegacyRpcBackendHost, ignoreCase = true) ->
+            network.copy(rpcUrl = SepoliaBackendRpcUrl)
+        network.chainId == EthereumMainnetChainId && network.rpcUrl.contains(LegacyPoctraBackendHost, ignoreCase = true) ->
+            network.copy(rpcUrl = MainnetBackendRpcUrl)
+        network.chainId == EthereumSepoliaChainId && network.rpcUrl.contains(LegacyPoctraBackendHost, ignoreCase = true) ->
+            network.copy(rpcUrl = SepoliaBackendRpcUrl)
+        network.chainId == EthereumMainnetChainId && network.rpcUrl.contains(LegacyNetBackendHost, ignoreCase = true) ->
+            network.copy(rpcUrl = MainnetBackendRpcUrl)
+        network.chainId == EthereumSepoliaChainId && network.rpcUrl.contains(LegacyNetBackendHost, ignoreCase = true) ->
+            network.copy(rpcUrl = SepoliaBackendRpcUrl)
         network.id == "eth-mainnet" && network.rpcUrl.isBlank() -> defaultMainnetNetwork()
         network.id == "eth-sepolia" && network.rpcUrl.isBlank() -> defaultSepoliaNetwork()
         else -> network
@@ -1231,34 +1356,34 @@ class EvmRepository(context: Context) {
             isTestnet = false,
         )
 
-    private fun publicNodeMainnetNetwork(): EvmNetwork =
-        EvmNetwork(
-            id = "eth-mainnet-publicnode",
-            name = "Ethereum Mainnet PublicNode",
-            chainId = EthereumMainnetChainId,
-            rpcUrl = PublicNodeMainnetRpcUrl,
-            symbol = "ETH",
-            explorerUrl = "https://etherscan.io",
-            isTestnet = false,
-        )
-
-    private fun publicNodeSepoliaNetwork(): EvmNetwork =
-        EvmNetwork(
-            id = "eth-sepolia-publicnode",
-            name = "Ethereum Sepolia PublicNode",
-            chainId = EthereumSepoliaChainId,
-            rpcUrl = PublicNodeSepoliaRpcUrl,
-            symbol = "ETH",
-            explorerUrl = "https://sepolia.etherscan.io",
-            isTestnet = true,
-        )
-
     private fun defaultNetworks(): List<EvmNetwork> =
         listOf(
             defaultMainnetNetwork(),
             defaultSepoliaNetwork(),
-            publicNodeMainnetNetwork(),
-            publicNodeSepoliaNetwork(),
+            hyperEvmMainnetNetwork(),
+            hyperEvmTestnetNetwork(),
+        )
+
+    private fun hyperEvmMainnetNetwork(): EvmNetwork =
+        EvmNetwork(
+            id = "hyperevm-mainnet",
+            name = "HyperEVM Mainnet",
+            chainId = HyperEvmMainnetChainId,
+            rpcUrl = HyperEvmMainnetRpcUrl,
+            symbol = "HYPE",
+            explorerUrl = "https://hyperevmscan.io",
+            isTestnet = false,
+        )
+
+    private fun hyperEvmTestnetNetwork(): EvmNetwork =
+        EvmNetwork(
+            id = "hyperevm-testnet",
+            name = "HyperEVM Testnet",
+            chainId = HyperEvmTestnetChainId,
+            rpcUrl = HyperEvmTestnetRpcUrl,
+            symbol = "HYPE",
+            explorerUrl = "",
+            isTestnet = true,
         )
 
     private fun String.hexQuantityToBigInteger(): BigInteger {
@@ -1324,18 +1449,25 @@ class EvmRepository(context: Context) {
         private const val KeyPriceUsd = "evm_price_usd"
         private const val KeyPriceFetchedAt = "evm_price_fetched_at"
         private const val PoctraUserAgent = "poctra-android"
-        private const val PoctraBackendUrl = "https://rpc.xme.my.id"
+        private const val PoctraBackendBaseUrl = "https://rpc.xme.my.id"
+        private const val LegacyRpcBackendHost = "rpc.xme.my.id"
         private const val LegacyPoctraBackendHost = "poctra.xme.my.id"
         private const val LegacyNetBackendHost = "net.xme.my.id"
+        private const val LegacyPublicNodeMainnetId = "eth-mainnet-publicnode"
+        private const val LegacyPublicNodeSepoliaId = "eth-sepolia-publicnode"
         private const val PriceCacheMs = 60_000L
         private const val TokenRefreshBatchSize = 4
         private const val NftRefreshBatchSize = 3
         private const val EthereumMainnetChainId = 1L
         private const val EthereumSepoliaChainId = 11155111L
-        private const val MainnetBackendRpcUrl = "$PoctraBackendUrl/eth-mainnet"
-        private const val SepoliaBackendRpcUrl = "$PoctraBackendUrl/eth-sepolia"
+        private const val HyperEvmMainnetChainId = 999L
+        private const val HyperEvmTestnetChainId = 998L
+        private const val MainnetBackendRpcUrl = "$PoctraBackendBaseUrl/eth-mainnet"
+        private const val SepoliaBackendRpcUrl = "$PoctraBackendBaseUrl/eth-sepolia"
         private const val PublicNodeMainnetRpcUrl = "https://ethereum-rpc.publicnode.com"
         private const val PublicNodeSepoliaRpcUrl = "https://ethereum-sepolia-rpc.publicnode.com"
+        private const val HyperEvmMainnetRpcUrl = "https://rpc.hyperliquid.xyz/evm"
+        private const val HyperEvmTestnetRpcUrl = "https://rpc.hyperliquid-testnet.xyz/evm"
         private const val DefaultWOctAddress = "0x4647e1fE715c9e23959022C2416C71867F5a6E80"
         private const val DefaultUsdtAddress = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
         private const val EnsRegistryAddress = "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e"
@@ -1344,5 +1476,6 @@ class EvmRepository(context: Context) {
         private val DefaultTokenGasLimit = BigInteger.valueOf(80_000L)
         private val DefaultNftGasLimit = BigInteger.valueOf(120_000L)
         private val OneGweiWei = BigInteger("1000000000")
+        private const val MaxDAppCalldataBytes = 131_072
     }
 }

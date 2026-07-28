@@ -10,6 +10,7 @@ import android.hardware.biometrics.BiometricPrompt
 import android.hardware.fingerprint.FingerprintManager
 import android.os.Build
 import android.os.CancellationSignal
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.crypto.Cipher
 
 object DeviceSecurity {
@@ -39,13 +40,14 @@ object DeviceSecurity {
         cipher: Cipher,
         onSuccess: (Cipher) -> Unit,
         onError: (String) -> Unit,
+        onCancelled: () -> Unit = {},
     ) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
             onError("Biometric prompt requires Android 9 or newer.")
             return
         }
 
-        authenticateWithCipherApi28(activity, title, subtitle, negativeText, cipher, onSuccess, onError)
+        authenticateWithCipherApi28(activity, title, subtitle, negativeText, cipher, onSuccess, onError, onCancelled)
     }
 
     @TargetApi(Build.VERSION_CODES.P)
@@ -57,12 +59,18 @@ object DeviceSecurity {
         cipher: Cipher,
         onSuccess: (Cipher) -> Unit,
         onError: (String) -> Unit,
+        onCancelled: () -> Unit,
     ) {
+        val terminalCallbackSent = AtomicBoolean(false)
+        fun complete(callback: () -> Unit) {
+            if (terminalCallbackSent.compareAndSet(false, true)) callback()
+        }
+
         val prompt = BiometricPrompt.Builder(activity)
             .setTitle(title)
             .setSubtitle(subtitle)
             .setNegativeButton(negativeText, activity.mainExecutor) { _, _ ->
-                onError("Biometric authentication was cancelled.")
+                complete(onCancelled)
             }
             .build()
 
@@ -74,18 +82,22 @@ object DeviceSecurity {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                     val resultCipher = result.cryptoObject?.cipher
                     if (resultCipher != null) {
-                        onSuccess(resultCipher)
+                        complete { onSuccess(resultCipher) }
                     } else {
-                        onError("Biometric prompt did not return an authenticated cipher.")
+                        complete { onError("Biometric prompt did not return an authenticated cipher.") }
                     }
                 }
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                    onError(errString.toString())
+                    if (BiometricPromptPolicy.isCancellation(errorCode)) {
+                        complete(onCancelled)
+                    } else {
+                        complete { onError(errString.toString()) }
+                    }
                 }
 
                 override fun onAuthenticationFailed() {
-                    onError("Fingerprint did not match. Try again or use PIN.")
+                    // The platform keeps the same prompt open and shows its own retry feedback.
                 }
             },
         )

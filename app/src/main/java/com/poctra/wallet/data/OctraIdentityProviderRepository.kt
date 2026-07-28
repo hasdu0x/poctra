@@ -21,7 +21,7 @@ class OctraIdentityProviderRepository(context: Context) {
 
     fun saveProvider(provider: OctraIdentityProvider): List<OctraIdentityProvider> {
         require(provider.name.isNotBlank()) { "Provider name is required." }
-        require(isOctraAddress(provider.contractAddress)) { "Enter a valid Octra contract address." }
+        require(isOctraAddress(provider.contractAddress)) { "Enter a valid Octra provider address." }
         require(provider.network == "mainnet" || provider.network == "devnet") { "Network must be mainnet or devnet." }
         val clean = provider.copy(
             id = provider.id.ifBlank { "identity-${System.currentTimeMillis()}" },
@@ -29,7 +29,10 @@ class OctraIdentityProviderRepository(context: Context) {
             contractAddress = provider.contractAddress.trim(),
         )
         val next = allProviders()
-            .filterNot { it.id == clean.id || (it.network == clean.network && it.contractAddress == clean.contractAddress) } + clean
+            .filterNot {
+                it.id == clean.id ||
+                    (it.network == clean.network && it.contractAddress == clean.contractAddress)
+            } + clean
         persist(next)
         if (prefs.getString(activeKey(clean.network), null).isNullOrBlank()) {
             prefs.edit().putString(activeKey(clean.network), clean.id).apply()
@@ -62,7 +65,17 @@ class OctraIdentityProviderRepository(context: Context) {
                 val array = JSONArray(raw)
                 buildList {
                     for (index in 0 until array.length()) {
-                        val provider = migrateProvider(OctraIdentityProvider.fromJson(array.getJSONObject(index)))
+                        val json = array.getJSONObject(index)
+                        if (
+                            isLegacyNativeCircleProvider(
+                                type = json.optString("type"),
+                                id = json.optString("id"),
+                                address = json.optString("contractAddress", json.optString("address", "")),
+                            )
+                        ) {
+                            continue
+                        }
+                        val provider = migrateProvider(OctraIdentityProvider.fromJson(json))
                         if (provider.contractAddress.isNotBlank()) add(provider)
                     }
                 }
@@ -78,10 +91,18 @@ class OctraIdentityProviderRepository(context: Context) {
 
     private fun withDefaultProviders(providers: List<OctraIdentityProvider>): List<OctraIdentityProvider> {
         val next = providers.toMutableList()
-        if (next.none { it.network == "mainnet" && it.contractAddress == DefaultMainnetProviderContract }) {
+        if (next.none {
+                it.network == "mainnet" &&
+                    it.contractAddress == DefaultMainnetProviderContract
+            }
+        ) {
             next.add(0, defaultMainnetProvider())
         }
-        if (next.none { it.network == "devnet" && it.contractAddress == DefaultDevnetProviderContract }) {
+        if (next.none {
+                it.network == "devnet" &&
+                    it.contractAddress == DefaultDevnetProviderContract
+            }
+        ) {
             next.add(defaultDevnetProvider())
         }
         return next
@@ -92,7 +113,10 @@ class OctraIdentityProviderRepository(context: Context) {
     private fun isOctraAddress(address: String): Boolean = address.startsWith("oct") && address.length == 47
 
     private fun migrateProvider(provider: OctraIdentityProvider): OctraIdentityProvider =
-        if (provider.network == "devnet" && provider.contractAddress in LegacyDevnetProviderContracts) {
+        if (
+            provider.network == "devnet" &&
+            provider.contractAddress in LegacyDevnetProviderContracts
+        ) {
             provider.copy(
                 id = DefaultDevnetProviderId,
                 name = "Octra Identity",
@@ -120,6 +144,8 @@ class OctraIdentityProviderRepository(context: Context) {
         private const val KeyProviders = "providers"
         private const val DefaultMainnetProviderId = "identity-mainnet-octra-id"
         private const val DefaultDevnetProviderId = "identity-devnet-octra-id"
+        private const val LegacyNativeProviderId = "identity-devnet-native-ons-circle"
+        private val LegacyNativeProviderTypes = setOf("native_circle", "native-circle", "circle", "native")
         private val LegacyDevnetProviderContracts = setOf(
             "octD5RqXkTbHMCpaMaw2QnMSTpHNu7LRdgidbVDNmkDCuzb",
             "octAuuNU6wRkTXY7H9JXquwtgpNeCJTRhE7DmQSWSfKQ5nb",
@@ -130,8 +156,20 @@ class OctraIdentityProviderRepository(context: Context) {
             "octFNrZgNHk1vUt3DJrDrzB9mnezSt3PRkS2n83dP8dfjAW",
             "octBxMhV4J2yhZjwCFHWSkiVKczW3aLPYf4nRXGhdkZnaeX",
             "oct8jZAjF5u6GjRrachxe7mfHfKu6KjSEqazttSmkQSXjFC",
+            "octANHBh83N8PdRcQTEZzbAa6SPNF7YySjDgzy9PX2Cu1pM",
+            "octHzitwoU4TTbhSE5aixD5Nz91AtakS5iDTCxxzKqtZShG",
         )
         private const val DefaultMainnetProviderContract = "octH1GEiwunjEZyiBMjp1ETy1VUJJKEEnsMRZ8P2AvTC3et"
-        private const val DefaultDevnetProviderContract = "oct2Tdnmgh8qtvhC82W9VhoRJcLkAhNRCbnEEPhCUPX5b7m"
+        private const val DefaultDevnetProviderContract = "oct6wwc1bPHF4ZMnBjDGYWbfqKgymwxNcqqqYocutYFbQUY"
+        private const val LegacyNativeProviderAddress = "oct7LZd4e686B9PSXt76v7BAWPEYoYGfd5fsbw3ZmsrJBiW"
+
+        internal fun isLegacyNativeCircleProvider(
+            type: String,
+            id: String = "",
+            address: String = "",
+        ): Boolean =
+            type.trim().lowercase() in LegacyNativeProviderTypes ||
+                id.trim() == LegacyNativeProviderId ||
+                address.trim() == LegacyNativeProviderAddress
     }
 }

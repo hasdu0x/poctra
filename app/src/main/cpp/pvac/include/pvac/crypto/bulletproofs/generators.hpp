@@ -6,6 +6,7 @@
 #include <limits>
 #include <stdexcept>
 #include "../../core/hash.hpp"
+#include "../../core/parallel.hpp"
 #include "../ristretto255.hpp"
 
 namespace pvac {
@@ -13,7 +14,7 @@ namespace bp {
 
 inline constexpr size_t BP_MAX_VECTOR_SIZE = static_cast<size_t>(1) << 20;
 
-inline RistrettoPoint hash_to_ristretto_point(const char* domain, uint64_t index) {
+inline ExtPoint hash_to_ristretto_extpoint(const char* domain, uint64_t index) {
 
     Sha256 h;
     h.init();
@@ -50,49 +51,64 @@ inline RistrettoPoint hash_to_ristretto_point(const char* domain, uint64_t index
     Fe25519 w2 = fe_sub(fe_one(), fe_sq(s_result));
     Fe25519 w3 = fe_add(fe_one(), fe_sq(s_result));
 
-    ExtPoint P = {
+    return {
         fe_mul(w0, w3),
         fe_mul(w2, w1),
         fe_mul(w1, w3),
         fe_mul(w0, w2)
     };
-    return rist_encode(P);
+}
+
+inline RistrettoPoint hash_to_ristretto_point(const char* domain, uint64_t index) {
+    return rist_encode(hash_to_ristretto_extpoint(domain, index));
 }
 
 class GeneratorTable {
     mutable std::vector<RistrettoPoint> G_;
     mutable std::vector<RistrettoPoint> H_;
+    mutable std::vector<ExtPoint> G_ext_;
+    mutable std::vector<ExtPoint> H_ext_;
     mutable std::mutex mtx_;
 
-        void ensure_size(size_t n) const {
-            if (n > BP_MAX_VECTOR_SIZE)
-                throw std::runtime_error("pvac: generator size rejected");
-            if (G_.size() != H_.size())
-                throw std::runtime_error("pvac: generator table shape rejected");
-            if (G_.size() >= n) return;
-            size_t old = G_.size();
-            auto next_G = G_;
-            auto next_H = H_;
-            next_G.resize(n);
-            next_H.resize(n);
-            for (size_t i = old; i < n; i++) {
-                next_G[i] = hash_to_ristretto_point("pvac.bp.gen.G", i);
-                next_H[i] = hash_to_ristretto_point("pvac.bp.gen.H", i);
-            }
-            G_.swap(next_G);
-            H_.swap(next_H);
-        }
+    void ensure_size(size_t n) const {
+        if (n > BP_MAX_VECTOR_SIZE)
+            throw std::runtime_error("pvac: generator size rejected");
+        if (G_.size() != H_.size() ||
+            G_.size() != G_ext_.size() ||
+            H_.size() != H_ext_.size())
+            throw std::runtime_error("pvac: generator table shape rejected");
+        if (G_.size() >= n) return;
+        size_t old = G_.size();
+        auto next_G = G_;
+        auto next_H = H_;
+        auto next_G_ext = G_ext_;
+        auto next_H_ext = H_ext_;
+        next_G.resize(n);
+        next_H.resize(n);
+        next_G_ext.resize(n);
+        next_H_ext.resize(n);
+        detail::parallel_for(old, n, 256, [&](size_t i) {
+            next_G_ext[i] = hash_to_ristretto_extpoint("pvac.bp.gen.G", i);
+            next_H_ext[i] = hash_to_ristretto_extpoint("pvac.bp.gen.H", i);
+            next_G[i] = rist_encode(next_G_ext[i]);
+            next_H[i] = rist_encode(next_H_ext[i]);
+        });
+        G_.swap(next_G);
+        H_.swap(next_H);
+        G_ext_.swap(next_G_ext);
+        H_ext_.swap(next_H_ext);
+    }
 
 public:
     GeneratorTable() = default;
 
-    const RistrettoPoint& G(size_t i) const {
+    RistrettoPoint G(size_t i) const {
         std::lock_guard<std::mutex> lock(mtx_);
         ensure_size(i + 1);
         return G_[i];
     }
 
-    const RistrettoPoint& H(size_t i) const {
+    RistrettoPoint H(size_t i) const {
         std::lock_guard<std::mutex> lock(mtx_);
         ensure_size(i + 1);
         return H_[i];
@@ -114,6 +130,18 @@ public:
         ensure_size(n);
         return std::vector<RistrettoPoint>(H_.begin(), H_.begin() + n);
     }
+
+    std::vector<ExtPoint> G_ext_vec(size_t n) const {
+        std::lock_guard<std::mutex> lock(mtx_);
+        ensure_size(n);
+        return std::vector<ExtPoint>(G_ext_.begin(), G_ext_.begin() + n);
+    }
+
+    std::vector<ExtPoint> H_ext_vec(size_t n) const {
+        std::lock_guard<std::mutex> lock(mtx_);
+        ensure_size(n);
+        return std::vector<ExtPoint>(H_ext_.begin(), H_ext_.begin() + n);
+    }
 };
 
 inline const GeneratorTable& generators() {
@@ -128,6 +156,16 @@ inline const RistrettoPoint& pedersen_B() {
 
 inline const RistrettoPoint& pedersen_B_blinding() {
     static RistrettoPoint B_bl = rist_H();
+    return B_bl;
+}
+
+inline const ExtPoint& pedersen_B_ext() {
+    static const ExtPoint B = rist_decode_or_throw(pedersen_B());
+    return B;
+}
+
+inline const ExtPoint& pedersen_B_blinding_ext() {
+    static const ExtPoint B_bl = rist_decode_or_throw(pedersen_B_blinding());
     return B_bl;
 }
 

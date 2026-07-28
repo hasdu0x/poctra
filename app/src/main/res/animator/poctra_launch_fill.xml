@@ -1,0 +1,27 @@
+<set xmlns:android="http://schemas.android.com/apk/res/android"
+    android:ordering="together">
+    <objectAnimator
+        android:duration="560"
+        android:interpolator="@interpolator/poctra_launch_accelerate"
+        android:propertyName="trimPathEnd"
+        android:startOffset="70"
+        android:valueFrom="0"
+        android:valueTo="1"
+        android:valueType="floatType" />
+    <objectAnimator
+        android:duration="260"
+        android:interpolator="@android:interpolator/fast_out_slow_in"
+        android:propertyName="fillAlpha"
+        android:startOffset="680"
+        android:valueFrom="0"
+        android:valueTo="1"
+        android:valueType="floatType" />
+    <objectAnimator
+        android:duration="260"
+        android:interpolator="@android:interpolator/fast_out_slow_in"
+        android:propertyName="strokeAlpha"
+        android:startOffset="680"
+        android:valueFrom="1"
+        android:valueTo="0"
+        android:valueType="floatType" />
+</set>

@@ -1,7 +1,12 @@
 package com.poctra.wallet.data
 
+import android.content.Context
+import com.poctra.wallet.security.BackendRequestSecurity
 import com.poctra.wallet.core.EvmCrypto
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -11,41 +16,86 @@ import java.math.BigInteger
 import java.math.RoundingMode
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.absoluteValue
 
 private const val NativeTradeCurrency = "0x0000000000000000000000000000000000000000"
 
-enum class TradeAsset(
+data class TradeAsset(
     val symbol: String,
     val displayName: String,
     val address: String,
     val decimals: Int,
+    val chainId: Long = EthereumMainnetChainId,
 ) {
-    WOCT("wOCT", "Wrapped OCT", "0x4647e1fE715c9e23959022C2416C71867F5a6E80", 6),
-    ETH("ETH", "Ethereum", NativeTradeCurrency, 18),
-    USDT("USDT", "Tether USD", "0xdAC17F958D2ee523a2206206994597C13D831ec7", 6);
+    val key: String
+        get() = "$chainId:${address.lowercase()}"
+
+    val isNative: Boolean
+        get() = address.equals(NativeTradeCurrency, ignoreCase = true)
+
+    val isWOct: Boolean
+        get() = address.equals(WOCT.address, ignoreCase = true)
+
+    val isUsdt: Boolean
+        get() = address.equals(USDT.address, ignoreCase = true)
+
+    fun canPairWith(other: TradeAsset): Boolean =
+        key != other.key &&
+            chainId == EthereumMainnetChainId &&
+            other.chainId == EthereumMainnetChainId &&
+            isValidCurrency(address) &&
+            isValidCurrency(other.address)
 
     companion object {
         const val NativeCurrency = NativeTradeCurrency
+        const val EthereumMainnetChainId = 1L
+
+        val WOCT = TradeAsset("wOCT", "Wrapped OCT", "0x4647e1fE715c9e23959022C2416C71867F5a6E80", 6)
+        val ETH = TradeAsset("ETH", "Ethereum", NativeTradeCurrency, 18)
+        val USDT = TradeAsset("USDT", "Tether USD", "0xdAC17F958D2ee523a2206206994597C13D831ec7", 6)
+
+        fun fromToken(token: EvmToken): TradeAsset = TradeAsset(
+            symbol = token.symbol,
+            displayName = token.name,
+            address = token.address,
+            decimals = token.decimals,
+            chainId = token.chainId,
+        )
+
+        fun native(network: EvmNetwork): TradeAsset = TradeAsset(
+            symbol = network.symbol,
+            displayName = network.name.removeSuffix(" Mainnet").removeSuffix(" Testnet").ifBlank { network.symbol },
+            address = NativeCurrency,
+            decimals = 18,
+            chainId = network.chainId,
+        )
+
+        fun forNetwork(network: EvmNetwork, tokens: List<EvmToken>): List<TradeAsset> =
+            (listOf(native(network)) + tokens.map(::fromToken))
+                .filter { it.chainId == network.chainId }
+                .distinctBy(TradeAsset::key)
+                .sortedBy {
+                    when {
+                        it.isWOct -> 0
+                        it.isNative -> 1
+                        it.isUsdt -> 2
+                        else -> 3
+                    }
+                }
+
+        private fun isValidCurrency(address: String): Boolean =
+            address.equals(NativeTradeCurrency, ignoreCase = true) ||
+                address.matches(Regex("^0x[a-fA-F0-9]{40}$"))
     }
 }
 
 data class TradeBalances(
-    val woctRaw: BigInteger = BigInteger.ZERO,
-    val ethWei: BigInteger = BigInteger.ZERO,
-    val usdtRaw: BigInteger = BigInteger.ZERO,
+    private val rawByAssetKey: Map<String, BigInteger> = emptyMap(),
 ) {
-    fun formatted(asset: TradeAsset): String = when (asset) {
-        TradeAsset.WOCT -> EvmCrypto.formatUnits(woctRaw, asset.decimals)
-        TradeAsset.ETH -> EvmCrypto.formatEther(ethWei)
-        TradeAsset.USDT -> EvmCrypto.formatUnits(usdtRaw, asset.decimals)
-    }
+    fun formatted(asset: TradeAsset): String = EvmCrypto.formatUnits(raw(asset), asset.decimals)
 
-    fun raw(asset: TradeAsset): BigInteger = when (asset) {
-        TradeAsset.WOCT -> woctRaw
-        TradeAsset.ETH -> ethWei
-        TradeAsset.USDT -> usdtRaw
-    }
+    fun raw(asset: TradeAsset): BigInteger = rawByAssetKey[asset.key] ?: BigInteger.ZERO
 }
 
 data class TradeQuote(
@@ -117,15 +167,19 @@ data class TradeSubmittedTransaction(
     val transaction: EvmSendResult,
 )
 
-class TradeRepository {
+class TradeRepository(context: Context) {
+    private val requestSecurity = BackendRequestSecurity.get(context)
     private val crypto = EvmCrypto()
-    private var activeEthereumRpcUrl = EthereumRpcUrl
+    private val ethereumRpcEndpoint = ActiveRpcEndpoint("Trade")
+    private val activeEthereumRpcUrl: String
+        get() = ethereumRpcEndpoint.requireUrl()
     private var cachedWoctPool: ChartPool? = null
     private var cachedWoctPools: List<ChartPool>? = null
     private var cachedDexScreenerPools: List<DexScreenerPool>? = null
+    private val resolvedTradePools = ConcurrentHashMap<String, TradePool>()
 
-    fun configure(evmRpcUrl: String = EthereumRpcUrl) {
-        activeEthereumRpcUrl = evmRpcUrl.trim().ifBlank { EthereumRpcUrl }
+    fun configure(evmRpcUrl: String) {
+        ethereumRpcEndpoint.configure(evmRpcUrl)
     }
 
     fun deriveAddress(wallet: Wallet): String = crypto.deriveAddress(wallet)
@@ -135,13 +189,20 @@ class TradeRepository {
     fun formatAmount(value: BigInteger, asset: TradeAsset, scale: Int = 6): String =
         EvmCrypto.formatUnits(value, asset.decimals, scale)
 
-    suspend fun fetchBalances(wallet: Wallet): TradeBalances = withContext(Dispatchers.IO) {
+    suspend fun fetchBalances(wallet: Wallet, assets: List<TradeAsset>): TradeBalances = withContext(Dispatchers.IO) {
         val owner = deriveAddress(wallet)
-        TradeBalances(
-            woctRaw = erc20BalanceRaw(TradeAsset.WOCT.address, owner),
-            ethWei = evmQuantity("eth_getBalance", JSONArray().put(owner).put("latest")),
-            usdtRaw = erc20BalanceRaw(TradeAsset.USDT.address, owner),
-        )
+        val balances = linkedMapOf<String, BigInteger>()
+        assets.distinctBy(TradeAsset::key).chunked(TradeBalanceBatchSize).forEach { batch ->
+            val results = coroutineScope {
+                batch.map { asset ->
+                    async {
+                        asset.key to runCatching { assetBalanceRaw(asset, owner) }.getOrDefault(BigInteger.ZERO)
+                    }
+                }.awaitAll()
+            }
+            balances.putAll(results)
+        }
+        TradeBalances(balances)
     }
 
     suspend fun quoteExactInput(
@@ -152,9 +213,9 @@ class TradeRepository {
     ): TradeQuote = withContext(Dispatchers.IO) {
         val amountIn = parseAmount(amountText, fromAsset)
         require(amountIn > BigInteger.ZERO) { "Enter a valid amount." }
-        require(isSupportedPair(fromAsset, toAsset)) { "Trade supports wOCT pairs with ETH or USDT." }
-        val pool = poolFor(fromAsset, toAsset)
-        val quoted = quoteRaw(pool, amountIn)
+        require(isSupportedPair(fromAsset, toAsset)) { "Trade supports asset pairs on Ethereum Mainnet." }
+        val (pool, quoted) = resolvePoolQuote(fromAsset, toAsset, amountIn)
+        resolvedTradePools[tradePairKey(fromAsset, toAsset)] = pool
         val amountOut = quoted.amountOut
         val gasEstimate = quoted.gasEstimate
         val gasPrice = evmQuantity("eth_gasPrice", JSONArray()).coerceAtLeast(BigInteger.ONE)
@@ -185,7 +246,7 @@ class TradeRepository {
             lowGasFeeEth = EvmCrypto.formatEther(gasEstimate.multiply(lowGasPrice), 8),
             fastGasPriceWei = fastGasPrice,
             fastGasFeeEth = EvmCrypto.formatEther(gasEstimate.multiply(fastGasPrice), 8),
-            routeLabel = "${fromAsset.symbol}/${toAsset.symbol} v4 0.30%",
+            routeLabel = "${fromAsset.symbol}/${toAsset.symbol} v4 ${pool.feeLabel}",
             priceImpactBps = priceImpactBps,
             priceImpactLabel = formatPriceImpact(priceImpactBps),
             poolLiquidityLabel = poolLiquidityLabel(liquidity, priceImpactBps),
@@ -204,11 +265,11 @@ class TradeRepository {
         gasPriceWeiOverride: BigInteger? = null,
     ): TradeSwapResult = withContext(Dispatchers.IO) {
         runCatching {
-            require(isSupportedPair(fromAsset, toAsset)) { "Trade supports wOCT pairs with ETH or USDT." }
+            require(isSupportedPair(fromAsset, toAsset)) { "Trade supports asset pairs on Ethereum Mainnet." }
             val amountIn = parseAmount(amountText, fromAsset)
             require(amountIn > BigInteger.ZERO) { "Enter a valid amount." }
             val owner = deriveAddress(wallet)
-            val balance = fetchBalances(wallet).raw(fromAsset)
+            val balance = assetBalanceRaw(fromAsset, owner)
             require(balance >= amountIn) { "Insufficient ${fromAsset.symbol} balance." }
             var nonceCursor = evmQuantity("eth_getTransactionCount", JSONArray().put(owner).put("pending"))
             fun nextNonce(): BigInteger {
@@ -218,7 +279,7 @@ class TradeRepository {
             }
 
             val transactions = mutableListOf<TradeSubmittedTransaction>()
-            if (fromAsset != TradeAsset.ETH) {
+            if (!fromAsset.isNative) {
                 transactions += ensureErc20Approval(
                     wallet = wallet,
                     owner = owner,
@@ -237,9 +298,10 @@ class TradeRepository {
                 transactions += TradeSubmittedTransaction(TradeSwapStage.PermitApproval, permit)
             }
 
-            val pool = poolFor(fromAsset, toAsset)
+            val pool = resolvedTradePools[tradePairKey(fromAsset, toAsset)]
+                ?: resolvePoolQuote(fromAsset, toAsset, amountIn).first
             val executeData = universalRouterExecuteCalldata(pool, amountIn, minimumOutRaw)
-            val valueWei = if (fromAsset == TradeAsset.ETH) amountIn else BigInteger.ZERO
+            val valueWei = if (fromAsset.isNative) amountIn else BigInteger.ZERO
             val swap = sendEvmTransaction(
                 wallet = wallet,
                 from = owner,
@@ -307,10 +369,8 @@ class TradeRepository {
     }
 
     fun maxAmount(balance: TradeBalances, asset: TradeAsset): String {
-        val raw = when (asset) {
-            TradeAsset.ETH -> balance.ethWei.subtract(EthGasReserveWei)
-            else -> balance.raw(asset)
-        }.let { if (it > BigInteger.ZERO) it else BigInteger.ZERO }
+        val raw = (if (asset.isNative) balance.raw(asset).subtract(EthGasReserveWei) else balance.raw(asset))
+            .let { if (it > BigInteger.ZERO) it else BigInteger.ZERO }
         return formatAmount(raw, asset)
     }
 
@@ -345,27 +405,74 @@ class TradeRepository {
     }
 
     fun isSupportedPair(fromAsset: TradeAsset, toAsset: TradeAsset): Boolean =
-        fromAsset != toAsset &&
-            (fromAsset == TradeAsset.WOCT || toAsset == TradeAsset.WOCT) &&
-            (fromAsset == TradeAsset.ETH || fromAsset == TradeAsset.USDT || toAsset == TradeAsset.ETH || toAsset == TradeAsset.USDT)
+        fromAsset.canPairWith(toAsset)
 
-    private fun poolFor(fromAsset: TradeAsset, toAsset: TradeAsset): TradePool {
+    private fun poolFor(
+        fromAsset: TradeAsset,
+        toAsset: TradeAsset,
+        fee: Int = PoolFee,
+        tickSpacing: Int = PoolTickSpacing,
+        hooks: String = poolHooks(fromAsset, toAsset),
+    ): TradePool {
         val currency0 = sortedCurrency0(fromAsset.address, toAsset.address)
         val currency1 = if (currency0.equals(fromAsset.address, ignoreCase = true)) toAsset.address else fromAsset.address
         return TradePool(
             currency0 = currency0,
             currency1 = currency1,
             zeroForOne = currency0.equals(fromAsset.address, ignoreCase = true),
-            hooks = poolHooks(fromAsset, toAsset),
+            hooks = hooks,
+            fee = fee,
+            tickSpacing = tickSpacing,
             inputCurrency = fromAsset.address,
             outputCurrency = toAsset.address,
         )
     }
 
     private fun poolHooks(fromAsset: TradeAsset, toAsset: TradeAsset): String {
-        val isEthRoute = fromAsset == TradeAsset.ETH || toAsset == TradeAsset.ETH
-        return if (isEthRoute) WoctEthV4HookAddress else ZeroAddress
+        val isWOctEthRoute = (fromAsset.isWOct && toAsset.isNative) ||
+            (fromAsset.isNative && toAsset.isWOct)
+        return if (isWOctEthRoute) WoctEthV4HookAddress else ZeroAddress
     }
+
+    private fun resolvePoolQuote(
+        fromAsset: TradeAsset,
+        toAsset: TradeAsset,
+        amountIn: BigInteger,
+    ): Pair<TradePool, RawTradeQuote> {
+        val cached = resolvedTradePools[tradePairKey(fromAsset, toAsset)]
+        val candidates = buildList {
+            if (cached != null) add(cached)
+            add(poolFor(fromAsset, toAsset))
+            if (poolHooks(fromAsset, toAsset) != ZeroAddress) {
+                add(poolFor(fromAsset, toAsset, fee = PoolFee, tickSpacing = PoolTickSpacing, hooks = ZeroAddress))
+            }
+            StandardV4PoolConfigurations.forEach { (fee, tickSpacing) ->
+                add(poolFor(fromAsset, toAsset, fee = fee, tickSpacing = tickSpacing, hooks = ZeroAddress))
+            }
+        }.distinctBy { "${it.fee}:${it.tickSpacing}:${it.hooks.lowercase()}" }
+
+        candidates.forEach { pool ->
+            val attempt = runCatching { quoteRaw(pool, amountIn) }
+            attempt.getOrNull()?.let { quote -> return pool to quote }
+            attempt.exceptionOrNull()?.let { error ->
+                if (isTerminalPoolProbeError(error)) throw error
+            }
+        }
+        throw IllegalStateException("No active v4 pool was found for ${fromAsset.symbol}/${toAsset.symbol}.")
+    }
+
+    private fun isTerminalPoolProbeError(error: Throwable): Boolean {
+        val message = error.message.orEmpty().lowercase()
+        return message.contains("http ") ||
+            message.contains("429") ||
+            message.contains("timeout") ||
+            message.contains("timed out") ||
+            message.contains("unable to resolve host") ||
+            message.contains("failed to connect")
+    }
+
+    private fun tradePairKey(fromAsset: TradeAsset, toAsset: TradeAsset): String =
+        "${fromAsset.key.lowercase()}->${toAsset.key.lowercase()}"
 
     private fun findWoctPool(): ChartPool {
         cachedWoctPool?.let { return it }
@@ -376,10 +483,14 @@ class TradeRepository {
     }
 
     private fun findTradePoolLiquidity(fromAsset: TradeAsset, toAsset: TradeAsset): PoolLiquidity? =
-        findDexScreenerPoolLiquidity(fromAsset, toAsset) ?: findGeckoTerminalPoolLiquidity(fromAsset, toAsset)
+        if (fromAsset.isWOct || toAsset.isWOct) {
+            findDexScreenerPoolLiquidity(fromAsset, toAsset) ?: findGeckoTerminalPoolLiquidity(fromAsset, toAsset)
+        } else {
+            null
+        }
 
     private fun findDexScreenerPoolLiquidity(fromAsset: TradeAsset, toAsset: TradeAsset): PoolLiquidity? {
-        val otherAsset = if (fromAsset == TradeAsset.WOCT) toAsset else fromAsset
+        val otherAsset = if (fromAsset.isWOct) toAsset else fromAsset
         val otherToken = dexScreenerTokenAddress(otherAsset).cleanHex().lowercase()
         return loadDexScreenerPools()
             .filter { pool ->
@@ -392,7 +503,7 @@ class TradeRepository {
     }
 
     private fun findGeckoTerminalPoolLiquidity(fromAsset: TradeAsset, toAsset: TradeAsset): PoolLiquidity? {
-        val otherAsset = if (fromAsset == TradeAsset.WOCT) toAsset else fromAsset
+        val otherAsset = if (fromAsset.isWOct) toAsset else fromAsset
         val otherToken = geckoTerminalTokenAddress(otherAsset).cleanHex().lowercase()
         val matched = loadWoctPools()
             .filter { pool ->
@@ -400,9 +511,8 @@ class TradeRepository {
                     pool.quoteTokenId.contains(otherToken, ignoreCase = true)
             }
             .maxByOrNull { it.reserveUsd }
-        val reserve = matched?.reserveUsd ?: findWoctPool().reserveUsd
-        return reserve
-            .takeIf { it > BigDecimal.ZERO }
+        return matched?.reserveUsd
+            ?.takeIf { it > BigDecimal.ZERO }
             ?.let { PoolLiquidity(reserveUsd = it, source = "GeckoTerminal") }
     }
 
@@ -483,10 +593,12 @@ class TradeRepository {
                 .put("latest"),
         ).cleanHex()
         require(result.length >= 128) { "Quote returned empty result." }
-        return RawTradeQuote(
+        val quote = RawTradeQuote(
             amountOut = BigInteger(result.substring(0, 64), 16),
             gasEstimate = BigInteger(result.substring(64, 128), 16),
         )
+        require(quote.amountOut > BigInteger.ZERO) { "Quote returned zero output." }
+        return quote
     }
 
     private fun estimatePriceImpactBps(
@@ -521,10 +633,8 @@ class TradeRepository {
 
     private fun dexScreenerTokenAddress(asset: TradeAsset): String = asset.address
 
-    private fun geckoTerminalTokenAddress(asset: TradeAsset): String = when (asset) {
-        TradeAsset.ETH -> WrappedEthAddress
-        else -> asset.address
-    }
+    private fun geckoTerminalTokenAddress(asset: TradeAsset): String =
+        if (asset.isNative) WrappedEthAddress else asset.address
 
     private fun formatPriceImpact(priceImpactBps: Int?): String = when {
         priceImpactBps == null -> "Unavailable"
@@ -602,8 +712,8 @@ class TradeRepository {
         val tupleHead = listOf(
             addressWord(pool.currency0),
             addressWord(pool.currency1),
-            BigInteger.valueOf(PoolFee.toLong()).toAbiWord(),
-            signedInt24Word(PoolTickSpacing),
+            BigInteger.valueOf(pool.fee.toLong()).toAbiWord(),
+            signedInt24Word(pool.tickSpacing),
             addressWord(pool.hooks),
             boolWord(pool.zeroForOne),
             amountIn.toAbiWord(),
@@ -639,8 +749,8 @@ class TradeRepository {
         val head = listOf(
             addressWord(pool.currency0),
             addressWord(pool.currency1),
-            BigInteger.valueOf(PoolFee.toLong()).toAbiWord(),
-            signedInt24Word(PoolTickSpacing),
+            BigInteger.valueOf(pool.fee.toLong()).toAbiWord(),
+            signedInt24Word(pool.tickSpacing),
             addressWord(pool.hooks),
             boolWord(pool.zeroForOne),
             amountIn.toAbiWord(),
@@ -662,7 +772,7 @@ class TradeRepository {
         val current = erc20AllowanceRaw(asset.address, owner, Permit2Address)
         if (current >= amount) return emptyList()
         val approvals = mutableListOf<TradeSubmittedTransaction>()
-        if (asset == TradeAsset.USDT && current > BigInteger.ZERO) {
+        if (asset.isUsdt && current > BigInteger.ZERO) {
             val reset = sendEvmTransaction(
                 wallet = wallet,
                 from = owner,
@@ -782,6 +892,13 @@ class TradeRepository {
         ).hexQuantityToBigInteger()
     }
 
+    private fun assetBalanceRaw(asset: TradeAsset, ownerAddress: String): BigInteger =
+        if (asset.isNative) {
+            evmQuantity("eth_getBalance", JSONArray().put(ownerAddress).put("latest"))
+        } else {
+            erc20BalanceRaw(asset.address, ownerAddress)
+        }
+
     private fun erc20AllowanceRaw(tokenAddress: String, ownerAddress: String, spenderAddress: String): BigInteger {
         val data = "0xdd62ed3e${addressWord(ownerAddress)}${addressWord(spenderAddress)}"
         return evmString(
@@ -806,6 +923,7 @@ class TradeRepository {
             .put("id", System.currentTimeMillis())
             .put("method", method)
             .put("params", params)
+        val requestBody = payload.toString()
         val connection = (URL(activeEthereumRpcUrl).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 12_000
@@ -814,9 +932,15 @@ class TradeRepository {
             setRequestProperty("Content-Type", "application/json")
             setRequestProperty("User-Agent", PoctraUserAgent)
         }
+        requestSecurity.applyTo(
+            connection = connection,
+            url = activeEthereumRpcUrl,
+            requestBody = requestBody,
+            highValueAction = method == "eth_sendRawTransaction",
+        )
         return try {
             OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { writer ->
-                writer.write(payload.toString())
+                writer.write(requestBody)
             }
             val responseCode = connection.responseCode
             val stream = if (responseCode in 200..299) connection.inputStream else connection.errorStream ?: connection.inputStream
@@ -928,7 +1052,6 @@ class TradeRepository {
     private fun ByteArray.toHex(): String = joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
     companion object {
-        private const val EthereumRpcUrl = "https://rpc.xme.my.id/eth-mainnet"
         private const val GeckoTerminalApi = "https://api.geckoterminal.com/api/v2"
         private const val DexScreenerApi = "https://api.dexscreener.com"
         private const val PoctraUserAgent = "poctra-android"
@@ -940,6 +1063,7 @@ class TradeRepository {
         private const val WoctEthV4HookAddress = "0x890681CfF5AD2069F020027f41f5f68F6a292000"
         private const val PoolFee = 3000
         private const val PoolTickSpacing = 60
+        private const val TradeBalanceBatchSize = 4
         private const val V4SwapCommand = 0x10
         private const val ActionSwapExactInSingle: Byte = 0x06
         private const val ActionSettleAll: Byte = 0x0c
@@ -949,6 +1073,11 @@ class TradeRepository {
         private val ApproveGasLimit = BigInteger.valueOf(80_000L)
         private val SwapGasLimit = BigInteger.valueOf(450_000L)
         private val MaxUint256Word = "f".repeat(64)
+        private val StandardV4PoolConfigurations = listOf(
+            500 to 10,
+            100 to 1,
+            10_000 to 200,
+        )
     }
 }
 
@@ -980,9 +1109,17 @@ private data class TradePool(
     val currency1: String,
     val zeroForOne: Boolean,
     val hooks: String,
+    val fee: Int,
+    val tickSpacing: Int,
     val inputCurrency: String,
     val outputCurrency: String,
-)
+) {
+    val feeLabel: String
+        get() = BigDecimal.valueOf(fee.toLong())
+            .divide(BigDecimal("10000"), 4, RoundingMode.HALF_UP)
+            .stripTrailingZeros()
+            .toPlainString() + "%"
+}
 
 private data class RawTradeQuote(
     val amountOut: BigInteger,

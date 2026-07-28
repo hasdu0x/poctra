@@ -1,5 +1,7 @@
 package com.poctra.wallet.data
 
+import android.content.Context
+import com.poctra.wallet.security.BackendRequestSecurity
 import com.poctra.wallet.core.EvmCrypto
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -92,14 +94,19 @@ data class BridgeClaimData(
     val leafIndex: Int,
 )
 
-class BridgeRepository {
+class BridgeRepository(context: Context) {
+    private val requestSecurity = BackendRequestSecurity.get(context)
     private val crypto = EvmCrypto()
-    private var activeOctraRpcUrl = OctraRpcUrl
-    private var activeEthereumRpcUrl = EthereumRpcUrl
+    private val octraRpcEndpoint = ActiveRpcEndpoint("Octra bridge")
+    private val ethereumRpcEndpoint = ActiveRpcEndpoint("Ethereum bridge")
+    private val activeOctraRpcUrl: String
+        get() = octraRpcEndpoint.requireUrl()
+    private val activeEthereumRpcUrl: String
+        get() = ethereumRpcEndpoint.requireUrl()
 
-    fun configure(octraRpcUrl: String = OctraRpcUrl, evmRpcUrl: String = EthereumRpcUrl) {
-        activeOctraRpcUrl = octraRpcUrl.trim().trimEnd('/').ifBlank { OctraRpcUrl }
-        activeEthereumRpcUrl = evmRpcUrl.trim().ifBlank { EthereumRpcUrl }
+    fun configure(octraRpcUrl: String, evmRpcUrl: String) {
+        octraRpcEndpoint.configure(octraRpcUrl)
+        ethereumRpcEndpoint.configure(evmRpcUrl)
     }
 
     fun ethereumNetwork(): EvmNetwork = EvmNetwork(
@@ -1004,6 +1011,7 @@ class BridgeRepository {
             .put("id", System.currentTimeMillis())
             .put("method", method)
             .put("params", params)
+        val requestBody = payload.toString()
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 12_000
@@ -1012,9 +1020,15 @@ class BridgeRepository {
             setRequestProperty("Content-Type", "application/json")
             setRequestProperty("User-Agent", PoctraUserAgent)
         }
+        requestSecurity.applyTo(
+            connection = connection,
+            url = url,
+            requestBody = requestBody,
+            highValueAction = method == "eth_sendRawTransaction",
+        )
         return try {
             OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { writer ->
-                writer.write(payload.toString())
+                writer.write(requestBody)
             }
             val responseCode = connection.responseCode
             val stream = if (responseCode in 200..299) {
@@ -1085,13 +1099,11 @@ class BridgeRepository {
     }
 
     companion object {
-        const val OctraRpcUrl = "https://octra.network"
         const val OctraBridgeContract = "oct5MrNfjiXFNRDLwsodn8Zm9hDKNGAYt3eQDCQ52bSpCHq"
         const val OctraLockMethod = "lock_to_eth"
         const val OctraUnlockMethod = "unlock_trusted"
         const val WoctBridgeContract = "0xE7eD69b852fd2a1406080B26A37e8E04e7dA4caE"
         const val WoctTokenAddress = "0x4647e1fE715c9e23959022C2416C71867F5a6E80"
-        const val EthereumRpcUrl = "https://rpc.xme.my.id/eth-mainnet"
         const val RelayerRpcUrl = "https://relayer-002838819188.octra.network"
         private const val PoctraUserAgent = "poctra-android"
         const val OctDecimals = 6

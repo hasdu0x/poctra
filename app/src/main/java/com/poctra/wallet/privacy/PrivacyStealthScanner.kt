@@ -28,21 +28,74 @@ class PrivacyStealthScanner {
         }
     }
 
-    private fun matchOutput(viewKey: ByteArray, output: JSONObject): PrivacyClaimableTransfer? {
-        val ephemeral = Base64.decode(output.optString("eph_pub"), Base64.DEFAULT)
-        if (ephemeral.size != 32) return null
-        val agreement = ByteArray(32)
-        if (!X25519.calculateAgreement(viewKey, 0, ephemeral, 0, agreement, 0)) return null
-        val shared = sha256(agreement)
-        return try {
-            val expectedTag = sha256(shared + StealthTagDomain).copyOf(16).toHex()
-            val outputTag = output.optString("stealth_tag").removePrefix("0x").lowercase()
-            if (expectedTag != outputTag) return null
+    suspend fun reconstructMigrationBlinding(
+        wallet: Wallet,
+        outputs: JSONArray,
+        crypto: PrivacyCryptoEngine,
+        encryptedBalanceRaw: Long,
+        expectedCommitmentBase64: String,
+    ): ByteArray = withContext(Dispatchers.Default) {
+        val viewKey = deriveViewKey(wallet)
+        var accumulator = ByteArray(32)
+        try {
+            for (index in 0 until outputs.length()) {
+                if (index % 8 == 0) coroutineContext.ensureActive()
+                val output = outputs.optJSONObject(index) ?: continue
+                val sentByWallet = output.optString("sender_addr")
+                    .equals(wallet.address, ignoreCase = true)
+                val claimed = output.isClaimed()
+                if (!sentByWallet && !claimed) continue
 
-            val decrypted = decryptAmount(shared, output.optString("enc_amount")) ?: return null
+                val decrypted = decryptOutput(viewKey, output)
+                if (decrypted == null) {
+                    if (sentByWallet) {
+                        throw IllegalStateException("A sent Stealth output cannot be opened for migration.")
+                    }
+                    continue
+                }
+                val (amount, blinding, claimSecret) = decrypted
+                try {
+                    val storedCommitment = decodeCommitment(output.optString("amount_commitment"))
+                    val localCommitment = crypto.pedersenCommit(wallet, amount, blinding)
+                    check(MessageDigest.isEqual(storedCommitment, localCommitment)) {
+                        "A Stealth output commitment does not match its encrypted amount."
+                    }
+                    if (sentByWallet) {
+                        val next = crypto.subtractBlindings(wallet, accumulator, blinding)
+                        accumulator.fill(0)
+                        accumulator = next
+                    }
+                    if (claimed) {
+                        val next = crypto.addBlindings(wallet, accumulator, blinding)
+                        accumulator.fill(0)
+                        accumulator = next
+                    }
+                } finally {
+                    blinding.fill(0)
+                    claimSecret.fill(0)
+                }
+            }
+            val expected = decodeCommitment(expectedCommitmentBase64)
+            val reconstructed = crypto.pedersenCommit(wallet, encryptedBalanceRaw, accumulator)
+            check(MessageDigest.isEqual(expected, reconstructed)) {
+                "Local Privacy history does not match the network migration commitment."
+            }
+            accumulator
+        } catch (error: Throwable) {
+            accumulator.fill(0)
+            throw error
+        } finally {
+            viewKey.fill(0)
+        }
+    }
+
+    private fun matchOutput(viewKey: ByteArray, output: JSONObject): PrivacyClaimableTransfer? {
+        val decrypted = decryptOutput(viewKey, output) ?: return null
+        return try {
             val outputId = output.opt("id")?.takeUnless { it == JSONObject.NULL }?.toString().orEmpty()
             if (outputId.isBlank()) {
                 decrypted.second.fill(0)
+                decrypted.third.fill(0)
                 return null
             }
             PrivacyClaimableTransfer(
@@ -51,13 +104,44 @@ class PrivacyStealthScanner {
                 epoch = output.optLong("epoch_id", 0L),
                 sender = output.optString("sender_addr"),
                 txHash = output.optString("tx_hash"),
-                claimSecret = sha256(shared + ClaimSecretDomain),
+                claimSecret = decrypted.third,
                 blinding = decrypted.second,
             )
+        } catch (error: Throwable) {
+            decrypted.second.fill(0)
+            decrypted.third.fill(0)
+            throw error
+        }
+    }
+
+    private fun decryptOutput(
+        viewKey: ByteArray,
+        output: JSONObject,
+    ): Triple<Long, ByteArray, ByteArray>? {
+        val ephemeral = runCatching {
+            Base64.decode(output.optString("eph_pub"), Base64.DEFAULT)
+        }.getOrNull() ?: return null
+        if (ephemeral.size != 32) return null
+        val agreement = ByteArray(32)
+        if (!X25519.calculateAgreement(viewKey, 0, ephemeral, 0, agreement, 0)) return null
+        val shared = sha256(agreement)
+        return try {
+            val expectedTag = sha256(shared + StealthTagDomain).copyOf(16).toHex()
+            val outputTag = output.optString("stealth_tag").removePrefix("0x").lowercase()
+            if (expectedTag != outputTag) return null
+            val decrypted = decryptAmount(shared, output.optString("enc_amount")) ?: return null
+            Triple(decrypted.first, decrypted.second, sha256(shared + ClaimSecretDomain))
         } finally {
             agreement.fill(0)
             shared.fill(0)
         }
+    }
+
+    private fun decodeCommitment(encoded: String): ByteArray {
+        val value = runCatching { Base64.decode(encoded, Base64.DEFAULT) }
+            .getOrElse { throw IllegalStateException("Privacy migration commitment is malformed.") }
+        require(value.size == 32) { "Privacy migration commitment is missing." }
+        return value
     }
 
     private fun deriveViewKey(wallet: Wallet): ByteArray {

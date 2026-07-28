@@ -1147,6 +1147,7 @@ fun OctraProfileScreen(controller: PoctraController) {
     val wallet = controller.wallet
     val identity = wallet?.address?.let { controller.walletIdentityNames[it] }
     val evm = controller.evmAccount
+    val evmAddress = controller.currentEvmAddress()
     val clipboard = LocalClipboardManager.current
     ConsumerPlainDetailScreen(
         title = "Octra Profile",
@@ -1213,11 +1214,11 @@ fun OctraProfileScreen(controller: PoctraController) {
         ProfileAddressCard(
             title = "EVM Account",
             identity = evm?.ensName,
-            address = evm?.address.orEmpty(),
-            emptyText = "Open EVM Account to derive this address",
+            address = evmAddress.orEmpty(),
+            emptyText = "EVM address unavailable",
             glyph = Glyph.Evm,
             accent = InfoBlue,
-            onCopy = evm?.address?.takeIf { it.isNotBlank() }?.let { address ->
+            onCopy = evmAddress?.takeIf { it.isNotBlank() }?.let { address ->
                 {
                     clipboard.setText(AnnotatedString(address))
                     controller.showMessage("EVM address copied.")

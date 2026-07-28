@@ -24,12 +24,28 @@ target_compile_features(poctra_privacy PRIVATE cxx_std_17)
 target_compile_options(
     poctra_privacy
     PRIVATE
-    -O2
+    -O3
+    -DNDEBUG
+    -flto=thin
+    -fno-semantic-interposition
     -fexceptions
     -frtti
+    -fvisibility=hidden
+    -fvisibility-inlines-hidden
+    -ffunction-sections
+    -fdata-sections
     -Wall
     -Wextra
     -Wno-unused-parameter
+)
+
+target_link_options(
+    poctra_privacy
+    PRIVATE
+    -Wl,--gc-sections
+    -Wl,-z,relro
+    -Wl,-z,now
+    -flto=thin
 )
 
 if(ANDROID_ABI STREQUAL "arm64-v8a")

@@ -47,6 +47,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -216,53 +217,77 @@ fun PoctraTextField(
 ) {
     val shape = RoundedCornerShape(Radius.md)
     var focused by remember { mutableStateOf(false) }
-    val focusScale by animateFloatAsState(
-        targetValue = if (focused) 0.988f else 1f,
+    val compactSingleLine = singleLine && minLines == 1 && supportingText == null
+    val focusScaleX by animateFloatAsState(
+        targetValue = if (focused) 0.992f else 1f,
         animationSpec = tween(150, easing = FastOutSlowInEasing),
-        label = "poctraFieldFocusScale",
+        label = "poctraFieldFocusScaleX",
     )
-    OutlinedTextField(
-        value = value,
-        onValueChange = onValueChange,
-        modifier = modifier
-            .fillMaxWidth()
-            .onFocusChanged { focused = it.isFocused }
-            .graphicsLayer {
-                scaleX = focusScale
-                scaleY = focusScale
+    val focusScaleY by animateFloatAsState(
+        targetValue = if (focused) 0.94f else 1f,
+        animationSpec = tween(150, easing = FastOutSlowInEasing),
+        label = "poctraFieldFocusScaleY",
+    )
+    val field: @Composable (Modifier) -> Unit = { fieldModifier ->
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            modifier = fieldModifier
+                .fillMaxWidth()
+                .onFocusChanged { focused = it.isFocused }
+                .graphicsLayer {
+                    scaleX = focusScaleX
+                    scaleY = focusScaleY
+                },
+            label = { Text(label, style = MaterialTheme.typography.labelMedium) },
+            placeholder = placeholder?.let {
+                { Text(it, color = TextSecondary.copy(alpha = 0.78f), style = MaterialTheme.typography.bodyMedium) }
             },
-        label = { Text(label, style = MaterialTheme.typography.labelMedium) },
-        placeholder = placeholder?.let {
-            { Text(it, color = TextSecondary.copy(alpha = 0.78f), style = MaterialTheme.typography.bodyMedium) }
-        },
-        singleLine = singleLine,
-        minLines = minLines,
-        isError = isError,
-        supportingText = supportingText?.let { { Text(it, style = MaterialTheme.typography.labelSmall) } },
-        leadingIcon = leadingContent,
-        trailingIcon = trailingContent,
-        keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
-        visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
-        shape = shape,
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedTextColor = TextTertiary,
-            unfocusedTextColor = TextTertiary,
-            focusedContainerColor = SurfaceStrong,
-            unfocusedContainerColor = SurfaceStrong,
-            focusedBorderColor = focusColor.copy(alpha = 0.62f),
-            unfocusedBorderColor = BorderLine.copy(alpha = 0.42f),
-            focusedLabelColor = focusColor,
-            unfocusedLabelColor = TextSecondary,
-            cursorColor = focusColor,
-            errorBorderColor = ErrorRed.copy(alpha = 0.68f),
-            errorLabelColor = ErrorRed,
-            errorSupportingTextColor = ErrorRed,
-            focusedLeadingIconColor = focusColor,
-            unfocusedLeadingIconColor = TextSecondary,
-            focusedTrailingIconColor = focusColor,
-            unfocusedTrailingIconColor = TextSecondary,
-        ),
-    )
+            singleLine = singleLine,
+            minLines = minLines,
+            isError = isError,
+            supportingText = supportingText?.let { { Text(it, style = MaterialTheme.typography.labelSmall) } },
+            leadingIcon = leadingContent,
+            trailingIcon = trailingContent,
+            keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+            visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
+            shape = shape,
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = TextTertiary,
+                unfocusedTextColor = TextTertiary,
+                focusedContainerColor = SurfaceStrong,
+                unfocusedContainerColor = SurfaceStrong,
+                focusedBorderColor = focusColor.copy(alpha = 0.62f),
+                unfocusedBorderColor = BorderLine.copy(alpha = 0.42f),
+                focusedLabelColor = focusColor,
+                unfocusedLabelColor = TextSecondary,
+                cursorColor = focusColor,
+                errorBorderColor = ErrorRed.copy(alpha = 0.68f),
+                errorLabelColor = ErrorRed,
+                errorSupportingTextColor = ErrorRed,
+                focusedLeadingIconColor = focusColor,
+                unfocusedLeadingIconColor = TextSecondary,
+                focusedTrailingIconColor = focusColor,
+                unfocusedTrailingIconColor = TextSecondary,
+            ),
+        )
+    }
+    if (compactSingleLine) {
+        Box(
+            modifier = modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            field(
+                Modifier
+                    .fillMaxWidth()
+                    .height(56.dp),
+            )
+        }
+    } else {
+        field(modifier)
+    }
 }
 
 @Composable
@@ -341,7 +366,12 @@ fun StateBanner(
     compact: Boolean = false,
     solid: Boolean = false,
 ) {
-    val color = if (isError) ErrorRed else InfoBlue
+    val normalized = text.lowercase()
+    val color = when {
+        normalized.contains("timeout") || normalized.contains("timed out") -> Warning
+        isError -> ErrorRed
+        else -> InfoBlue
+    }
     val containerModifier = if (solid) {
         modifier
             .clip(RoundedCornerShape(Radius.sm))
@@ -521,6 +551,117 @@ fun NetworkBadge(text: String, state: String? = null, modifier: Modifier = Modif
         fontWeight = FontWeight.SemiBold,
     )
 }
+
+data class ReviewFlowEndpoint(
+    val label: String,
+    val address: String,
+    val identityName: String? = null,
+)
+
+@Composable
+fun ReviewProcessFlow(
+    source: ReviewFlowEndpoint,
+    destination: ReviewFlowEndpoint,
+    actionLabel: String,
+    actionGlyph: Glyph,
+    modifier: Modifier = Modifier,
+    accentColor: Color = SurfaceRaised,
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(Radius.md),
+        colors = CardDefaults.cardColors(containerColor = SurfaceBase),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = Space.x5, vertical = Space.x5),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            ReviewFlowEndpointContent(
+                endpoint = source,
+                accentColor = accentColor,
+                modifier = Modifier.weight(1f),
+            )
+            Column(
+                modifier = Modifier.width(54.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clip(RoundedCornerShape(Radius.sm))
+                        .background(accentColor.copy(alpha = 0.14f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    GlyphIcon(actionGlyph, modifier = Modifier.size(15.dp), color = accentColor)
+                }
+                Spacer(Modifier.height(Space.x2))
+                Text(
+                    text = actionLabel,
+                    color = accentColor,
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            ReviewFlowEndpointContent(
+                endpoint = destination,
+                accentColor = accentColor,
+                modifier = Modifier.weight(1f),
+                alignEnd = true,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ReviewFlowEndpointContent(
+    endpoint: ReviewFlowEndpoint,
+    accentColor: Color,
+    modifier: Modifier = Modifier,
+    alignEnd: Boolean = false,
+) {
+    val identity = endpoint.identityName?.trim()?.takeIf { it.isNotBlank() }
+    val cleanAddress = endpoint.address.trim().ifBlank { "-" }
+    val alignment = if (alignEnd) Alignment.End else Alignment.Start
+    val textAlign = if (alignEnd) TextAlign.End else TextAlign.Start
+    Column(modifier = modifier, horizontalAlignment = alignment) {
+        Text(
+            text = endpoint.label,
+            color = TextSecondary,
+            style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Spacer(Modifier.height(Space.x2))
+        Text(
+            text = identity ?: compactReviewAddress(cleanAddress),
+            color = if (identity != null) accentColor else TextTertiary,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            textAlign = textAlign,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (identity != null) {
+            Spacer(Modifier.height(Space.x1))
+            Text(
+                text = compactReviewAddress(cleanAddress),
+                color = TextSecondary,
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
+                textAlign = textAlign,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+private fun compactReviewAddress(address: String): String =
+    if (address.length <= 19) address else "${address.take(8)}...${address.takeLast(8)}"
 
 @Composable
 fun TokenRow(token: TokenBalance, modifier: Modifier = Modifier) {

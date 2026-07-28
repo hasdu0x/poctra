@@ -345,10 +345,8 @@ inline void lpn_make_ybits(
     for (int r = 0; r < t; r++) {
         prg.fill_u64(row_buf.data(), s_words);
 
-        uint64_t acc = 0;
-        for (size_t wi = 0; wi < s_words; ++wi) {
-            acc ^= row_buf[wi] & sk.lpn_s_bits[wi];
-        }
+        uint64_t acc =
+            simd::and_xor_reduce(row_buf.data(), sk.lpn_s_bits.data(), s_words);
         int dot = parity64(acc);
 
         int e = (prg.bounded((uint64_t)den) < (uint64_t)num) ? 1 : 0;

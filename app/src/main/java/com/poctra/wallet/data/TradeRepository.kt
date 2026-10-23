@@ -45,7 +45,11 @@ data class TradeAsset(
             chainId == EthereumMainnetChainId &&
             other.chainId == EthereumMainnetChainId &&
             isValidCurrency(address) &&
-            isValidCurrency(other.address)
+            isValidCurrency(other.address) &&
+            ((isWOct && other.isNative) ||
+                (isNative && other.isWOct) ||
+                (isNative && other.isUsdt) ||
+                (isUsdt && other.isNative))
 
     companion object {
         const val NativeCurrency = NativeTradeCurrency
@@ -145,6 +149,7 @@ data class TradeCandle(
     val high: Double,
     val low: Double,
     val close: Double,
+    val volume: Double = 0.0,
 )
 
 data class TradeSwapResult(
@@ -177,6 +182,7 @@ class TradeRepository(context: Context) {
     private var cachedWoctPools: List<ChartPool>? = null
     private var cachedDexScreenerPools: List<DexScreenerPool>? = null
     private val resolvedTradePools = ConcurrentHashMap<String, TradePool>()
+    private val resolvedTradeRoutes = ConcurrentHashMap<String, TradeRoute>()
 
     fun configure(evmRpcUrl: String) {
         ethereumRpcEndpoint.configure(evmRpcUrl)
@@ -214,8 +220,9 @@ class TradeRepository(context: Context) {
         val amountIn = parseAmount(amountText, fromAsset)
         require(amountIn > BigInteger.ZERO) { "Enter a valid amount." }
         require(isSupportedPair(fromAsset, toAsset)) { "Trade supports asset pairs on Ethereum Mainnet." }
-        val (pool, quoted) = resolvePoolQuote(fromAsset, toAsset, amountIn)
-        resolvedTradePools[tradePairKey(fromAsset, toAsset)] = pool
+        val route = resolveTradeRoute(fromAsset, toAsset, amountIn)
+        resolvedTradeRoutes[tradePairKey(fromAsset, toAsset)] = route
+        val quoted = route.combinedQuote
         val amountOut = quoted.amountOut
         val gasEstimate = quoted.gasEstimate
         val gasPrice = evmQuantity("eth_gasPrice", JSONArray()).coerceAtLeast(BigInteger.ONE)
@@ -230,8 +237,10 @@ class TradeRepository(context: Context) {
         val minimumOut = amountOut
             .multiply(BigInteger.valueOf((10_000 - slippageBps.coerceIn(1, 5_000)).toLong()))
             .divide(BigInteger.valueOf(10_000L))
-        val priceImpactBps = estimatePriceImpactBps(pool, amountIn, amountOut, fromAsset)
-        val liquidity = runCatching { findTradePoolLiquidity(fromAsset, toAsset) }.getOrNull()
+        val priceImpactBps = estimateRoutePriceImpactBps(route)
+        val liquidity = route.assets.zipWithNext()
+            .mapNotNull { (input, output) -> runCatching { findTradePoolLiquidity(input, output) }.getOrNull() }
+            .minByOrNull(PoolLiquidity::reserveUsd)
         val mevRouteLabel = mevRouteLabel()
         val riskLevel = tradeQuoteRisk(priceImpactBps, liquidity?.reserveUsd)
         TradeQuote(
@@ -246,10 +255,10 @@ class TradeRepository(context: Context) {
             lowGasFeeEth = EvmCrypto.formatEther(gasEstimate.multiply(lowGasPrice), 8),
             fastGasPriceWei = fastGasPrice,
             fastGasFeeEth = EvmCrypto.formatEther(gasEstimate.multiply(fastGasPrice), 8),
-            routeLabel = "${fromAsset.symbol}/${toAsset.symbol} v4 ${pool.feeLabel}",
+            routeLabel = route.label,
             priceImpactBps = priceImpactBps,
             priceImpactLabel = formatPriceImpact(priceImpactBps),
-            poolLiquidityLabel = poolLiquidityLabel(liquidity, priceImpactBps),
+            poolLiquidityLabel = poolLiquidityLabel(liquidity, priceImpactBps, route.pools.size),
             mevRouteLabel = mevRouteLabel,
             riskLevel = riskLevel,
             riskWarning = tradeQuoteRiskWarning(priceImpactBps, liquidity?.reserveUsd),
@@ -298,9 +307,10 @@ class TradeRepository(context: Context) {
                 transactions += TradeSubmittedTransaction(TradeSwapStage.PermitApproval, permit)
             }
 
-            val pool = resolvedTradePools[tradePairKey(fromAsset, toAsset)]
-                ?: resolvePoolQuote(fromAsset, toAsset, amountIn).first
-            val executeData = universalRouterExecuteCalldata(pool, amountIn, minimumOutRaw)
+            val route = resolvedTradeRoutes[tradePairKey(fromAsset, toAsset)]
+                ?.let { cached -> runCatching { quoteTradeRoute(cached, amountIn) }.getOrNull() }
+                ?: resolveTradeRoute(fromAsset, toAsset, amountIn)
+            val executeData = universalRouterExecuteCalldata(route, amountIn, minimumOutRaw)
             val valueWei = if (fromAsset.isNative) amountIn else BigInteger.ZERO
             val swap = sendEvmTransaction(
                 wallet = wallet,
@@ -453,12 +463,52 @@ class TradeRepository(context: Context) {
 
         candidates.forEach { pool ->
             val attempt = runCatching { quoteRaw(pool, amountIn) }
-            attempt.getOrNull()?.let { quote -> return pool to quote }
+            attempt.getOrNull()?.let { quote ->
+                resolvedTradePools[tradePairKey(fromAsset, toAsset)] = pool
+                return pool to quote
+            }
             attempt.exceptionOrNull()?.let { error ->
                 if (isTerminalPoolProbeError(error)) throw error
             }
         }
         throw IllegalStateException("No active v4 pool was found for ${fromAsset.symbol}/${toAsset.symbol}.")
+    }
+
+    private fun resolveTradeRoute(
+        fromAsset: TradeAsset,
+        toAsset: TradeAsset,
+        amountIn: BigInteger,
+    ): TradeRoute {
+        val pairKey = tradePairKey(fromAsset, toAsset)
+        resolvedTradeRoutes[pairKey]
+            ?.takeIf { it.pools.size > 1 }
+            ?.let { cached ->
+                runCatching { quoteTradeRoute(cached, amountIn) }
+                    .getOrNull()
+                    ?.let { return it }
+            }
+
+        val directAttempt = runCatching {
+            val (pool, quote) = resolvePoolQuote(fromAsset, toAsset, amountIn)
+            TradeRoute(listOf(fromAsset, toAsset), listOf(pool), listOf(quote), listOf(amountIn))
+        }
+        directAttempt.getOrNull()?.let { return it }
+        directAttempt.exceptionOrNull()?.let { error ->
+            if (isTerminalPoolProbeError(error)) throw error
+        }
+
+        directAttempt.exceptionOrNull()?.let { throw it }
+        throw IllegalStateException("No active direct v4 pool was found for ${fromAsset.symbol}/${toAsset.symbol}.")
+    }
+
+    private fun quoteTradeRoute(route: TradeRoute, amountIn: BigInteger): TradeRoute {
+        var currentAmount = amountIn
+        val inputs = mutableListOf<BigInteger>()
+        val quotes = route.pools.map { pool ->
+            inputs += currentAmount
+            quoteRaw(pool, currentAmount).also { currentAmount = it.amountOut }
+        }
+        return route.copy(hopQuotes = quotes, hopAmountsIn = inputs)
     }
 
     private fun isTerminalPoolProbeError(error: Throwable): Boolean {
@@ -623,6 +673,19 @@ class TradeRepository(context: Context) {
             .coerceIn(0, 10_000)
     }
 
+    private fun estimateRoutePriceImpactBps(route: TradeRoute): Int? {
+        val impacts = route.pools.indices.map { index ->
+            estimatePriceImpactBps(
+                pool = route.pools[index],
+                amountIn = route.hopAmountsIn[index],
+                amountOut = route.hopQuotes[index].amountOut,
+                fromAsset = route.assets[index],
+            )
+        }
+        if (impacts.any { it == null }) return null
+        return impacts.filterNotNull().sum().coerceIn(0, 10_000)
+    }
+
     private fun referenceQuoteAmount(amountIn: BigInteger, asset: TradeAsset): BigInteger {
         val oneWhole = BigInteger.TEN.pow(asset.decimals)
         val oneHundredth = oneWhole.divide(BigInteger.valueOf(100L)).coerceAtLeast(BigInteger.ONE)
@@ -648,7 +711,7 @@ class TradeRepository(context: Context) {
         }
     }
 
-    private fun poolLiquidityLabel(liquidity: PoolLiquidity?, priceImpactBps: Int?): String {
+    private fun poolLiquidityLabel(liquidity: PoolLiquidity?, priceImpactBps: Int?, hopCount: Int): String {
         val depthLabel = when {
             priceImpactBps == null -> "Depth unknown"
             priceImpactBps >= 500 -> "Very thin depth"
@@ -659,7 +722,8 @@ class TradeRepository(context: Context) {
         val reserveLabel = liquidity?.reserveUsd
             ?.takeIf { it > BigDecimal.ZERO }
             ?.let { formatUsdCompact(it) }
-        return if (reserveLabel == null) depthLabel else "$reserveLabel ${liquidity.source} / $depthLabel"
+        val routePrefix = if (hopCount > 1) "$hopCount-hop / " else ""
+        return routePrefix + if (reserveLabel == null) depthLabel else "$reserveLabel ${liquidity.source} / $depthLabel"
     }
 
     private fun tradeQuoteRisk(priceImpactBps: Int?, reserveUsd: BigDecimal?): TradeQuoteRisk = when {
@@ -726,12 +790,20 @@ class TradeRepository(context: Context) {
             hookData
     }
 
-    private fun universalRouterExecuteCalldata(pool: TradePool, amountIn: BigInteger, minimumOut: BigInteger): String {
+    private fun universalRouterExecuteCalldata(route: TradeRoute, amountIn: BigInteger, minimumOut: BigInteger): String {
         val commands = byteArrayOf(V4SwapCommand.toByte())
-        val actions = byteArrayOf(ActionSwapExactInSingle, ActionSettleAll, ActionTakeAll)
-        val swapParams = encodeExactInputSingleParams(pool, amountIn, minimumOut)
-        val settleParams = abiEncodeStatic(listOf(addressWord(pool.inputCurrency), MaxUint256Word))
-        val takeParams = abiEncodeStatic(listOf(addressWord(pool.outputCurrency), BigInteger.ZERO.toAbiWord()))
+        val actions = byteArrayOf(
+            if (route.pools.size == 1) ActionSwapExactInSingle else ActionSwapExactIn,
+            ActionSettleAll,
+            ActionTakeAll,
+        )
+        val swapParams = if (route.pools.size == 1) {
+            encodeExactInputSingleParams(route.pools.single(), amountIn, minimumOut)
+        } else {
+            encodeExactInputParams(route, amountIn, minimumOut)
+        }
+        val settleParams = abiEncodeStatic(listOf(addressWord(route.assets.first().address), MaxUint256Word))
+        val takeParams = abiEncodeStatic(listOf(addressWord(route.assets.last().address), BigInteger.ZERO.toAbiWord()))
         val routerInput = abiEncodeBytesAndBytesArray(actions, listOf(swapParams, settleParams, takeParams))
         val inputs = abiEncodeBytesArray(listOf(routerInput.hexToBytes()))
         val commandsEncoded = abiEncodeBytes(commands)
@@ -759,6 +831,49 @@ class TradeRepository(context: Context) {
             BigInteger.valueOf(320L).toAbiWord(),
         ).joinToString("")
         return BigInteger.valueOf(32L).toAbiWord() + head + BigInteger.ZERO.toAbiWord()
+    }
+
+    private fun encodeExactInputParams(route: TradeRoute, amountIn: BigInteger, minimumOut: BigInteger): String {
+        require(route.pools.size > 1 && route.pools.size == route.assets.size - 1) {
+            "Multi-hop route is invalid."
+        }
+        val path = abiEncodeDynamicArray(
+            route.pools.mapIndexed { index, pool ->
+                encodePathKey(
+                    intermediateCurrency = route.assets[index + 1].address,
+                    pool = pool,
+                )
+            },
+        )
+        val tupleHeadSize = 5 * 32
+        val minimumHopPrices = BigInteger.ZERO.toAbiWord()
+        val head = listOf(
+            addressWord(route.assets.first().address),
+            BigInteger.valueOf(tupleHeadSize.toLong()).toAbiWord(),
+            BigInteger.valueOf((tupleHeadSize + path.length / 2).toLong()).toAbiWord(),
+            amountIn.toAbiWord(),
+            minimumOut.toAbiWord(),
+        ).joinToString("")
+        return BigInteger.valueOf(32L).toAbiWord() + head + path + minimumHopPrices
+    }
+
+    private fun encodePathKey(intermediateCurrency: String, pool: TradePool): String =
+        listOf(
+            addressWord(intermediateCurrency),
+            BigInteger.valueOf(pool.fee.toLong()).toAbiWord(),
+            signedInt24Word(pool.tickSpacing),
+            addressWord(pool.hooks),
+            BigInteger.valueOf(160L).toAbiWord(),
+        ).joinToString("") + BigInteger.ZERO.toAbiWord()
+
+    private fun abiEncodeDynamicArray(items: List<String>): String {
+        var cursor = items.size * 32
+        val offsets = items.map { encoded ->
+            val offset = BigInteger.valueOf(cursor.toLong()).toAbiWord()
+            cursor += encoded.length / 2
+            offset
+        }
+        return BigInteger.valueOf(items.size.toLong()).toAbiWord() + offsets.joinToString("") + items.joinToString("")
     }
 
     private fun ensureErc20Approval(
@@ -1066,6 +1181,7 @@ class TradeRepository(context: Context) {
         private const val TradeBalanceBatchSize = 4
         private const val V4SwapCommand = 0x10
         private const val ActionSwapExactInSingle: Byte = 0x06
+        private const val ActionSwapExactIn: Byte = 0x07
         private const val ActionSettleAll: Byte = 0x0c
         private const val ActionTakeAll: Byte = 0x0f
         private val EthGasReserveWei = BigInteger("5000000000000000")
@@ -1125,6 +1241,29 @@ private data class RawTradeQuote(
     val amountOut: BigInteger,
     val gasEstimate: BigInteger,
 )
+
+private data class TradeRoute(
+    val assets: List<TradeAsset>,
+    val pools: List<TradePool>,
+    val hopQuotes: List<RawTradeQuote>,
+    val hopAmountsIn: List<BigInteger>,
+) {
+    init {
+        require(assets.size == pools.size + 1)
+        require(hopQuotes.size == pools.size)
+        require(hopAmountsIn.size == pools.size)
+    }
+
+    val combinedQuote: RawTradeQuote
+        get() = RawTradeQuote(
+            amountOut = hopQuotes.last().amountOut,
+            gasEstimate = hopQuotes.fold(BigInteger.ZERO) { total, quote -> total.add(quote.gasEstimate) },
+        )
+
+    val label: String
+        get() = assets.joinToString(" → ") { it.symbol } +
+            " · Uniswap v4 " + pools.joinToString(" + ") { it.feeLabel }
+}
 
 private data class PoolLiquidity(
     val reserveUsd: BigDecimal,

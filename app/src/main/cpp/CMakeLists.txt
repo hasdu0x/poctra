@@ -50,6 +50,7 @@ target_link_options(
 
 if(ANDROID_ABI STREQUAL "arm64-v8a")
     target_compile_options(poctra_privacy PRIVATE -march=armv8-a+crypto)
+    target_compile_definitions(poctra_privacy PRIVATE PVAC_WNAF_WIDTH=4)
 elseif(ANDROID_ABI STREQUAL "x86_64")
     target_compile_options(poctra_privacy PRIVATE -maes -msse2)
 endif()

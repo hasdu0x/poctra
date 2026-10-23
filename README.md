@@ -1,124 +1,59 @@
 # poctra
 
-poctra is a native Android wallet for the Octra ecosystem. It focuses on a compact
-consumer mobile experience for Octra accounts, assets, identity, dApps, bridge, and trade.
+poctra is a native Android wallet for the Octra ecosystem. It delivers a focused consumer mobile experience covering accounts, assets, privacy, identity, dApps, bridge, and trade — all on a single device without external custody.
 
-## What poctra Covers
+## Features
 
-- Multi-wallet management with create, import, rename, reorder, and active wallet switching.
-- Native OCT dashboard with balance, estimated USD value, send, receive, bridge, and recent activity.
-- Octra asset management for manually added Octra-chain assets.
-- Derived EVM Account from the same Octra key, including ERC20 and NFT handling.
-- Octra Identity lookup for `.oct` recipients, wallet display names, and activity labels.
-- Address Book and recent recipients for faster send flows.
-- In-app dApp browser with poctra provider injection, approval sheets, and connected dApp management.
-- Octra circle routing through `oct://`, Octra Identity names, and Octra address fallback behavior.
-- Bridge flow for OCT to wOCT and wOCT to OCT with review, gas options, progress, history, recover, and claim.
-- Trade flow for wOCT, ETH, and USDT with chart view, quote review, gas options, and swap progress.
-- Portfolio and activity center views for a wider account overview.
-- Local backup key reveal with security confirmation and hidden sensitive values by default.
-- RPC, EVM network, and Octra Identity Provider management.
+- **Multi-wallet management** — create, import, rename, reorder, and switch active wallets.
+- **OCT dashboard** — live balance with USD estimate, send, receive, bridge, and recent activity.
+- **Privacy operations** — encrypt, decrypt, stealth send, and claim private transfers using on-device ZK proof generation.
+- **EVM account** — derived EVM account from the same Octra key, with ETH, ERC20, and NFT support.
+- **Octra Identity** — `.oct` name resolution for recipients, wallet labels, and activity display names.
+- **dApp browser** — in-app WebView with poctra provider injection, approval sheets, session management, and phishing protection.
+- **Bridge** — OCT ↔ wOCT with review, gas selection, progress tracking, history, and claim recovery.
+- **Trade** — wOCT / ETH / USDT swap via Uniswap v4 with candlestick chart, quote review, gas options, and swap history.
+- **Portfolio & Activity Center** — unified timeline across Octra, EVM, bridge, and dApp events with CSV export.
+- **Address Book** — saved contacts with optional Octra Identity names.
+- **Backup & Security** — biometric (Android Keystore) or PIN vault encryption, weak PIN detection, security center, and guarded seed/key reveal.
+- **RPC & network management** — configurable Octra RPC endpoints, EVM networks, and Octra Identity providers.
 
 ## Security Model
 
-poctra keeps custody local to the device.
+poctra keeps wallet custody entirely on the device.
 
-- Wallet vault data is encrypted locally.
-- Users can secure the vault with biometric authentication or a PIN.
-- PIN encryption uses AES-GCM with PBKDF2-HMAC-SHA256 key derivation and a BouncyCastle fallback for older Android providers.
-- Mnemonic seed derivation uses PBKDF2-HMAC-SHA512 with a BouncyCastle fallback for compatibility on older Android/emulator images.
-- Sensitive key and mnemonic reveal flows require security confirmation.
-- dApp connections, signatures, and transaction requests are shown through explicit approval dialogs.
-- Android app backup is disabled for wallet data.
+- Vault data is encrypted locally using AES-GCM.
+- Biometric authentication uses an Android Keystore-bound AES key with biometric invalidation on enrollment changes.
+- PIN encryption uses PBKDF2-HMAC-SHA256 with 310,000 iterations plus a Keystore-bound device binding key.
+- Privacy keys are derived on demand from the wallet seed and never persisted separately.
+- dApp connections and transaction requests require explicit per-action approval.
+- Android app backup is disabled. Cleartext network traffic is disabled.
 
-## Android Compatibility
+## Requirements
 
-The app is configured for:
-
-- `minSdk 23`
-- `targetSdk 34`
-
-The project includes compatibility guards around biometric APIs and older Android provider behavior.
-On Android versions below the biometric prompt flow, users should use PIN-based security.
-
-## Public Circle Landing
-
-The static marketing/circle package lives in:
-
-```text
-tools/public_circle/common/landing/
-```
-
-It contains a dependency-free landing page with poctra styling, local Fira Code fonts,
-the poctra logo, and product screenshots copied from:
-
-```text
-temp/screenshot/
-```
-
-The package is designed to be served with `/index.html` as the default circle resource.
-
-Devnet circle deployment:
-
-```text
-oct://oct3A5bhpktxb9y2gepQeGxSbkJspq3Pv178Zyi9tkM1oJx/index.html
-```
-
-The circle is deployed as `public_resources` with plain assets, so no sealed read key
-or passphrase is required.
-Deployment metadata is stored at:
-
-```text
-tools/public_circle/deployments/common.landing.devnet.json
-```
-
-Devnet Octra Identity dApp circle:
-
-```text
-oct://oct2EPYSkqjD6f1zLuWhyP6G2rDGB8rZp1nNDirVCqp3drD/index.html
-```
-
-Its metadata is stored at:
-
-```text
-tools/public_circle/deployments/dapp.octraid.devnet.json
-```
+- Android 10 (API 29) or later
+- 64-bit device (arm64-v8a) required for privacy operations
 
 ## Build
 
-Debug APK:
-
-```powershell
-C:\Users\Administrator\.gradle\wrapper\dists\gradle-8.6-bin\afr5mpiioh2wthjmwnkmdsd5w\gradle-8.6\bin\gradle.bat --offline --console=plain :app:assembleDebug
+```bash
+./gradlew assembleDebug
 ```
 
-APK output:
-
-```text
-app/build/outputs/apk/debug/app-debug.apk
-```
+Output: `app/build/outputs/apk/debug/app-debug.apk`
 
 ## Project Structure
 
-```text
+```
 app/src/main/java/com/poctra/wallet/
-  core/        wallet, mnemonic, key, and calldata logic
-  data/        RPC, EVM, bridge, trade, identity, session, and persistence repositories
-  security/    vault storage, dApp policy, and device security helpers
-  ui/          Jetpack Compose screens, components, theme, icons, and wallet visuals
-
-public_circle/
-  landing/
-    index.html   public circle landing page
-    styles.css   poctra web styling
-    app.js       screenshot switcher
-    assets/      logo, fonts, and screenshots
-  dapp/
-    src/         copied octra.id frontend source
-    public/      copied public assets
+  core/        Wallet, mnemonic, key derivation, and calldata utilities
+  data/        RPC, EVM, bridge, trade, identity, session, and asset repositories
+  privacy/     Privacy crypto engine, stealth scanner/sender, and ZK bridge
+  security/    Vault storage, biometric, dApp policy, and runtime security helpers
+  ui/          Jetpack Compose screens, components, theme, glyphs, and chart views
+app/src/main/cpp/
+  pvac/        Native PVAC privacy library (C++17 + Rust)
 ```
 
-## Current Status
+## License
 
-poctra is an alpha mobile wallet build. The current about label is `alpha v1.0.0`.
-Mainnet and devnet flows are present, with network selection managed from in-app settings.
+Copyright © 2026 poctra. All rights reserved.

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <vector>
 #include <cassert>
@@ -51,14 +52,21 @@ inline bool r1cs_var_ok(const Variable& var, size_t gates, size_t committed) {
     return false;
 }
 
-inline bool r1cs_system_ok(const ConstraintSystem& cs, size_t N) {
+inline bool r1cs_system_ok(
+    const ConstraintSystem& cs,
+    size_t N,
+    R1CSLimitProfile profile = R1CSLimitProfile::Default
+) {
+    const size_t max_constraints = r1cs_constraint_limit(profile);
+    if (max_constraints == 0)
+        return false;
     if (N == 0 || N > R1CS_MAX_GATES)
         return false;
     if (cs.num_gates > R1CS_MAX_GATES)
         return false;
     if (cs.num_committed > R1CS_MAX_COMMITTED)
         return false;
-    if (cs.constraints.size() > R1CS_MAX_CONSTRAINTS)
+    if (cs.constraints.size() > max_constraints)
         return false;
     size_t terms = 0;
     for (const auto& constraint : cs.constraints) {
@@ -134,55 +142,80 @@ inline bool ipp_verify_with_y(
     auto s_inv = batch_sc_inv(s);
 
     std::vector<Scalar> scalars;
-    std::vector<ExtPoint> points;
     scalars.reserve(2 * n + 2 * lg + 2);
-    points.reserve(2 * n + 2 * lg + 2);
 
     Scalar ab = sc_mul(proof.a, proof.b);
 
     const auto& gen = generators();
-    auto G_ext = gen.G_ext_vec(n);
-    auto H_ext = gen.H_ext_vec(n);
+    const auto generator_snapshot = gen.snapshot(n);
     for (size_t i = 0; i < n; i++) {
         scalars.push_back(sc_mul(proof.a, s[i]));
-        points.push_back(G_ext[i]);
     }
 
     for (size_t i = 0; i < n; i++) {
         scalars.push_back(sc_mul(sc_mul(proof.b, s_inv[i]), y_inv_n[i]));
-        points.push_back(H_ext[i]);
     }
 
     scalars.push_back(ab);
-    points.push_back(rist_decode_or_throw(Q));
+    const ExtPoint Q_ext = rist_decode_or_throw(Q);
 
     std::vector<Scalar> u_sqs(lg);
     for (size_t k = 0; k < lg; k++)
         u_sqs[k] = sc_mul(challenges[k], challenges[k]);
     auto u_inv_sqs = batch_sc_inv(u_sqs);
 
+    std::vector<ExtPoint> proof_points;
+    proof_points.reserve(2 * lg);
     for (size_t k = 0; k < lg; k++) {
         scalars.push_back(sc_neg(u_sqs[k]));
-        points.push_back(rist_decode_or_throw(proof.L[k]));
+        proof_points.push_back(rist_decode_or_throw(proof.L[k]));
 
         scalars.push_back(sc_neg(u_inv_sqs[k]));
-        points.push_back(rist_decode_or_throw(proof.R[k]));
+        proof_points.push_back(rist_decode_or_throw(proof.R[k]));
     }
 
-    RistrettoPoint expected = multi_scalar_mul_ext(scalars, points);
+#if defined(PVAC_COPY_GENERATOR_INPUTS)
+    std::vector<ExtPoint> points;
+    points.reserve(scalars.size());
+    points.insert(
+        points.end(),
+        generator_snapshot->G_ext.begin(),
+        generator_snapshot->G_ext.begin() + n
+    );
+    points.insert(
+        points.end(),
+        generator_snapshot->H_ext.begin(),
+        generator_snapshot->H_ext.begin() + n
+    );
+    points.push_back(Q_ext);
+    points.insert(points.end(), proof_points.begin(), proof_points.end());
+    const RistrettoPoint expected = multi_scalar_mul_ext(scalars, points);
+#else
+    const RistrettoPoint expected = multi_scalar_mul_ext_indexed(
+        scalars.size(),
+        [&](size_t i) -> const Scalar& { return scalars[i]; },
+        [&](size_t i) -> const ExtPoint& {
+            if (i < n) return generator_snapshot->G_ext[i];
+            if (i < 2 * n) return generator_snapshot->H_ext[i - n];
+            if (i == 2 * n) return Q_ext;
+            return proof_points[i - (2 * n + 1)];
+        }
+    );
+#endif
     return expected == P;
 }
 
 inline bool r1cs_verify(
     Transcript& transcript,
     const ConstraintSystem& cs,
-    const R1CSProof& proof
+    const R1CSProof& proof,
+    R1CSLimitProfile profile = R1CSLimitProfile::Default
 ) {
     const size_t m = cs.num_committed;
     const size_t q = cs.constraints.size();
     size_t N = 0;
     if (!cs.padded_gates_checked(N)) return false;
-    if (!r1cs_system_ok(cs, N)) return false;
+    if (!r1cs_system_ok(cs, N, profile)) return false;
 
     if (proof.V.size() != m) return false;
     if (!r1cs_points_valid(proof)) return false;
@@ -299,18 +332,13 @@ inline bool r1cs_verify(
 
     {
         const auto& gen = generators();
-        gen.precompute(N);
+        const auto generator_snapshot = gen.snapshot(N);
 
         std::vector<Scalar> sc;
-        std::vector<ExtPoint> pt;
         sc.reserve(2*N + 5);
-        pt.reserve(2*N + 5);
-        auto G_ext = gen.G_ext_vec(N);
-        auto H_ext = gen.H_ext_vec(N);
 
         for (size_t i = 0; i < N; i++) {
             sc.push_back(sc_mul(xc, sc_mul(y_inv_n[i], wR[i])));
-            pt.push_back(G_ext[i]);
         }
 
         for (size_t i = 0; i < N; i++) {
@@ -319,25 +347,48 @@ inline bool r1cs_verify(
                 Scalar{{1,0,0,0}}
             );
             sc.push_back(h_coeff);
-            pt.push_back(H_ext[i]);
         }
 
         sc.push_back(xc);
-        pt.push_back(rist_decode_or_throw(proof.A_I1));
-
         sc.push_back(x2);
-        pt.push_back(rist_decode_or_throw(proof.A_O1));
-
         sc.push_back(x3);
-        pt.push_back(rist_decode_or_throw(proof.S1));
-
         sc.push_back(sc_neg(proof.e_blinding));
-        pt.push_back(pedersen_B_blinding_ext());
-
         sc.push_back(sc_mul(proof.t_x, w_ch));
-        pt.push_back(pedersen_B_ext());
 
-        RistrettoPoint P = multi_scalar_mul_ext(sc, pt);
+        const std::array<ExtPoint, 5> proof_points{
+            rist_decode_or_throw(proof.A_I1),
+            rist_decode_or_throw(proof.A_O1),
+            rist_decode_or_throw(proof.S1),
+            pedersen_B_blinding_ext(),
+            pedersen_B_ext()
+        };
+
+#if defined(PVAC_COPY_GENERATOR_INPUTS)
+        std::vector<ExtPoint> pt;
+        pt.reserve(sc.size());
+        pt.insert(
+            pt.end(),
+            generator_snapshot->G_ext.begin(),
+            generator_snapshot->G_ext.begin() + N
+        );
+        pt.insert(
+            pt.end(),
+            generator_snapshot->H_ext.begin(),
+            generator_snapshot->H_ext.begin() + N
+        );
+        pt.insert(pt.end(), proof_points.begin(), proof_points.end());
+        const RistrettoPoint P = multi_scalar_mul_ext(sc, pt);
+#else
+        const RistrettoPoint P = multi_scalar_mul_ext_indexed(
+            sc.size(),
+            [&](size_t i) -> const Scalar& { return sc[i]; },
+            [&](size_t i) -> const ExtPoint& {
+                if (i < N) return generator_snapshot->G_ext[i];
+                if (i < 2 * N) return generator_snapshot->H_ext[i - N];
+                return proof_points[i - 2 * N];
+            }
+        );
+#endif
 
         if (!ipp_verify_with_y(transcript, P, Q, proof.ipp, N, y_inv_n))
             return false;

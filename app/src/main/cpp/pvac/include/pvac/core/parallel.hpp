@@ -4,8 +4,13 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdlib>
+#include <condition_variable>
+#include <deque>
 #include <exception>
+#include <functional>
+#include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -73,6 +78,91 @@ inline void release_worker_tokens(size_t count) {
     available_worker_tokens().fetch_add(count, std::memory_order_release);
 }
 
+class ReusableWorkerPool {
+public:
+    ReusableWorkerPool() {
+        const size_t count =
+            configured_worker_count() > 1 ? configured_worker_count() - 1 : 0;
+        workers_.reserve(count);
+        for (size_t i = 0; i < count; ++i)
+            workers_.emplace_back([this]() { worker_loop(); });
+    }
+
+    ~ReusableWorkerPool() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+        }
+        ready_.notify_all();
+        for (auto& worker : workers_) {
+            if (worker.joinable()) worker.join();
+        }
+    }
+
+    ReusableWorkerPool(const ReusableWorkerPool&) = delete;
+    ReusableWorkerPool& operator=(const ReusableWorkerPool&) = delete;
+
+    void submit(std::function<void()> task) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stopping_)
+                throw std::runtime_error("pvac: worker pool is stopping");
+            tasks_.push_back(std::move(task));
+        }
+        ready_.notify_one();
+    }
+
+private:
+    void worker_loop() {
+        while (true) {
+            std::function<void()> task;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                ready_.wait(lock, [this]() {
+                    return stopping_ || !tasks_.empty();
+                });
+                if (stopping_ && tasks_.empty()) return;
+                task = std::move(tasks_.front());
+                tasks_.pop_front();
+            }
+            task();
+        }
+    }
+
+    std::mutex mutex_;
+    std::condition_variable ready_;
+    std::deque<std::function<void()>> tasks_;
+    std::vector<std::thread> workers_;
+    bool stopping_ = false;
+};
+
+inline ReusableWorkerPool& reusable_worker_pool() {
+    static ReusableWorkerPool pool;
+    return pool;
+}
+
+struct ParallelCompletion {
+    explicit ParallelCompletion(size_t count) : remaining(count) {}
+
+    void complete() {
+        if (remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            std::lock_guard<std::mutex> lock(mutex);
+            done.notify_one();
+        }
+    }
+
+    void wait() {
+        std::unique_lock<std::mutex> lock(mutex);
+        done.wait(lock, [this]() {
+            return remaining.load(std::memory_order_acquire) == 0;
+        });
+    }
+
+    std::atomic<size_t> remaining;
+    std::mutex mutex;
+    std::condition_variable done;
+};
+
 template <typename Function>
 void parallel_for(
     size_t begin,
@@ -117,8 +207,13 @@ void parallel_for(
     std::atomic<size_t> next{begin};
     std::exception_ptr error;
     std::mutex error_mutex;
+#if defined(PVAC_EPHEMERAL_THREADS)
     std::vector<std::thread> threads;
     threads.reserve(acquired);
+#else
+    auto completion = std::make_shared<ParallelCompletion>(acquired);
+    size_t submitted = 0;
+#endif
 
     const auto run = [&]() {
         try {
@@ -138,14 +233,36 @@ void parallel_for(
     };
 
     try {
+#if defined(PVAC_EPHEMERAL_THREADS)
         for (size_t i = 0; i < acquired; ++i)
             threads.emplace_back(run);
+#else
+        for (size_t i = 0; i < acquired; ++i) {
+            reusable_worker_pool().submit([run, completion]() {
+                run();
+                completion->complete();
+            });
+            ++submitted;
+        }
+#endif
         run();
+#if defined(PVAC_EPHEMERAL_THREADS)
         for (auto& thread : threads) thread.join();
+#else
+        while (submitted < acquired) {
+            completion->complete();
+            ++submitted;
+        }
+        completion->wait();
+#endif
     } catch (...) {
+#if defined(PVAC_EPHEMERAL_THREADS)
         for (auto& thread : threads) {
             if (thread.joinable()) thread.join();
         }
+#else
+        completion->wait();
+#endif
         release_worker_tokens(acquired);
         throw;
     }

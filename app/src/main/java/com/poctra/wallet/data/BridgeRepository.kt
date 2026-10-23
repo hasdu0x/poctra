@@ -465,6 +465,7 @@ class BridgeRepository(context: Context) {
         return current > previousBalanceRaw
     }
 
+    @Suppress("UNUSED_PARAMETER")
     private fun hasIncomingUnlock(recipientAddress: String, amountRaw: BigInteger, startedAtSeconds: Long): Boolean {
         val result = runCatching {
             octraRpc("octra_account", JSONArray().put(recipientAddress).put(50)) as? JSONObject
@@ -475,12 +476,11 @@ class BridgeRepository(context: Context) {
             val from = item.optString("from")
             val to = item.optString("to", item.optString("to_"))
             val timestamp = normalizedTimestampSeconds(item)
-            val raw = amountRawFrom(item)
             val recentEnough = timestamp == 0L || timestamp >= startedAtSeconds - 120L
             val fromBridge = from.equals(OctraBridgeContract, ignoreCase = true)
             val bridgeMethod = item.optString("encrypted_data", item.optString("method")).equals(OctraUnlockMethod, ignoreCase = true)
             val incomingToWallet = to.equals(recipientAddress, ignoreCase = true)
-            if (recentEnough && incomingToWallet && (fromBridge || bridgeMethod || raw > BigInteger.ZERO || raw >= amountRaw)) return true
+            if (recentEnough && incomingToWallet && (fromBridge || bridgeMethod)) return true
         }
         return false
     }

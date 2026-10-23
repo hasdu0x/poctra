@@ -6,11 +6,12 @@ local.properties
 *.iml
 .idea/
 .tmp-adb/
+.kilo/
+docs/
+tools/
 temp/
 temp/**/public/
 .env
-tools/public_circle/.env.*
-!tools/public_circle/.env.example
 *.jks
 *.keystore
 *.p12

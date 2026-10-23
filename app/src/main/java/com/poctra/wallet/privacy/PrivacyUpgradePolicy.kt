@@ -16,8 +16,9 @@ data class PrivacyUpgradeFacts(
 )
 
 object PrivacyUpgradePolicy {
-    // Keep this in sync with PVAC_PRIVATE_SPEND_MAX_BASE_LAYERS in webcli.
-    const val PrivateSpendMaxBaseLayers = 6L
+    // A private spend adds another base layer. Keep this refresh threshold in
+    // sync with webcli's private_spend_refresh_base_layers.
+    const val PrivateSpendRefreshBaseLayers = 4L
     const val MinimumFeeRaw = 3_000L
     const val MaximumFeeRaw = 10_000_000L
     const val FallbackFeeRaw = 1_000_000L
@@ -30,7 +31,7 @@ object PrivacyUpgradePolicy {
             (facts.registeredPublicKeyMatchesLocal ?: (registered == facts.localPublicKey))
         val registeredCompatible = registeredCurrent ||
             facts.compatibility?.let {
-                it.extendsLocalKey || it.legacyV1Profile || it.proofProfile
+                it.extendsLocalKey || it.legacyV1Profile || it.secretProfile
             } == true
         val diagnostics = facts.diagnostics
 
@@ -158,7 +159,7 @@ object PrivacyUpgradePolicy {
             )
         }
         if (!registeredCurrent) {
-            return if (facts.compatibility?.proofProfile == true && facts.registeredKeyBalanceRaw != null) {
+            return if (facts.compatibility?.secretProfile == true && facts.registeredKeyBalanceRaw != null) {
                 status(
                     PrivacyKeyUpgradeMode.KeyBoundMigration,
                     true,
@@ -188,7 +189,7 @@ object PrivacyUpgradePolicy {
                 repair = facts.repairRequired,
             )
         }
-        if (diagnostics.baseLayerCount > PrivateSpendMaxBaseLayers) {
+        if (diagnostics.baseLayerCount >= PrivateSpendRefreshBaseLayers) {
             return status(
                 PrivacyKeyUpgradeMode.KeyBoundMigration,
                 true,

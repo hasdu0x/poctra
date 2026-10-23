@@ -37,6 +37,14 @@ enum class PrivacyOperationStage {
     Failed,
 }
 
+enum class PrivacyCompactRefreshStage {
+    BuildingProof,
+    Submitting,
+    Accepted,
+    Confirmed,
+    Failed,
+}
+
 data class PrivacyOperationState(
     val id: Long,
     val type: PrivacyOperationType,
@@ -47,6 +55,11 @@ data class PrivacyOperationState(
     val message: String,
     val progressIndex: Int = 0,
     val txHash: String? = null,
+    val compactRefreshRequired: Boolean = false,
+    val compactRefreshStage: PrivacyCompactRefreshStage? = null,
+    val compactRefreshProgressIndex: Int = 0,
+    val compactRefreshTxHash: String? = null,
+    val compactRefreshFeeOu: Long? = null,
     val dialogVisible: Boolean = true,
     val startedAt: Long = System.currentTimeMillis(),
     val completedAt: Long? = null,
@@ -58,12 +71,17 @@ data class PrivacyOperationState(
             PrivacyOperationStage.Failed,
         )
 
+    val compactRefreshInProgress: Boolean
+        get() = compactRefreshRequired &&
+            compactRefreshStage != PrivacyCompactRefreshStage.Confirmed &&
+            compactRefreshStage != PrivacyCompactRefreshStage.Failed
+
     val hasSubmittedTransaction: Boolean
         get() = stage in setOf(
             PrivacyOperationStage.Submitting,
             PrivacyOperationStage.Accepted,
             PrivacyOperationStage.Confirmed,
-        ) || !txHash.isNullOrBlank()
+        ) || !txHash.isNullOrBlank() || !compactRefreshTxHash.isNullOrBlank()
 }
 
 data class PrivacyEncryptedBalance(
@@ -80,6 +98,7 @@ data class PrivacyKeyCompatibility(
     val extendsLocalKey: Boolean,
     val legacyV1Profile: Boolean,
     val proofProfile: Boolean,
+    val secretProfile: Boolean = false,
 )
 
 data class PrivacyMigrationNetworkStatus(

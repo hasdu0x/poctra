@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
@@ -20,7 +21,26 @@ fun QrCodeView(
     text: String,
     modifier: Modifier = Modifier,
 ) {
-    val matrix = remember(text) { SimpleQrCode.encode(text) }
+    val matrix = remember(text) {
+        try { SimpleQrCode.encode(text) } catch (e: IllegalArgumentException) { null }
+    }
+    if (matrix == null) {
+        // Show a placeholder when the QR payload is too large
+        Box(
+            modifier = modifier
+                .clip(RoundedCornerShape(Radius.md))
+                .background(SurfaceStrong)
+                .padding(14.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            androidx.compose.material3.Text(
+                "QR too large",
+                color = TextSecondary,
+                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+            )
+        }
+        return
+    }
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(Radius.md))
@@ -99,8 +119,8 @@ private object SimpleQrCode {
         drawAlignment(modules, function, 30, 30)
 
         for (i in 0 until Size) {
-            setFunction(modules, function, 6, i, i % 2 == 0)
-            setFunction(modules, function, i, 6, i % 2 == 0)
+            if (!function[i][6]) setFunction(modules, function, 6, i, i % 2 == 0)
+            if (!function[6][i]) setFunction(modules, function, i, 6, i % 2 == 0)
         }
         setFunction(modules, function, 8, 29, true)
 

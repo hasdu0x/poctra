@@ -1,5 +1,6 @@
 ﻿package com.poctra.wallet.ui
 
+import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -222,6 +223,24 @@ private fun ConsumerPlainDetailScreen(
 }
 
 @Composable
+private fun HeaderTextAction(
+    label: String,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .height(44.dp)
+            .clip(RoundedCornerShape(Radius.sm))
+            .background(SurfaceMuted.copy(alpha = 0.78f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = Space.x4, vertical = Space.x2),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, color = SurfaceRaised, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@Composable
 private fun HeaderRefreshAction(
     loading: Boolean,
     onClick: () -> Unit,
@@ -263,6 +282,11 @@ private fun HeaderRefreshAction(
 private fun PortfolioPieCard(holdings: List<PortfolioHolding>) {
     val slices = portfolioSlices(holdings)
     val totalUsd = holdings.sumOf { it.valueUsd.coerceAtLeast(0.0) }
+    // Count unpriced assets: have balance but no USD value
+    val unpricedCount = holdings.count { holding ->
+        val hasBalance = holding.balance.replace(",", ".").toDoubleOrNull()?.let { it > 0.0 } == true
+        hasBalance && holding.valueUsd == 0.0
+    }
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Radius.md),
@@ -272,9 +296,17 @@ private fun PortfolioPieCard(holdings: List<PortfolioHolding>) {
             if (slices.isEmpty()) {
                 Text("No portfolio data yet", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
             } else {
-                Text("Total Estimate", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+                Text("Total Value Estimate", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
                 Spacer(Modifier.height(Space.x2))
                 Text(formatPortfolioUsd(totalUsd), color = TextTertiary, style = MaterialTheme.typography.titleLarge)
+                if (unpricedCount > 0) {
+                    Spacer(Modifier.height(Space.x2))
+                    Text(
+                        "+$unpricedCount asset${if (unpricedCount > 1) "s" else ""} without USD pricing",
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
                 Spacer(Modifier.height(Space.x6))
                 Canvas(modifier = Modifier.size(158.dp)) {
                     var startAngle = -90f
@@ -379,17 +411,45 @@ private fun normalizedPortfolioPercents(values: List<Double>): List<Int> {
     if (total <= 0.0) return values.map { 0 }
     val rawPercents = values.map { value -> if (value > 0.0) value / total * 100.0 else 0.0 }
     val floors = rawPercents.map { floor(it).toInt() }.toMutableList()
-    var remaining = (100 - floors.sum()).coerceAtLeast(0)
-    rawPercents
-        .mapIndexed { index, raw -> index to (raw - floors[index]) }
-        .filter { values[it.first] > 0.0 }
-        .sortedByDescending { it.second }
-        .forEach { (index, _) ->
-            if (remaining > 0) {
-                floors[index] += 1
-                remaining -= 1
-            }
+    
+    // Ensure minimum 1% for values > 0 to show in pie chart
+    rawPercents.forEachIndexed { index, raw ->
+        if (raw > 0.0 && floors[index] == 0) {
+            floors[index] = 1
         }
+    }
+    
+    var currentSum = floors.sum()
+    
+    // If forcing minimums pushed total over 100, take back from largest values
+    if (currentSum > 100) {
+        val excess = currentSum - 100
+        rawPercents
+            .mapIndexed { index, raw -> index to raw }
+            .filter { floors[it.first] > 1 }
+            .sortedByDescending { it.second }
+            .take(excess)
+            .forEach { (index, _) ->
+                floors[index] -= 1
+                currentSum -= 1
+            }
+    }
+    
+    // Distribute remaining to largest fractional parts
+    var remaining = 100 - currentSum
+    if (remaining > 0) {
+        rawPercents
+            .mapIndexed { index, raw -> index to (raw - floors[index]) }
+            .filter { values[it.first] > 0.0 }
+            .sortedByDescending { it.second }
+            .forEach { (index, _) ->
+                if (remaining > 0) {
+                    floors[index] += 1
+                    remaining -= 1
+                }
+            }
+    }
+    
     return floors
 }
 
@@ -444,18 +504,29 @@ private fun StatusBadge(status: String) {
 
 @Composable
 private fun BadgePill(text: String, color: Color) {
-    Text(
-        text = text,
+    Row(
         modifier = Modifier
             .clip(RoundedCornerShape(Radius.sm))
-            .background(color.copy(alpha = 0.14f))
+            .background(color.copy(alpha = 0.18f))
             .padding(horizontal = Space.x4, vertical = Space.x2),
-        color = color,
-        style = MaterialTheme.typography.labelSmall,
-        fontWeight = FontWeight.SemiBold,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-    )
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Space.x2),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(6.dp)
+                .clip(RoundedCornerShape(Radius.pill))
+                .background(color),
+        )
+        Text(
+            text = text,
+            color = color,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
 }
 
 private fun sourceColor(source: String): Color = when {
@@ -467,16 +538,25 @@ private fun sourceColor(source: String): Color = when {
 
 @Composable
 fun ActivityCenterScreen(controller: PoctraController) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     SettingsDetailScreen(
         title = "Activity Center",
         description = "All Octra, EVM, bridge, swap, and dApp connection events in one timeline.",
         glyph = Glyph.History,
         onBack = controller::closeActivityCenter,
         headerAction = {
-            HeaderRefreshAction(
-                loading = controller.activityCenterRefreshLoading,
-                onClick = controller::refreshActivityCenter,
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(Space.x2)) {
+                if (controller.unifiedActivity.isNotEmpty()) {
+                    HeaderTextAction(
+                        label = "CSV",
+                        onClick = { exportActivityCsv(context, controller.unifiedActivity) },
+                    )
+                }
+                HeaderRefreshAction(
+                    loading = controller.activityCenterRefreshLoading,
+                    onClick = controller::refreshActivityCenter,
+                )
+            }
         },
     ) {
         if (controller.activityCenterRefreshLoading && controller.unifiedActivity.isEmpty()) {
@@ -579,8 +659,17 @@ fun PaymentRequestScreen(controller: PoctraController) {
             EmptyPanel("Wallet is not ready")
             return@SettingsDetailScreen
         }
-        QrCodeView(text = current.uri)
-        Spacer(Modifier.height(Space.x7))
+        val uriTooLong = current.uri.encodeToByteArray().size > 106
+        if (uriTooLong) {
+            StateBanner(
+                text = "Payment request URI is too long for QR. Shorten amount or asset name, or use Copy Request.",
+                isError = true,
+                compact = true,
+            )
+        } else {
+            QrCodeView(text = current.uri)
+        }
+
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(Radius.md),
@@ -1396,4 +1485,31 @@ private fun statusTextColor(status: String): Color = when (status.lowercase()) {
 private fun formatActivityTime(timestamp: Long): String {
     if (timestamp <= 0L) return "-"
     return android.text.format.DateFormat.format("MMM d, HH:mm", timestamp).toString()
+}
+
+private fun exportActivityCsv(context: Context, items: List<UnifiedActivityItem>) {
+    val csv = buildString {
+        appendLine("Date,Title,Subtitle,Amount,Status,Source,TxHash")
+        items.forEach { item ->
+            val date = if (item.timestamp > 0L)
+                java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US)
+                    .format(java.util.Date(item.timestamp))
+            else "-"
+            appendLine("\"$date\",\"${item.title}\",\"${item.subtitle}\",\"${item.amount}\",\"${item.status}\",\"${item.source}\",\"${item.explorerUrl ?: ""}\"")
+        }
+    }
+    val filename = "poctra_activity_${System.currentTimeMillis()}.csv"
+    val file = java.io.File(context.getExternalFilesDir(null), filename)
+    file.writeText(csv)
+    val uri = androidx.core.content.FileProvider.getUriForFile(
+        context,
+        "${context.packageName}.fileprovider",
+        file,
+    )
+    val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+        type = "text/csv"
+        putExtra(android.content.Intent.EXTRA_STREAM, uri)
+        addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(android.content.Intent.createChooser(intent, "Export Activity CSV"))
 }

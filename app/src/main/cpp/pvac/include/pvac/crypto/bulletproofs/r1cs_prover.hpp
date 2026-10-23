@@ -33,7 +33,7 @@ public:
     void reserve(size_t committed, size_t gates, size_t constraints) {
         committed_.reserve(std::min(committed, R1CS_MAX_COMMITTED));
         gates_.reserve(std::min(gates, R1CS_MAX_GATES));
-        constraints_.reserve(std::min(constraints, R1CS_MAX_CONSTRAINTS));
+        constraints_.reserve(std::min(constraints, R1CS_KEY_SWITCH_MAX_CONSTRAINTS));
     }
 
     Variable commit(const Scalar& value, const Scalar& blinding) {
@@ -92,7 +92,10 @@ public:
         return std::move(constraints_);
     }
 
-    R1CSProof prove(Transcript& transcript) {
+    R1CSProof prove(
+        Transcript& transcript,
+        R1CSLimitProfile profile = R1CSLimitProfile::Default
+    ) {
 #if defined(PVAC_PROFILE)
         using ProfileClock = std::chrono::steady_clock;
         const auto profile_started = ProfileClock::now();
@@ -114,8 +117,9 @@ public:
         const size_t m = committed_.size();
         const size_t q = constraints_.size();
         const size_t terms = constraint_terms();
+        const size_t max_constraints = r1cs_constraint_limit(profile);
         if (n > R1CS_MAX_GATES || m > R1CS_MAX_COMMITTED ||
-            q > R1CS_MAX_CONSTRAINTS || terms > R1CS_MAX_TERMS)
+            q > max_constraints || terms > R1CS_MAX_TERMS)
             throw std::runtime_error("pvac: r1cs prover limits exceeded");
         const size_t N = next_power_of_2(n > 0 ? n : 1);
 #if defined(PVAC_PROFILE)
@@ -149,22 +153,39 @@ public:
         Scalar alpha = sc_random(), beta = sc_random(), rho = sc_random();
 
         const auto& gen = generators();
-        gen.precompute(N);
+        const auto generator_snapshot = gen.snapshot(N);
 #if defined(PVAC_PROFILE)
         profile_mark("generator_precompute");
 #endif
 
-        proof.A_I1 = msm_GH_blind(aL, aR, alpha, N);
+        proof.A_I1 = msm_GH_blind(
+            aL,
+            aR,
+            alpha,
+            N,
+            *generator_snapshot
+        );
 #if defined(PVAC_PROFILE)
         profile_mark("commit_A_I");
 #endif
 
-        proof.A_O1 = msm_G_blind(aO, beta, N);
+        proof.A_O1 = msm_G_blind(
+            aO,
+            beta,
+            N,
+            *generator_snapshot
+        );
 #if defined(PVAC_PROFILE)
         profile_mark("commit_A_O");
 #endif
 
-        proof.S1 = msm_GH_blind(sL, sR, rho, N);
+        proof.S1 = msm_GH_blind(
+            sL,
+            sR,
+            rho,
+            N,
+            *generator_snapshot
+        );
 #if defined(PVAC_PROFILE)
         profile_mark("commit_S");
 #endif
@@ -276,8 +297,14 @@ public:
         Scalar w_ch = transcript.challenge_scalar("w");
         ExtPoint Q = ext_scalarmul(pedersen_B_ext(), w_ch);
 
-        auto Gv = gen.G_ext_vec(N);
-        auto Hv = gen.H_ext_vec(N);
+        std::vector<ExtPoint> Gv(
+            generator_snapshot->G_ext.begin(),
+            generator_snapshot->G_ext.begin() + N
+        );
+        std::vector<ExtPoint> Hv(
+            generator_snapshot->H_ext.begin(),
+            generator_snapshot->H_ext.begin() + N
+        );
 
 #if defined(PVAC_PROFILE)
         profile_mark("scalar_polynomials");
@@ -338,29 +365,79 @@ private:
 
     RistrettoPoint msm_GH_blind(
         const std::vector<Scalar>& a, const std::vector<Scalar>& b,
-        const Scalar& blind, size_t N
+        const Scalar& blind, size_t N,
+        const GeneratorTable::Snapshot& generators
     ) const {
-        const auto& gen = generators();
-        auto G_ext = gen.G_ext_vec(N);
-        auto H_ext = gen.H_ext_vec(N);
-        std::vector<Scalar> sc; std::vector<ExtPoint> pt;
-        sc.reserve(2*N+1); pt.reserve(2*N+1);
-        for (size_t i=0;i<N;i++) { sc.push_back(a[i]); pt.push_back(G_ext[i]); }
-        for (size_t i=0;i<N;i++) { sc.push_back(b[i]); pt.push_back(H_ext[i]); }
-        sc.push_back(blind); pt.push_back(pedersen_B_blinding_ext());
-        return multi_scalar_mul_ext(sc, pt);
+#if defined(PVAC_COPY_GENERATOR_INPUTS)
+        std::vector<Scalar> scalars;
+        scalars.reserve(2 * N + 1);
+        scalars.insert(scalars.end(), a.begin(), a.begin() + N);
+        scalars.insert(scalars.end(), b.begin(), b.begin() + N);
+        scalars.push_back(blind);
+
+        std::vector<ExtPoint> points;
+        points.reserve(2 * N + 1);
+        points.insert(
+            points.end(),
+            generators.G_ext.begin(),
+            generators.G_ext.begin() + N
+        );
+        points.insert(
+            points.end(),
+            generators.H_ext.begin(),
+            generators.H_ext.begin() + N
+        );
+        points.push_back(pedersen_B_blinding_ext());
+        return multi_scalar_mul_ext(scalars, points);
+#else
+        return multi_scalar_mul_ext_indexed(
+            2 * N + 1,
+            [&](size_t i) -> const Scalar& {
+                if (i < N) return a[i];
+                if (i < 2 * N) return b[i - N];
+                return blind;
+            },
+            [&](size_t i) -> const ExtPoint& {
+                if (i < N) return generators.G_ext[i];
+                if (i < 2 * N) return generators.H_ext[i - N];
+                return pedersen_B_blinding_ext();
+            }
+        );
+#endif
     }
 
     RistrettoPoint msm_G_blind(
-        const std::vector<Scalar>& a, const Scalar& blind, size_t N
+        const std::vector<Scalar>& a, const Scalar& blind, size_t N,
+        const GeneratorTable::Snapshot& generators
     ) const {
-        const auto& gen = generators();
-        auto G_ext = gen.G_ext_vec(N);
-        std::vector<Scalar> sc; std::vector<ExtPoint> pt;
-        sc.reserve(N+1); pt.reserve(N+1);
-        for (size_t i=0;i<N;i++) { sc.push_back(a[i]); pt.push_back(G_ext[i]); }
-        sc.push_back(blind); pt.push_back(pedersen_B_blinding_ext());
-        return multi_scalar_mul_ext(sc, pt);
+#if defined(PVAC_COPY_GENERATOR_INPUTS)
+        std::vector<Scalar> scalars;
+        scalars.reserve(N + 1);
+        scalars.insert(scalars.end(), a.begin(), a.begin() + N);
+        scalars.push_back(blind);
+
+        std::vector<ExtPoint> points;
+        points.reserve(N + 1);
+        points.insert(
+            points.end(),
+            generators.G_ext.begin(),
+            generators.G_ext.begin() + N
+        );
+        points.push_back(pedersen_B_blinding_ext());
+        return multi_scalar_mul_ext(scalars, points);
+#else
+        return multi_scalar_mul_ext_indexed(
+            N + 1,
+            [&](size_t i) -> const Scalar& {
+                return i < N ? a[i] : blind;
+            },
+            [&](size_t i) -> const ExtPoint& {
+                return i < N
+                    ? generators.G_ext[i]
+                    : pedersen_B_blinding_ext();
+            }
+        );
+#endif
     }
 };
 

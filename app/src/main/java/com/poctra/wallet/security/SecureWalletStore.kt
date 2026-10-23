@@ -45,6 +45,8 @@ class SecureWalletStore(context: Context) {
     fun hasWallet(): Boolean = prefs.contains(KeyEncryptedWallet) && currentMethod() != null
 
     fun currentMethod(): SecurityMethod? = SecurityMethod.fromStorage(prefs.getString(KeyMethod, null))
+    
+    fun hasPinData(): Boolean = prefs.contains(KeySalt)
 
     fun addressPreview(): String? = prefs.getString(KeyAddress, null)
 
@@ -229,6 +231,8 @@ class SecureWalletStore(context: Context) {
             .put("salt", prefs.getString(KeySalt, null))
             .put("pinKdfVersion", prefs.getInt(KeyPinKdfVersion, LegacyPinKdfVersion))
             .put("createdAt", prefs.getLong(KeyCreatedAt, 0L))
+            .put("portability", "device-bound")
+            .put("restoreNote", "This backup is encrypted with a key bound to this device and cannot be restored on another device or after a factory reset. Use your seed phrase for portable recovery.")
 
         require(!backup.isNull("encryptedWallet")) { "No encrypted wallet data to back up." }
         return backup.toString(2)

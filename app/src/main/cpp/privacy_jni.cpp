@@ -23,6 +23,10 @@
 namespace {
 
 constexpr const char* LOG_TAG = "PoctraPrivacy";
+// A Decrypt or Stealth spend appends a base layer to the remaining balance.
+// Keep this synchronized with webcli's private_spend_refresh_base_layers.
+constexpr size_t PRIVATE_SPEND_REFRESH_BASE_LAYERS = 4;
+constexpr size_t MaxCipherBytes = 1'048'576;
 
 std::mutex engine_mutex;
 pvac_params params = nullptr;
@@ -58,8 +62,24 @@ bool hardware_supported() {
 #endif
 }
 
+// Wipe all sensitive key material from the serialized representation of the secret key
+// before releasing the heap allocation. pvac_serialize_seckey produces a byte buffer
+// containing the scalar, PRF state, and vector-backed fields; secure_zero overwrites it
+// using a volatile write loop that is resistant to compiler dead-store elimination.
+// This ensures that no secret bytes remain in freed heap pages after the call returns.
+void wipe_and_free_seckey(pvac_seckey sk) {
+    if (sk == nullptr) return;
+    size_t length = 0;
+    uint8_t* raw = pvac_serialize_seckey(sk, &length);
+    if (raw != nullptr && length > 0) {
+        secure_zero(raw, length);
+        pvac_free_bytes(raw);
+    }
+    pvac_free_seckey(sk);
+}
+
 void clear_engine_locked() {
-    if (secret_key != nullptr) pvac_free_seckey(secret_key);
+    if (secret_key != nullptr) wipe_and_free_seckey(secret_key);
     if (public_key != nullptr) pvac_free_pubkey(public_key);
     if (params != nullptr) pvac_free_params(params);
     secret_key = nullptr;
@@ -75,10 +95,11 @@ void require_initialized() {
     }
 }
 
-std::vector<uint8_t> read_bytes(JNIEnv* env, jbyteArray input, size_t expected = 0) {
+std::vector<uint8_t> read_bytes(JNIEnv* env, jbyteArray input, size_t expected = 0, size_t max_size = 0) {
     if (input == nullptr) throw std::invalid_argument("Missing byte array");
     const auto length = static_cast<size_t>(env->GetArrayLength(input));
     if (expected != 0 && length != expected) throw std::invalid_argument("Invalid byte array length");
+    if (max_size != 0 && length > max_size) throw std::invalid_argument("Input byte array exceeds maximum allowed size");
     std::vector<uint8_t> bytes(length);
     if (length != 0) {
         env->GetByteArrayRegion(input, 0, static_cast<jsize>(length), reinterpret_cast<jbyte*>(bytes.data()));
@@ -243,15 +264,16 @@ Java_com_poctra_wallet_privacy_NativePvacBridge_nativeDecrypt(
     jbyteArray cipher_array
 ) {
     return guard(env, [&]() -> jstring {
-        const auto raw = read_bytes(env, cipher_array);
+        const auto raw = read_bytes(env, cipher_array, 0, MaxCipherBytes);
         std::lock_guard<std::mutex> lock(engine_mutex);
         require_initialized();
         pvac_cipher cipher = pvac_deserialize_cipher(raw.data(), raw.size());
         if (cipher == nullptr) throw std::invalid_argument("Encrypted balance is invalid");
         uint64_t low = 0;
         uint64_t high = 0;
-        pvac_dec_value_fp(public_key, secret_key, cipher, &low, &high);
+        const int dec_ok = pvac_dec_value_fp(public_key, secret_key, cipher, &low, &high);
         pvac_free_cipher(cipher);
+        if (dec_ok == 0) throw std::runtime_error("Decryption failed: cipher may be malformed or key mismatch");
         if (high != 0) throw std::runtime_error("Encrypted balance is outside the supported range");
         const std::string value = std::to_string(low);
         return env->NewStringUTF(value.c_str());
@@ -267,7 +289,7 @@ Java_com_poctra_wallet_privacy_NativePvacBridge_nativeDecryptWithPublicKey(
     jboolean legacy_profile
 ) {
     return guard(env, [&]() -> jstring {
-        const auto cipher_raw = read_bytes(env, cipher_array);
+        const auto cipher_raw = read_bytes(env, cipher_array, 0, MaxCipherBytes);
         const auto key_raw = read_bytes(env, public_key_array);
         std::lock_guard<std::mutex> lock(engine_mutex);
         require_initialized();
@@ -333,6 +355,7 @@ Java_com_poctra_wallet_privacy_NativePvacBridge_nativeKeyCompatibility(
         if (pvac_pubkey_is_key_bound_extension(remote_key, public_key) == 1) flags |= 1;
         if (pvac_pubkey_is_legacy_v1_profile(remote_key, public_key) == 1) flags |= 2;
         if (pvac_pubkey_is_proof_profile(remote_key, public_key) == 1) flags |= 4;
+        if (pvac_pubkey_matches_secret_profile(remote_key, public_key, secret_key) == 1) flags |= 8;
         pvac_free_pubkey(remote_key);
         return flags;
     });
@@ -544,7 +567,7 @@ Java_com_poctra_wallet_privacy_NativePvacBridge_nativeBuildDecrypt(
         if (amount <= 0 || current_balance < amount) {
             throw std::invalid_argument("Insufficient encrypted balance");
         }
-        auto current_cipher_raw = read_bytes(env, current_cipher_array);
+        auto current_cipher_raw = read_bytes(env, current_cipher_array, 0, MaxCipherBytes);
         auto random_seed = read_bytes(env, random_seed_array, 32);
         auto blinding = read_bytes(env, blinding_array, 32);
         auto range_blinding = read_bytes(env, range_blinding_array, 32);
@@ -577,6 +600,12 @@ Java_com_poctra_wallet_privacy_NativePvacBridge_nativeBuildDecrypt(
             current_cipher = pvac_deserialize_cipher(current_cipher_raw.data(), current_cipher_raw.size());
             if (amount_cipher == nullptr || current_cipher == nullptr) {
                 throw std::runtime_error("Unable to decode encrypted balance");
+            }
+            if (pvac_cipher_base_layer_count(current_cipher) >=
+                PRIVATE_SPEND_REFRESH_BASE_LAYERS) {
+                throw std::runtime_error(
+                    "Encrypted balance compact refresh is required before Decrypt"
+                );
             }
             new_balance_cipher = pvac_ct_sub(public_key, current_cipher, amount_cipher);
             if (new_balance_cipher == nullptr) throw std::runtime_error("Unable to compute remaining balance");
@@ -617,7 +646,16 @@ Java_com_poctra_wallet_privacy_NativePvacBridge_nativeBuildDecrypt(
                 ) == 0) {
                 throw std::runtime_error("Local Decrypt proof verification failed");
             }
-            if (pvac_verify_bound_range(public_key, new_balance_cipher, range_proof) == 0) {
+            const auto balance_commitment = pedersen_commit(
+                static_cast<uint64_t>(current_balance - amount),
+                range_blinding.data()
+            );
+            if (pvac_verify_bound_range_commitment(
+                    public_key,
+                    new_balance_cipher,
+                    range_proof,
+                    balance_commitment.data()
+                ) == 0) {
                 throw std::runtime_error("Encrypted balance refresh is required before Decrypt");
             }
 
@@ -666,7 +704,7 @@ Java_com_poctra_wallet_privacy_NativePvacBridge_nativeBuildStealth(
         if (amount <= 0 || current_balance < amount) {
             throw std::invalid_argument("Insufficient encrypted balance");
         }
-        auto current_cipher_raw = read_bytes(env, current_cipher_array);
+        auto current_cipher_raw = read_bytes(env, current_cipher_array, 0, MaxCipherBytes);
         auto random_seed = read_bytes(env, random_seed_array, 32);
         auto blinding = read_bytes(env, blinding_array, 32);
         auto delta_range_blinding = read_bytes(env, delta_range_blinding_array, 32);
@@ -703,6 +741,12 @@ Java_com_poctra_wallet_privacy_NativePvacBridge_nativeBuildStealth(
             current_cipher = pvac_deserialize_cipher(current_cipher_raw.data(), current_cipher_raw.size());
             if (delta_cipher == nullptr || current_cipher == nullptr) {
                 throw std::runtime_error("Unable to decode encrypted balance");
+            }
+            if (pvac_cipher_base_layer_count(current_cipher) >=
+                PRIVATE_SPEND_REFRESH_BASE_LAYERS) {
+                throw std::runtime_error(
+                    "Encrypted balance compact refresh is required before Stealth"
+                );
             }
             new_balance_cipher = pvac_ct_sub(public_key, current_cipher, delta_cipher);
             if (new_balance_cipher == nullptr) throw std::runtime_error("Unable to compute remaining balance");
@@ -763,8 +807,26 @@ Java_com_poctra_wallet_privacy_NativePvacBridge_nativeBuildStealth(
             );
             if (zero_proof == nullptr) throw std::runtime_error("Unable to create Stealth zero proof");
             log_stage("zero_proof_ready");
-            if (pvac_verify_bound_range(public_key, delta_cipher, delta_range_proof) == 0 ||
-                pvac_verify_bound_range(public_key, new_balance_cipher, balance_range_proof) == 0) {
+            const auto delta_range_commitment = pedersen_commit(
+                static_cast<uint64_t>(amount),
+                delta_range_blinding.data()
+            );
+            const auto balance_range_commitment = pedersen_commit(
+                static_cast<uint64_t>(current_balance - amount),
+                balance_range_blinding.data()
+            );
+            if (pvac_verify_bound_range_commitment(
+                    public_key,
+                    delta_cipher,
+                    delta_range_proof,
+                    delta_range_commitment.data()
+                ) == 0 ||
+                pvac_verify_bound_range_commitment(
+                    public_key,
+                    new_balance_cipher,
+                    balance_range_proof,
+                    balance_range_commitment.data()
+                ) == 0) {
                 throw std::runtime_error("Encrypted balance refresh is required before Stealth");
             }
             if (pvac_verify_zero_bound(
@@ -817,7 +879,7 @@ Java_com_poctra_wallet_privacy_NativePvacBridge_nativeBuildMigration(
         const bool expose_blinding = mode == legacy_public_mode || mode == legacy_zero_mode;
         auto current_cipher_raw = current_cipher_array == nullptr
             ? std::vector<uint8_t>{}
-            : read_bytes(env, current_cipher_array);
+            : read_bytes(env, current_cipher_array, 0, MaxCipherBytes);
         auto old_key_raw = old_public_key_array == nullptr
             ? std::vector<uint8_t>{}
             : read_bytes(env, old_public_key_array);
@@ -851,7 +913,11 @@ Java_com_poctra_wallet_privacy_NativePvacBridge_nativeBuildMigration(
                 if (current_cipher == nullptr || old_public_key == nullptr) {
                     throw std::invalid_argument("Current encrypted balance key material is invalid");
                 }
-                if (pvac_pubkey_is_proof_profile(old_public_key, public_key) != 1) {
+                if (pvac_pubkey_matches_secret_profile(
+                        old_public_key,
+                        public_key,
+                        secret_key
+                    ) != 1) {
                     throw std::invalid_argument("Registered Privacy key uses an incompatible proof profile");
                 }
                 int64_t old_amount = 0;
@@ -872,7 +938,7 @@ Java_com_poctra_wallet_privacy_NativePvacBridge_nativeBuildMigration(
                 blinding.data()
             );
             if (key_bound) {
-                old_proof = pvac_make_zero_proof_bound(
+                old_proof = pvac_make_zero_proof_bound_key_switch(
                     old_public_key,
                     secret_key,
                     current_cipher,
@@ -890,7 +956,7 @@ Java_com_poctra_wallet_privacy_NativePvacBridge_nativeBuildMigration(
             if ((key_bound && old_proof == nullptr) || new_proof == nullptr) {
                 throw std::runtime_error("Unable to prove encrypted balance migration");
             }
-            if (key_bound && pvac_verify_zero_bound(
+            if (key_bound && pvac_verify_zero_bound_key_switch(
                     old_public_key,
                     current_cipher,
                     old_proof,

@@ -3,6 +3,7 @@
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
@@ -33,6 +35,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,6 +43,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -52,6 +57,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -80,15 +88,21 @@ fun PoctraButton(
 ) {
     val shape = RoundedCornerShape(Radius.md)
     val visualCompact = !fullHeight && (compact || variant != ButtonVariant.Primary)
-    val buttonHeight = if (visualCompact) 44.dp else 56.dp
+    val buttonHeight = if (visualCompact) 48.dp else 56.dp
     val keyEdgeHeight = 0.dp
     val contentIconSize = if (visualCompact) 16.dp else 18.dp
     val contentGap = if (visualCompact) Space.x3 else Space.x4
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
+    val view = LocalView.current
+    LaunchedEffect(pressed) {
+        if (pressed && enabled && !loading) {
+            view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+        }
+    }
     val pressScale by animateFloatAsState(
-        targetValue = if (pressed && enabled && !loading) 0.982f else 1f,
-        animationSpec = tween(130, easing = FastOutSlowInEasing),
+        targetValue = if (pressed && enabled && !loading) 0.975f else 1f,
+        animationSpec = tween(100, easing = FastOutSlowInEasing),
         label = "poctraButtonPressScale",
     )
     val buttonContentColor = when (variant) {
@@ -168,7 +182,7 @@ fun PoctraButton(
                     .fillMaxWidth()
                     .height(buttonHeight - keyEdgeHeight),
                 shape = shape,
-                border = null,
+                border = BorderStroke(1.dp, BorderLine),
                 colors = ButtonDefaults.outlinedButtonColors(
                     containerColor = SurfaceMuted,
                     contentColor = TextTertiary,
@@ -255,14 +269,15 @@ fun PoctraTextField(
             colors = OutlinedTextFieldDefaults.colors(
                 focusedTextColor = TextTertiary,
                 unfocusedTextColor = TextTertiary,
-                focusedContainerColor = SurfaceStrong,
-                unfocusedContainerColor = SurfaceStrong,
-                focusedBorderColor = focusColor.copy(alpha = 0.62f),
-                unfocusedBorderColor = BorderLine.copy(alpha = 0.42f),
+                focusedContainerColor = SurfaceMuted,
+                unfocusedContainerColor = SurfaceMuted,
+                focusedBorderColor = focusColor,
+                unfocusedBorderColor = BorderLine,
                 focusedLabelColor = focusColor,
                 unfocusedLabelColor = TextSecondary,
                 cursorColor = focusColor,
-                errorBorderColor = ErrorRed.copy(alpha = 0.68f),
+                errorBorderColor = ErrorRed,
+                errorContainerColor = SurfaceMuted,
                 errorLabelColor = ErrorRed,
                 errorSupportingTextColor = ErrorRed,
                 focusedLeadingIconColor = focusColor,
@@ -359,6 +374,103 @@ fun PinField(
 }
 
 @Composable
+fun PerDigitPinInput(
+    onComplete: (String) -> Unit,
+    error: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    var pin by remember { mutableStateOf("") }
+    var shakeOffset by remember { mutableStateOf(0f) }
+    val focusRequester = remember { FocusRequester() }
+    val animatedShake by animateFloatAsState(
+        targetValue = shakeOffset,
+        animationSpec = tween(durationMillis = 50, easing = FastOutSlowInEasing),
+        finishedListener = { if (shakeOffset != 0f) shakeOffset = 0f },
+        label = "pin-shake"
+    )
+
+    LaunchedEffect(pin) {
+        if (pin.length == 6) {
+            onComplete(pin)
+        }
+    }
+
+    LaunchedEffect(error) {
+        if (error) {
+            // Shake animation: -12 -> 12 -> -8 -> 8 -> 0
+            shakeOffset = -12f
+            kotlinx.coroutines.delay(50)
+            shakeOffset = 12f
+            kotlinx.coroutines.delay(50)
+            shakeOffset = -8f
+            kotlinx.coroutines.delay(50)
+            shakeOffset = 8f
+            kotlinx.coroutines.delay(50)
+            shakeOffset = 0f
+            pin = ""
+        }
+    }
+
+    // Auto-focus keyboard on appear
+    LaunchedEffect(Unit) {
+        focusRequester.requestFocus()
+    }
+
+    Column(
+        modifier = modifier.offset(x = animatedShake.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        // Visual: 6 circles
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(Space.x4),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            repeat(6) { index ->
+                PinCircle(filled = index < pin.length, error = error)
+            }
+        }
+
+        // Hidden TextField for keyboard input
+        Box(modifier = Modifier.size(0.dp)) {
+            androidx.compose.foundation.text.BasicTextField(
+                value = pin,
+                onValueChange = { raw ->
+                    val filtered = raw.filter(Char::isDigit).take(6)
+                    pin = filtered
+                },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                modifier = Modifier
+                    .size(1.dp)
+                    .focusRequester(focusRequester)
+                    .semantics {
+                        contentDescription = "PIN input, ${pin.length} of 6 digits entered"
+                    },
+            )
+        }
+    }
+}
+
+@Composable
+private fun PinCircle(
+    filled: Boolean,
+    error: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val color = when {
+        error -> ErrorRed
+        filled -> TextTertiary
+        else -> SurfaceRaised
+    }
+    
+    Box(
+        modifier = modifier
+            .size(16.dp)
+            .clip(CircleShape)
+            .background(color),
+    )
+}
+
+@Composable
 fun StateBanner(
     text: String,
     modifier: Modifier = Modifier,
@@ -366,12 +478,7 @@ fun StateBanner(
     compact: Boolean = false,
     solid: Boolean = false,
 ) {
-    val normalized = text.lowercase()
-    val color = when {
-        normalized.contains("timeout") || normalized.contains("timed out") -> Warning
-        isError -> ErrorRed
-        else -> InfoBlue
-    }
+    val color = statusMessageColor(text, isError)
     val containerModifier = if (solid) {
         modifier
             .clip(RoundedCornerShape(Radius.sm))
@@ -403,6 +510,20 @@ fun StateBanner(
     }
 }
 
+internal fun isWarningStatusMessage(message: String): Boolean {
+    val normalized = message.lowercase()
+    return normalized.contains("timeout") ||
+        normalized.contains("timed out") ||
+        normalized.contains("still pending") ||
+        normalized.contains("pending too long")
+}
+
+internal fun statusMessageColor(message: String, isError: Boolean = true): Color = when {
+    isWarningStatusMessage(message) -> Warning
+    isError -> ErrorRed
+    else -> InfoBlue
+}
+
 @Composable
 fun SecurityOptionCard(
     title: String,
@@ -420,19 +541,19 @@ fun SecurityOptionCard(
             .background(if (focused) SurfaceRaised.copy(alpha = 0.10f) else if (enabled) SurfaceStrong else SurfaceMuted)
             .clickable(enabled = enabled, onClick = onClick)
             .onFocusChanged { focused = it.isFocused }
-            .padding(Space.x7),
+            .padding(horizontal = Space.x7, vertical = Space.x8),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
             modifier = Modifier
-                .size(44.dp)
+                .size(48.dp)
                 .clip(RoundedCornerShape(Radius.sm))
                 .background(if (enabled) SurfaceRaised.copy(alpha = 0.18f) else SurfaceMuted),
             contentAlignment = Alignment.Center,
         ) {
             GlyphIcon(glyph = glyph, modifier = Modifier.size(24.dp), color = if (enabled) SurfaceRaised else TextSecondary)
         }
-        Spacer(Modifier.width(Space.x6))
+        Spacer(Modifier.width(Space.x7))
         Column(Modifier.weight(1f)) {
             Text(title, color = if (enabled) TextTertiary else TextSecondary, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(Space.x2))
@@ -448,14 +569,14 @@ fun IconCircleButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
-    buttonSize: Dp = 44.dp,
+    buttonSize: Dp = 48.dp,
     iconSize: Dp = 22.dp,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
-        targetValue = if (pressed && enabled) 0.94f else 1f,
-        animationSpec = tween(120, easing = FastOutSlowInEasing),
+        targetValue = if (pressed && enabled) 0.92f else 1f,
+        animationSpec = tween(100, easing = FastOutSlowInEasing),
         label = "iconButtonScale",
     )
     IconButton(
@@ -671,12 +792,12 @@ fun TokenRow(token: TokenBalance, modifier: Modifier = Modifier) {
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
     ) {
         Row(
-            modifier = Modifier.padding(Space.x7),
+            modifier = Modifier.padding(horizontal = Space.x7, vertical = Space.x6),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(
                 modifier = Modifier
-                    .size(42.dp)
+                    .size(44.dp)
                     .clip(RoundedCornerShape(Radius.md))
                     .background(SurfaceRaised.copy(alpha = 0.16f)),
                 contentAlignment = Alignment.Center,
@@ -724,12 +845,12 @@ fun OctraTokenRow(
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
     ) {
         Row(
-            modifier = Modifier.padding(Space.x7),
+            modifier = Modifier.padding(horizontal = Space.x7, vertical = Space.x6),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(
                 modifier = Modifier
-                    .size(42.dp)
+                    .size(44.dp)
                     .clip(RoundedCornerShape(Radius.md))
                     .background(SurfaceMuted),
                 contentAlignment = Alignment.Center,
@@ -773,12 +894,12 @@ fun DAppRow(
         colors = CardDefaults.cardColors(containerColor = SurfaceStrong),
     ) {
         Column(
-            modifier = Modifier.padding(Space.x7),
+            modifier = Modifier.padding(horizontal = Space.x7, vertical = Space.x8),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     modifier = Modifier
-                        .size(42.dp)
+                        .size(44.dp)
                         .clip(RoundedCornerShape(Radius.md))
                         .background(SurfaceMuted),
                     contentAlignment = Alignment.Center,

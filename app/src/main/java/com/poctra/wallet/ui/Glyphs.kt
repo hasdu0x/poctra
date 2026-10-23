@@ -36,6 +36,7 @@ enum class Glyph(@DrawableRes val resId: Int) {
     Overview(R.drawable.ic_overview),
     Browser(R.drawable.ic_browser),
     External(R.drawable.ic_external),
+    Expand(R.drawable.ic_expand),
     Go(R.drawable.ic_go),
     AddressBook(R.drawable.ic_address_book),
     Wifi(R.drawable.ic_wifi),

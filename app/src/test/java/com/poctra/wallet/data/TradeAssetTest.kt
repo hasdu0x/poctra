@@ -52,7 +52,7 @@ class TradeAssetTest {
     }
 
     @Test
-    fun `mainnet native and ERC20 assets can form flexible pairs`() {
+    fun `mainnet assets allow direct pairs but reject the two hop wOCT USDT pair`() {
         val custom = TradeAsset(
             symbol = "EXM",
             displayName = "Example",
@@ -63,8 +63,10 @@ class TradeAssetTest {
 
         assertTrue(TradeAsset.ETH.canPairWith(TradeAsset.USDT))
         assertTrue(TradeAsset.USDT.canPairWith(TradeAsset.ETH))
-        assertTrue(TradeAsset.ETH.canPairWith(custom))
-        assertTrue(custom.canPairWith(TradeAsset.WOCT))
+        assertFalse(TradeAsset.ETH.canPairWith(custom))
+        assertFalse(custom.canPairWith(TradeAsset.WOCT))
+        assertFalse(TradeAsset.WOCT.canPairWith(TradeAsset.USDT))
+        assertFalse(TradeAsset.USDT.canPairWith(TradeAsset.WOCT))
         assertFalse(custom.canPairWith(custom))
         assertFalse(custom.canPairWith(custom.copy(chainId = 11155111L)))
     }

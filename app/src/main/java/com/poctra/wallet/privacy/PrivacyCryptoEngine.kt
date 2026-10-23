@@ -103,6 +103,7 @@ class PrivacyCryptoEngine : Closeable {
                 extendsLocalKey = flags and 1 != 0,
                 legacyV1Profile = flags and 2 != 0,
                 proofProfile = flags and 4 != 0,
+                secretProfile = flags and 8 != 0,
             )
         } finally {
             publicKey.fill(0)

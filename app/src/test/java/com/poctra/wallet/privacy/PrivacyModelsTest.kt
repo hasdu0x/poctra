@@ -23,6 +23,36 @@ class PrivacyModelsTest {
         assertTrue(operation(PrivacyOperationStage.Failed).isTerminal)
     }
 
+    @Test
+    fun compactRefreshHashMarksOperationAsSubmitted() {
+        val operation = operation(PrivacyOperationStage.Preparing).copy(
+            compactRefreshRequired = true,
+            compactRefreshStage = PrivacyCompactRefreshStage.Accepted,
+            compactRefreshTxHash = "compact-hash",
+        )
+
+        assertTrue(operation.hasSubmittedTransaction)
+    }
+
+    @Test
+    fun mainOperationPausesWhileCompactRefreshIsInProgress() {
+        val waiting = operation(PrivacyOperationStage.Preparing).copy(
+            compactRefreshRequired = true,
+            compactRefreshStage = PrivacyCompactRefreshStage.Accepted,
+        )
+
+        assertTrue(waiting.compactRefreshInProgress)
+        assertTrue(waiting.copy(compactRefreshStage = null).compactRefreshInProgress)
+        assertFalse(
+            waiting.copy(compactRefreshStage = PrivacyCompactRefreshStage.Confirmed)
+                .compactRefreshInProgress,
+        )
+        assertFalse(
+            waiting.copy(compactRefreshStage = PrivacyCompactRefreshStage.Failed)
+                .compactRefreshInProgress,
+        )
+    }
+
     private fun operation(stage: PrivacyOperationStage) = PrivacyOperationState(
         id = 1L,
         type = PrivacyOperationType.Encrypt,

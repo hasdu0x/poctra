@@ -41,7 +41,7 @@ android {
 
     defaultConfig {
         applicationId = "com.poctra.wallet"
-        minSdk = 23
+        minSdk = 29
         targetSdk = 34
         versionCode = 2
         versionName = "1.0.0"
@@ -152,6 +152,7 @@ tasks.matching {
     it.name in setOf("assembleRelease", "bundleRelease", "installRelease")
 }.configureEach {
     dependsOn(verifyReleaseSigning)
+    dependsOn("verifyReleaseSecurity")
 }
 
 dependencies {
@@ -165,6 +166,9 @@ dependencies {
     implementation("org.bouncycastle:bcprov-jdk18on:1.77")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0")
     implementation("com.google.android.play:integrity:1.6.0")
+    
+    // MPAndroidChart for advanced trading charts
+    implementation("com.github.PhilJay:MPAndroidChart:v3.1.0")
 
     testImplementation("junit:junit:4.13.2")
 

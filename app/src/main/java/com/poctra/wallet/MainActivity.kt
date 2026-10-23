@@ -1,5 +1,7 @@
 package com.poctra.wallet
 
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.os.Build
 import android.os.SystemClock
@@ -10,6 +12,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -24,6 +27,9 @@ class MainActivity : ComponentActivity() {
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
         setContent {
             val controller = remember { PoctraController(this) }
+            LaunchedEffect(Unit) {
+                intent?.data?.let { uri -> controller.handleDeepLink(uri) }
+            }
             DisposableEffect(controller) {
                 val callback = object : OnBackPressedCallback(true) {
                     override fun handleOnBackPressed() {
@@ -60,10 +66,15 @@ class MainActivity : ComponentActivity() {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) window.setHideOverlayWindows(false)
                 }
             }
-            PoctraTheme(darkTheme = controller.darkMode) {
+            PoctraTheme(darkTheme = true) {
                 PoctraApp(activity = this, controller = controller)
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
     }
 
     private fun keepNativeLaunchAnimationVisible() {

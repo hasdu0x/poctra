@@ -1,9 +1,14 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
 #include <vector>
 #include <cassert>
 #include <cstdlib>
+#if defined(PVAC_PROFILE)
+#include <chrono>
+#include <iostream>
+#endif
 #include "transcript.hpp"
 #include "generators.hpp"
 #include "../../core/parallel.hpp"
@@ -40,7 +45,7 @@ inline size_t msm_window_for_size(size_t n) {
     return 9;
 }
 
-inline ExtPoint two_scalar_mul(
+inline ExtPoint two_scalar_mul_radix2(
     const Scalar& a,
     const ExtPoint& P,
     const Scalar& b,
@@ -95,26 +100,216 @@ inline ExtPoint two_scalar_mul(
     return acc;
 }
 
-inline ExtPoint multi_scalar_mul_extpoint(
-    const std::vector<Scalar>& scalars,
-    const std::vector<ExtPoint>& points
+#if !defined(PVAC_WNAF_WIDTH)
+#define PVAC_WNAF_WIDTH 5
+#endif
+static_assert(PVAC_WNAF_WIDTH >= 3 && PVAC_WNAF_WIDTH <= 7);
+inline constexpr size_t WNAF_TABLE_SIZE =
+    static_cast<size_t>(1) << (PVAC_WNAF_WIDTH - 2);
+
+inline std::array<int8_t, 257> scalar_wnaf(const Scalar& scalar) {
+    std::array<int8_t, 257> digits{};
+    std::array<uint64_t, 5> limbs{
+        scalar.v[0],
+        scalar.v[1],
+        scalar.v[2],
+        scalar.v[3],
+        0,
+    };
+    constexpr uint64_t mask =
+        (static_cast<uint64_t>(1) << PVAC_WNAF_WIDTH) - 1;
+    constexpr int midpoint = 1 << (PVAC_WNAF_WIDTH - 1);
+    constexpr int radix = 1 << PVAC_WNAF_WIDTH;
+
+    for (size_t bit = 0; bit < digits.size(); ++bit) {
+        if ((limbs[0] & 1U) != 0) {
+            int digit = static_cast<int>(limbs[0] & mask);
+            if (digit > midpoint) digit -= radix;
+            digits[bit] = static_cast<int8_t>(digit);
+
+            if (digit > 0) {
+                uint64_t borrow = static_cast<uint64_t>(digit);
+                for (size_t i = 0; i < limbs.size() && borrow != 0; ++i) {
+                    const uint64_t previous = limbs[i];
+                    limbs[i] -= borrow;
+                    borrow = previous < borrow ? 1U : 0U;
+                }
+            } else {
+                uint64_t carry = static_cast<uint64_t>(-digit);
+                for (size_t i = 0; i < limbs.size() && carry != 0; ++i) {
+                    const uint64_t previous = limbs[i];
+                    limbs[i] += carry;
+                    carry = limbs[i] < previous ? 1U : 0U;
+                }
+            }
+        }
+
+        for (size_t i = 0; i + 1 < limbs.size(); ++i)
+            limbs[i] = (limbs[i] >> 1) | (limbs[i + 1] << 63);
+        limbs.back() >>= 1;
+    }
+    return digits;
+}
+
+struct Wnaf5ScalarPair {
+    std::array<int8_t, 257> first;
+    std::array<int8_t, 257> second;
+    int top = -1;
+};
+
+inline Wnaf5ScalarPair prepare_wnaf_scalar_pair(
+    const Scalar& first,
+    const Scalar& second
 ) {
-    assert(scalars.size() == points.size());
-    size_t n = scalars.size();
+    Wnaf5ScalarPair pair{
+        scalar_wnaf(first),
+        scalar_wnaf(second),
+        -1,
+    };
+    pair.top = static_cast<int>(pair.first.size()) - 1;
+    while (
+        pair.top >= 0 &&
+        pair.first[static_cast<size_t>(pair.top)] == 0 &&
+        pair.second[static_cast<size_t>(pair.top)] == 0
+    ) {
+        --pair.top;
+    }
+    return pair;
+}
+
+inline ExtPoint two_scalar_mul_wnaf_prepared(
+    const Wnaf5ScalarPair& pair,
+    const ExtPoint& P,
+    const ExtPoint& Q
+) {
+    std::array<ExtPoint, WNAF_TABLE_SIZE> p_positive;
+    std::array<ExtPoint, WNAF_TABLE_SIZE> p_negative;
+    std::array<ExtPoint, WNAF_TABLE_SIZE> q_positive;
+    std::array<ExtPoint, WNAF_TABLE_SIZE> q_negative;
+    std::array<Fe25519, WNAF_TABLE_SIZE> p_positive_t2d;
+    std::array<Fe25519, WNAF_TABLE_SIZE> p_negative_t2d;
+    std::array<Fe25519, WNAF_TABLE_SIZE> q_positive_t2d;
+    std::array<Fe25519, WNAF_TABLE_SIZE> q_negative_t2d;
+
+    const ExtPoint p_twice = ext_double(P);
+    const ExtPoint q_twice = ext_double(Q);
+    const Fe25519 p_twice_t2d = fe_mul(p_twice.T, ed_2d());
+    const Fe25519 q_twice_t2d = fe_mul(q_twice.T, ed_2d());
+    p_positive[0] = P;
+    q_positive[0] = Q;
+    for (size_t i = 1; i < p_positive.size(); ++i) {
+        p_positive[i] = ext_add_with_t2d(
+            p_positive[i - 1],
+            p_twice,
+            p_twice_t2d
+        );
+        q_positive[i] = ext_add_with_t2d(
+            q_positive[i - 1],
+            q_twice,
+            q_twice_t2d
+        );
+    }
+    for (size_t i = 0; i < p_positive.size(); ++i) {
+        p_negative[i] = ext_neg(p_positive[i]);
+        q_negative[i] = ext_neg(q_positive[i]);
+        p_positive_t2d[i] = fe_mul(p_positive[i].T, ed_2d());
+        q_positive_t2d[i] = fe_mul(q_positive[i].T, ed_2d());
+        p_negative_t2d[i] = fe_neg(p_positive_t2d[i]);
+        q_negative_t2d[i] = fe_neg(q_positive_t2d[i]);
+    }
+
+    if (pair.top < 0) return ext_identity();
+
+    ExtPoint accumulator = ext_identity();
+    for (int bit = pair.top; bit >= 0; --bit) {
+        accumulator = ext_double(accumulator);
+        const int a_digit = pair.first[static_cast<size_t>(bit)];
+        const int b_digit = pair.second[static_cast<size_t>(bit)];
+        if (a_digit != 0) {
+            const size_t index =
+                static_cast<size_t>((std::abs(a_digit) - 1) / 2);
+            accumulator = a_digit > 0
+                ? ext_add_with_t2d(
+                    accumulator,
+                    p_positive[index],
+                    p_positive_t2d[index]
+                )
+                : ext_add_with_t2d(
+                    accumulator,
+                    p_negative[index],
+                    p_negative_t2d[index]
+                );
+        }
+        if (b_digit != 0) {
+            const size_t index =
+                static_cast<size_t>((std::abs(b_digit) - 1) / 2);
+            accumulator = b_digit > 0
+                ? ext_add_with_t2d(
+                    accumulator,
+                    q_positive[index],
+                    q_positive_t2d[index]
+                )
+                : ext_add_with_t2d(
+                    accumulator,
+                    q_negative[index],
+                    q_negative_t2d[index]
+                );
+        }
+    }
+    return accumulator;
+}
+
+inline ExtPoint two_scalar_mul_wnaf(
+    const Scalar& a,
+    const ExtPoint& P,
+    const Scalar& b,
+    const ExtPoint& Q
+) {
+    return two_scalar_mul_wnaf_prepared(
+        prepare_wnaf_scalar_pair(a, b),
+        P,
+        Q
+    );
+}
+
+inline ExtPoint two_scalar_mul(
+    const Scalar& a,
+    const ExtPoint& P,
+    const Scalar& b,
+    const ExtPoint& Q
+) {
+#if defined(PVAC_LEGACY_TWO_SCALAR)
+    return two_scalar_mul_radix2(a, P, b, Q);
+#else
+    return two_scalar_mul_wnaf(a, P, b, Q);
+#endif
+}
+
+template <typename ScalarAt, typename PointAt>
+inline ExtPoint multi_scalar_mul_extpoint_indexed(
+    size_t n,
+    ScalarAt scalar_at,
+    PointAt point_at
+) {
     if (n == 0) return ext_identity();
 
     if (n == 1)
-        return ext_scalarmul(points[0], scalars[0]);
+        return ext_scalarmul(point_at(0), scalar_at(0));
 
     if (n == 2)
-        return two_scalar_mul(scalars[0], points[0], scalars[1], points[1]);
+        return two_scalar_mul(
+            scalar_at(0),
+            point_at(0),
+            scalar_at(1),
+            point_at(1)
+        );
 
     std::vector<std::array<uint8_t, 32>> sbytes(n);
     for (size_t i = 0; i < n; i++)
-        sc_tobytes(sbytes[i].data(), scalars[i]);
+        sc_tobytes(sbytes[i].data(), scalar_at(i));
     std::vector<Fe25519> point_t2d(n);
     detail::parallel_for(0, n, 256, [&](size_t i) {
-        point_t2d[i] = fe_mul(points[i].T, ed_2d());
+        point_t2d[i] = fe_mul(point_at(i).T, ed_2d());
     });
 
     size_t w = msm_window_for_size(n);
@@ -141,7 +336,7 @@ inline ExtPoint multi_scalar_mul_extpoint(
             if (bucket_idx == 0) continue;
             buckets[bucket_idx - 1] = ext_add_with_t2d(
                 buckets[bucket_idx - 1],
-                points[i],
+                point_at(i),
                 point_t2d[i]
             );
         }
@@ -164,6 +359,29 @@ inline ExtPoint multi_scalar_mul_extpoint(
     }
 
     return result;
+}
+
+inline ExtPoint multi_scalar_mul_extpoint(
+    const std::vector<Scalar>& scalars,
+    const std::vector<ExtPoint>& points
+) {
+    assert(scalars.size() == points.size());
+    return multi_scalar_mul_extpoint_indexed(
+        scalars.size(),
+        [&](size_t i) -> const Scalar& { return scalars[i]; },
+        [&](size_t i) -> const ExtPoint& { return points[i]; }
+    );
+}
+
+template <typename ScalarAt, typename PointAt>
+inline RistrettoPoint multi_scalar_mul_ext_indexed(
+    size_t n,
+    ScalarAt scalar_at,
+    PointAt point_at
+) {
+    return rist_encode(
+        multi_scalar_mul_extpoint_indexed(n, scalar_at, point_at)
+    );
 }
 
 inline RistrettoPoint multi_scalar_mul_ext(
@@ -220,6 +438,20 @@ inline InnerProductProof ipp_prove_ext(
     for (size_t k = 0; k < lg; k++) {
         size_t half = n / 2;
         const bool has_H_scale = !H_scale.empty();
+#if defined(PVAC_PROFILE)
+        using ProfileClock = std::chrono::steady_clock;
+        auto profile_last = ProfileClock::now();
+        const auto profile_mark = [&](const char* phase) {
+            const auto now = ProfileClock::now();
+            const auto elapsed_ms =
+                std::chrono::duration<double, std::milli>(now - profile_last).count();
+            std::cerr << "[ipp-profile] round=" << k
+                      << " n=" << n
+                      << " phase=" << phase
+                      << " phase_ms=" << elapsed_ms << std::endl;
+            profile_last = now;
+        };
+#endif
 
         Scalar c_L = sc_zero();
         Scalar c_R = sc_zero();
@@ -227,6 +459,9 @@ inline InnerProductProof ipp_prove_ext(
             c_L = sc_add(c_L, sc_mul(a[i], b[half + i]));
             c_R = sc_add(c_R, sc_mul(a[half + i], b[i]));
         }
+#if defined(PVAC_PROFILE)
+        profile_mark("cross_inner_products");
+#endif
 
         {
             std::vector<Scalar> scalars;
@@ -251,6 +486,9 @@ inline InnerProductProof ipp_prove_ext(
 
             proof.L[k] = multi_scalar_mul_ext(scalars, points);
         }
+#if defined(PVAC_PROFILE)
+        profile_mark("msm_L");
+#endif
 
         {
             std::vector<Scalar> scalars;
@@ -275,45 +513,101 @@ inline InnerProductProof ipp_prove_ext(
 
             proof.R[k] = multi_scalar_mul_ext(scalars, points);
         }
+#if defined(PVAC_PROFILE)
+        profile_mark("msm_R");
+#endif
 
         transcript.append_point("L", proof.L[k]);
         transcript.append_point("R", proof.R[k]);
         Scalar u_k = transcript.challenge_scalar("u");
         Scalar u_k_inv = sc_inv(u_k);
+#if defined(PVAC_PROFILE)
+        profile_mark("challenge");
+#endif
 
+#if defined(PVAC_OUT_OF_PLACE_FOLD)
         std::vector<Scalar> a_new(half);
         std::vector<Scalar> b_new(half);
         std::vector<ExtPoint> G_new(half);
         std::vector<ExtPoint> H_new(half);
+#endif
+#if !defined(PVAC_LEGACY_TWO_SCALAR)
+        const auto g_scalar_pair = prepare_wnaf_scalar_pair(u_k_inv, u_k);
+        const auto h_scalar_pair = has_H_scale
+            ? Wnaf5ScalarPair{}
+            : prepare_wnaf_scalar_pair(u_k, u_k_inv);
+#endif
 
         detail::parallel_for(0, half, 128, [&](size_t i) {
-            a_new[i] = sc_add(sc_mul(a[i], u_k), sc_mul(a[half + i], u_k_inv));
-            b_new[i] = sc_add(sc_mul(b[i], u_k_inv), sc_mul(b[half + i], u_k));
+            const Scalar a_folded =
+                sc_add(sc_mul(a[i], u_k), sc_mul(a[half + i], u_k_inv));
+            const Scalar b_folded =
+                sc_add(sc_mul(b[i], u_k_inv), sc_mul(b[half + i], u_k));
 
-            G_new[i] = two_scalar_mul(u_k_inv, G_vec[i], u_k, G_vec[half + i]);
+#if defined(PVAC_LEGACY_TWO_SCALAR)
+            const ExtPoint g_folded =
+                two_scalar_mul(u_k_inv, G_vec[i], u_k, G_vec[half + i]);
+#else
+            const ExtPoint g_folded = two_scalar_mul_wnaf_prepared(
+                g_scalar_pair,
+                G_vec[i],
+                G_vec[half + i]
+            );
+#endif
+            ExtPoint h_folded;
             if (has_H_scale) {
-                H_new[i] = two_scalar_mul(
+                h_folded = two_scalar_mul(
                     sc_mul(u_k, H_scale[i]),
                     H_vec[i],
                     sc_mul(u_k_inv, H_scale[half + i]),
                     H_vec[half + i]
                 );
             } else {
-                H_new[i] = two_scalar_mul(
+#if defined(PVAC_LEGACY_TWO_SCALAR)
+                h_folded = two_scalar_mul(
                     u_k,
                     H_vec[i],
                     u_k_inv,
                     H_vec[half + i]
                 );
+#else
+                h_folded = two_scalar_mul_wnaf_prepared(
+                    h_scalar_pair,
+                    H_vec[i],
+                    H_vec[half + i]
+                );
+#endif
             }
+
+#if defined(PVAC_OUT_OF_PLACE_FOLD)
+            a_new[i] = a_folded;
+            b_new[i] = b_folded;
+            G_new[i] = g_folded;
+            H_new[i] = h_folded;
+#else
+            a[i] = a_folded;
+            b[i] = b_folded;
+            G_vec[i] = g_folded;
+            H_vec[i] = h_folded;
+#endif
         });
 
+#if defined(PVAC_OUT_OF_PLACE_FOLD)
         a = std::move(a_new);
         b = std::move(b_new);
         G_vec = std::move(G_new);
         H_vec = std::move(H_new);
+#else
+        a.resize(half);
+        b.resize(half);
+        G_vec.resize(half);
+        H_vec.resize(half);
+#endif
         H_scale.clear();
         n = half;
+#if defined(PVAC_PROFILE)
+        profile_mark("fold");
+#endif
     }
 
     assert(a.size() == 1 && b.size() == 1);

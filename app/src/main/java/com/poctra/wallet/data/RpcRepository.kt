@@ -15,6 +15,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
 import org.bouncycastle.crypto.signers.Ed25519Signer
 import org.bouncycastle.crypto.digests.SHA256Digest
@@ -52,6 +54,12 @@ data class CircleDeploySubmission(
     val result: SendResult,
 )
 
+data class RecentActivityPage(
+    val publicTransactions: List<TransactionHistoryItem>,
+    val privacyTransactions: List<TransactionHistoryItem>,
+    val sourceCount: Int,
+)
+
 private data class CircleReadCacheEntry(
     val expiresAtMs: Long,
     val value: Any?,
@@ -73,6 +81,12 @@ private data class TokenLookupResult(
     val supply: String?,
 )
 
+private data class RecentActivityCacheEntry(
+    val requestedLimit: Int,
+    val expiresAtMs: Long,
+    val transactions: List<TransactionHistoryItem>,
+)
+
 class RpcRepository(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("poctra_rpc", Context.MODE_PRIVATE)
     private val unsupportedCircleProgramViewUrls = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
@@ -80,6 +94,9 @@ class RpcRepository(context: Context) {
     private val circleReadLocks = ConcurrentHashMap<String, Any>()
     private val registeredPvacKeys = PrivacyRegistrationCache()
     private val transactionDetailsCache = ConcurrentHashMap<String, TransactionHistoryItem>()
+    private val recentActivityCache = ConcurrentHashMap<String, RecentActivityCacheEntry>()
+    private val recentActivityLocks = ConcurrentHashMap<String, Any>()
+    private val nonceLocks = ConcurrentHashMap<String, Mutex>()
 
     fun currentUrl(): String = activeNetwork().url
 
@@ -194,7 +211,7 @@ class RpcRepository(context: Context) {
     }
 
     private fun isApprovedCleartextHost(host: String?): Boolean {
-        return host in setOf("165.227.225.79", "localhost", "127.0.0.1", "10.0.2.2")
+        return host in setOf("localhost", "127.0.0.1", "10.0.2.2")
     }
 
     suspend fun checkStatus(url: String = currentUrl()): RpcStatus = withContext(Dispatchers.IO) {
@@ -269,7 +286,9 @@ class RpcRepository(context: Context) {
             "Amount must be greater than zero."
         }
 
-        val snapshot = fetchBalance(wallet.address, rpcUrl)
+        val snapshot = nonceLocks.getOrPut(wallet.address.lowercase()) { Mutex() }.withLock {
+            fetchBalance(wallet.address, rpcUrl)
+        }
         val maximumAmount = snapshot.balance - (feeOu.coerceAtLeast(1L) / MicroUnits.toDouble())
         require(amount <= maximumAmount + 0.000000001) {
             "Amount exceeds the available balance after network fee."
@@ -337,7 +356,9 @@ class RpcRepository(context: Context) {
             "Contract amount must be in ou."
         }
 
-        val snapshot = fetchBalance(wallet.address, rpcUrl)
+        val snapshot = nonceLocks.getOrPut(wallet.address.lowercase()) { Mutex() }.withLock {
+            fetchBalance(wallet.address, rpcUrl)
+        }
         val tx = createSignedTransactionRaw(
             wallet = wallet,
             recipientAddress = contract,
@@ -664,48 +685,75 @@ class RpcRepository(context: Context) {
 
     suspend fun fetchPrivacyHistory(
         address: String,
-        limit: Int = 7,
+        limit: Int = 8,
+        url: String = currentUrl(),
+    ): List<TransactionHistoryItem> = fetchRecentActivityPage(address, limit, url).privacyTransactions
+
+    suspend fun searchPrivacyHistory(
+        address: String,
+        resultLimit: Int = 3,
         url: String = currentUrl(),
     ): List<TransactionHistoryItem> = withContext(Dispatchers.IO) {
-        val confirmedJob = async {
-            runCatching {
-                fetchConfirmedAccountTransactions(
-                    address = address,
-                    resultLimit = limit,
-                    queryLimit = PrivacyHistoryQueryLimit,
-                    url = url,
-                ) { transaction ->
-                    transaction.opType.lowercase() in PrivacyOperationTypes
-                }
-            }.getOrDefault(emptyList())
+        fetchConfirmedAccountTransactions(
+            address = address,
+            resultLimit = resultLimit.coerceIn(1, PrivacyHistorySearchResultLimit),
+            queryLimit = RecentActivitySnapshotLimit,
+            maxQueryLimit = PrivacyHistorySearchQueryLimit,
+            url = url,
+        ) { transaction ->
+            transaction.opType.lowercase() in PrivacyOperationTypes
         }
-        val pendingJob = async {
-            runCatching {
-                fetchPendingTransactions(address, url)
-                    .filter { it.opType.lowercase() in PrivacyOperationTypes }
-            }.getOrDefault(emptyList())
-        }
-        (confirmedJob.await() + pendingJob.await())
-            .distinctBy { it.hash }
-            .sortedByDescending { it.timestamp }
-            .take(limit)
     }
 
     suspend fun fetchStealthOutputs(url: String = currentUrl()): JSONArray = withContext(Dispatchers.IO) {
-        val response = postRpc(
-            url = url,
-            payload = JSONObject()
-                .put("jsonrpc", "2.0")
-                .put("id", System.currentTimeMillis())
-                .put("method", "octra_stealthOutputs")
-                .put("params", JSONArray().put(0)),
-            connectTimeoutMs = 20_000,
-            readTimeoutMs = 120_000,
-        )
-        response.optJSONObject("error")?.let { error ->
-            throw IllegalStateException(error.optString("message", "Unable to scan claimable transfers."))
+        // Fetch from recent epochs only to avoid byte limit (param = from_epoch).
+        // Start from headEpoch - StealthOutputEpochWindow, paginate via next_before_id if has_more.
+        val headEpoch = runCatching {
+            val statsResponse = postRpc(
+                url = url,
+                payload = JSONObject()
+                    .put("jsonrpc", "2.0")
+                    .put("id", System.currentTimeMillis())
+                    .put("method", "node_stats")
+                    .put("params", JSONArray()),
+                connectTimeoutMs = 10_000,
+                readTimeoutMs = 15_000,
+            )
+            statsResponse.optJSONObject("result")?.optJSONArray("latest_epochs")?.optLong(0) ?: 0L
+        }.getOrDefault(0L)
+
+        val fromEpoch = if (headEpoch > StealthOutputEpochWindow) headEpoch - StealthOutputEpochWindow else 0L
+        val allOutputs = JSONArray()
+        var beforeId: Long? = null
+        var hasMore = true
+        var pages = 0
+
+        while (hasMore && pages < StealthOutputMaxPages) {
+            val params = JSONArray().put(fromEpoch)
+            beforeId?.let { params.put(it) }
+            val response = postRpc(
+                url = url,
+                payload = JSONObject()
+                    .put("jsonrpc", "2.0")
+                    .put("id", System.currentTimeMillis())
+                    .put("method", "octra_stealthOutputs")
+                    .put("params", params),
+                connectTimeoutMs = 20_000,
+                readTimeoutMs = 120_000,
+            )
+            response.optJSONObject("error")?.let { error ->
+                val msg = error.optString("message", "Unable to scan claimable transfers.")
+                if (pages == 0) throw IllegalStateException(msg)
+                return@withContext allOutputs // partial result OK
+            }
+            val result = response.optJSONObject("result") ?: break
+            val outputs = result.optJSONArray("outputs") ?: JSONArray()
+            for (i in 0 until outputs.length()) allOutputs.put(outputs.get(i))
+            hasMore = result.optBoolean("has_more", false)
+            beforeId = if (result.isNull("next_before_id")) null else result.optLong("next_before_id")
+            pages++
         }
-        response.optJSONObject("result")?.optJSONArray("outputs") ?: JSONArray()
+        allOutputs
     }
 
     suspend fun fetchOctraPublicKey(
@@ -919,86 +967,174 @@ class RpcRepository(context: Context) {
         }
     }
 
-    suspend fun fetchTransactionHistory(address: String, limit: Int = 11, url: String = currentUrl()): List<TransactionHistoryItem> =
-        withContext(Dispatchers.IO) {
-            val confirmedJob = async {
-                runCatching {
-                    fetchConfirmedAccountTransactions(
-                        address = address,
-                        resultLimit = limit,
-                        queryLimit = maxOf(limit * 4, HistoryDetailsBatchSize)
-                            .coerceAtMost(AccountHistoryQueryLimit),
-                        url = url,
-                    ) { transaction ->
-                        val opType = transaction.opType.lowercase()
-                        opType != "unknown" && opType !in PrivacyOperationTypes
-                    }
-                }.getOrDefault(emptyList())
-            }
+    suspend fun fetchTransactionHistory(address: String, limit: Int = 8, url: String = currentUrl()): List<TransactionHistoryItem> =
+        fetchRecentActivityPage(address, limit, url).publicTransactions
 
-            val pendingJob = async {
-                runCatching {
-                    fetchPendingTransactions(address, url)
-                        .filter { it.opType.lowercase() !in PrivacyOperationTypes }
-                }.getOrDefault(emptyList())
-            }
-            val confirmed = confirmedJob.await()
-            val pending = pendingJob.await()
-            (confirmed + pending)
-                .distinctBy { it.hash }
-                .sortedByDescending { it.timestamp }
-                .take(limit)
+    suspend fun fetchRecentActivityPage(
+        address: String,
+        limit: Int = 8,
+        url: String = currentUrl(),
+    ): RecentActivityPage = withContext(Dispatchers.IO) {
+        val transactions = fetchRecentAccountActivitySnapshot(address, limit, url)
+        val (privacy, public) = transactions.partition {
+            it.opType.lowercase() in PrivacyOperationTypes
         }
+        RecentActivityPage(
+            publicTransactions = public,
+            privacyTransactions = privacy,
+            sourceCount = transactions.size,
+        )
+    }
+
+    private fun fetchRecentAccountActivitySnapshot(
+        address: String,
+        limit: Int,
+        url: String,
+    ): List<TransactionHistoryItem> {
+        val requestLimit = limit.coerceIn(1, AccountHistoryQueryLimit)
+        val cacheKey = "${url.trimEnd('/')}|${address.lowercase()}"
+        fun cachedSnapshot(): List<TransactionHistoryItem>? {
+            val cached = recentActivityCache[cacheKey] ?: return null
+            return cached
+                .takeIf {
+                    it.expiresAtMs > System.currentTimeMillis() &&
+                        it.requestedLimit >= requestLimit
+                }
+                ?.transactions
+                ?.take(requestLimit)
+        }
+        cachedSnapshot()?.let { return it }
+
+        val requestLock = recentActivityLocks.getOrPut(cacheKey) { Any() }
+        return synchronized(requestLock) {
+            cachedSnapshot()?.let { return@synchronized it }
+            val response = postRpc(
+                url = url,
+                payload = JSONObject()
+                    .put("jsonrpc", "2.0")
+                    .put("id", 1)
+                    .put("method", "octra_account")
+                    .put("params", JSONArray().put(address).put(requestLimit)),
+            )
+            val recent = response.optJSONObject("result")?.optJSONArray("recent_txs") ?: JSONArray()
+            val candidates = buildList {
+                for (index in 0 until minOf(recent.length(), requestLimit)) {
+                    val item = recent.optJSONObject(index) ?: continue
+                    val hash = item.optString("hash", item.optString("tx_hash"))
+                    if (hash.isBlank()) continue
+                    add(hash to item)
+                }
+            }.distinctBy { it.first }
+            val detailsByHash = fetchTransactionDetailsBatch(
+                hashes = candidates.map { it.first },
+                address = address,
+                url = url,
+            )
+            val transactions = candidates.map { (hash, item) ->
+                detailsByHash[hash] ?: run {
+                    val from = item.optString("from", "unknown")
+                    val status = item.optString("status").lowercase()
+                    val stageStatus = item.optString("stage_status").lowercase()
+                    TransactionHistoryItem(
+                        hash = hash,
+                        from = from,
+                        to = item.optString("to", item.optString("to_", "unknown")),
+                        amount = parseAmount(item.opt("amount_raw"), item.opt("amount")),
+                        timestamp = item.optDouble("timestamp", 0.0),
+                        status = when {
+                            status == "rejected" || status == "dropped" -> status
+                            status.isNotBlank() -> status
+                            stageStatus.isNotBlank() -> stageStatus
+                            else -> "confirmed"
+                        },
+                        type = if (from.equals(address, ignoreCase = true)) "sent" else "received",
+                        opType = item.optString("op_type", "unknown"),
+                        message = item.optString("message").ifBlank { null },
+                    )
+                }
+            }.sortedByDescending { it.timestamp }
+            if (recentActivityCache.size >= RecentActivityCacheLimit) {
+                recentActivityCache.entries
+                    .minByOrNull { it.value.expiresAtMs }
+                    ?.key
+                    ?.let(recentActivityCache::remove)
+            }
+            recentActivityCache[cacheKey] = RecentActivityCacheEntry(
+                requestedLimit = requestLimit,
+                expiresAtMs = System.currentTimeMillis() + RecentActivityCacheMillis,
+                transactions = transactions,
+            )
+            transactions
+        }
+    }
 
     private suspend fun fetchConfirmedAccountTransactions(
         address: String,
         resultLimit: Int,
         queryLimit: Int,
+        maxQueryLimit: Int = queryLimit,
         url: String,
         include: (TransactionHistoryItem) -> Boolean,
     ): List<TransactionHistoryItem> {
-        val json = postRpc(
-            url = url,
-            payload = JSONObject()
-                .put("jsonrpc", "2.0")
-                .put("id", 1)
-                .put("method", "octra_account")
-                .put("params", JSONArray().put(address).put(queryLimit)),
-        )
-        val recent = json.optJSONObject("result")?.optJSONArray("recent_txs") ?: JSONArray()
-        val candidates = buildList {
-            for (index in 0 until recent.length()) {
-                recent.optJSONObject(index)?.let(::add)
-            }
-        }
         val matches = mutableListOf<TransactionHistoryItem>()
-        for (batch in candidates.chunked(HistoryDetailsBatchSize)) {
-            val detailsByHash = fetchTransactionDetailsBatch(
-                hashes = batch.mapNotNull { item ->
-                    item.optString("hash", item.optString("tx_hash")).ifBlank { null }
-                },
-                address = address,
+        val seenHashes = mutableSetOf<String>()
+        val initialQueryLimit = queryLimit.coerceAtLeast(HistoryDetailsBatchSize)
+        val queryCeiling = maxQueryLimit.coerceAtLeast(initialQueryLimit)
+        var requestedQueryLimit = initialQueryLimit
+        while (matches.size < resultLimit) {
+            val json = postRpc(
                 url = url,
+                payload = JSONObject()
+                    .put("jsonrpc", "2.0")
+                    .put("id", 1)
+                    .put("method", "octra_account")
+                    .put("params", JSONArray().put(address).put(requestedQueryLimit)),
             )
-            val details = batch.mapNotNull { item ->
-                val hash = item.optString("hash", item.optString("tx_hash"))
-                if (hash.isBlank()) {
-                    null
-                } else {
-                    detailsByHash[hash] ?: TransactionHistoryItem(
-                        hash = hash,
-                        from = item.optString("from", "unknown"),
-                        to = item.optString("to", item.optString("to_", "unknown")),
-                        amount = parseAmount(item.opt("amount_raw"), item.opt("amount")),
-                        timestamp = item.optDouble("timestamp", 0.0),
-                        status = "confirmed",
-                        type = if (item.optString("from").equals(address, ignoreCase = true)) "sent" else "received",
-                        opType = item.optString("op_type", "unknown"),
-                    )
+            val recent = json.optJSONObject("result")?.optJSONArray("recent_txs") ?: JSONArray()
+            val candidates = buildList {
+                for (index in 0 until recent.length()) {
+                    val candidate = recent.optJSONObject(index) ?: continue
+                    val hash = candidate.optString("hash", candidate.optString("tx_hash"))
+                    if (hash.isNotBlank() && seenHashes.add(hash)) add(candidate)
                 }
             }
-            matches += details.filter(include)
-            if (matches.size >= resultLimit) break
+            for (batch in candidates.chunked(HistoryDetailsBatchSize)) {
+                val detailsByHash = fetchTransactionDetailsBatch(
+                    hashes = batch.mapNotNull { item ->
+                        item.optString("hash", item.optString("tx_hash")).ifBlank { null }
+                    },
+                    address = address,
+                    url = url,
+                )
+                val details = batch.mapNotNull { item ->
+                    val hash = item.optString("hash", item.optString("tx_hash"))
+                    if (hash.isBlank()) {
+                        null
+                    } else {
+                        detailsByHash[hash] ?: TransactionHistoryItem(
+                            hash = hash,
+                            from = item.optString("from", "unknown"),
+                            to = item.optString("to", item.optString("to_", "unknown")),
+                            amount = parseAmount(item.opt("amount_raw"), item.opt("amount")),
+                            timestamp = item.optDouble("timestamp", 0.0),
+                            status = "confirmed",
+                            type = if (item.optString("from").equals(address, ignoreCase = true)) "sent" else "received",
+                            opType = item.optString("op_type", "unknown"),
+                        )
+                    }
+                }
+                matches += details.filter(include)
+                if (matches.size >= resultLimit) break
+            }
+            if (
+                matches.size >= resultLimit ||
+                recent.length() < requestedQueryLimit ||
+                requestedQueryLimit >= queryCeiling
+            ) {
+                break
+            }
+            requestedQueryLimit = (requestedQueryLimit + initialQueryLimit)
+                .coerceAtMost(queryCeiling)
         }
         return matches
             .sortedByDescending { it.timestamp }
@@ -2388,6 +2524,8 @@ class RpcRepository(context: Context) {
         const val DefaultMainnetUrl = "https://octra.network"
         const val DefaultDevnetUrl = "https://devnet.octrascan.io/rpc"
         private const val LegacyProxyDevnetUrl = "https://rpc.xme.my.id/octra-devnet"
+        private const val StealthOutputEpochWindow = 200_000L
+        private const val StealthOutputMaxPages = 10
         private const val LegacyDefaultDevnetUrl = "http://165.227.225.79:8080"
         const val DefaultMainnetExplorerUrl = "https://octrascan.io"
         const val DefaultDevnetExplorerUrl = "https://devnet.octrascan.io"
@@ -2408,8 +2546,12 @@ class RpcRepository(context: Context) {
         private const val MaxCircleRpcParams = 32
         private const val MaxCircleRpcBatchSize = 64
         private const val HistoryDetailsBatchSize = 6
+        private const val RecentActivitySnapshotLimit = 8
+        private const val PrivacyHistorySearchResultLimit = 3
+        private const val PrivacyHistorySearchQueryLimit = 24
+        private const val RecentActivityCacheMillis = 30_000L
+        private const val RecentActivityCacheLimit = 16
         private const val OctraTokenLookupBatchSize = 4
-        private const val PrivacyHistoryQueryLimit = 100
         private const val AccountHistoryQueryLimit = 100
         private const val TransactionDetailsCacheLimit = 512
         private val PrivacyOperationTypes = setOf("encrypt", "decrypt", "stealth", "claim", "key_switch")

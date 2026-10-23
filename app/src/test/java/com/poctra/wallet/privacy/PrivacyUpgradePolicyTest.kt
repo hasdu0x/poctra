@@ -68,7 +68,8 @@ class PrivacyUpgradePolicyTest {
                 compatibility = PrivacyKeyCompatibility(
                     extendsLocalKey = false,
                     legacyV1Profile = false,
-                    proofProfile = true,
+                    proofProfile = false,
+                    secretProfile = true,
                 ),
                 registeredBalance = 3_000_000L,
             ),
@@ -77,6 +78,25 @@ class PrivacyUpgradePolicyTest {
         assertEquals(PrivacyKeyUpgradeMode.KeyBoundMigration, result.mode)
         assertEquals(3_000_000L, result.encryptedBalanceRaw)
         assertTrue(result.canSubmit)
+    }
+
+    @Test
+    fun matchingPublicProofShapeWithoutSecretOwnershipIsBlocked() {
+        val result = PrivacyUpgradePolicy.evaluate(
+            facts(
+                registeredKey = "foreign-key",
+                compatibility = PrivacyKeyCompatibility(
+                    extendsLocalKey = false,
+                    legacyV1Profile = false,
+                    proofProfile = true,
+                    secretProfile = false,
+                ),
+                registeredBalance = 3_000_000L,
+            ),
+        )
+
+        assertEquals(PrivacyKeyUpgradeMode.KeyMismatch, result.mode)
+        assertFalse(result.canSubmit)
     }
 
     @Test
@@ -99,16 +119,21 @@ class PrivacyUpgradePolicyTest {
             facts(diagnostics = diagnostics(canonical = false)),
         )
         val deep = PrivacyUpgradePolicy.evaluate(
-            facts(diagnostics = diagnostics(layers = 7)),
+            facts(diagnostics = diagnostics(layers = 5)),
         )
         val boundary = PrivacyUpgradePolicy.evaluate(
-            facts(diagnostics = diagnostics(layers = 6)),
+            facts(diagnostics = diagnostics(layers = 4)),
+        )
+        val belowBoundary = PrivacyUpgradePolicy.evaluate(
+            facts(diagnostics = diagnostics(layers = 3)),
         )
 
         assertEquals(PrivacyKeyUpgradeMode.KeyBoundMigration, nonCanonical.mode)
         assertEquals(PrivacyKeyUpgradeMode.KeyBoundMigration, deep.mode)
         assertTrue(deep.compactRefresh)
-        assertEquals(PrivacyKeyUpgradeMode.Current, boundary.mode)
+        assertEquals(PrivacyKeyUpgradeMode.KeyBoundMigration, boundary.mode)
+        assertTrue(boundary.compactRefresh)
+        assertEquals(PrivacyKeyUpgradeMode.Current, belowBoundary.mode)
     }
 
     @Test

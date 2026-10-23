@@ -20,11 +20,14 @@ import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.URI
 import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.locks.ReentrantLock
 
 class EvmRepository(context: Context) {
     private val requestSecurity = BackendRequestSecurity.get(context)
     private val prefs = context.applicationContext.getSharedPreferences("poctra_evm", Context.MODE_PRIVATE)
     private val crypto = EvmCrypto()
+    private val nonceLocks = ConcurrentHashMap<String, ReentrantLock>()
 
     fun networks(): List<EvmNetwork> {
         val stored = prefs.getString(KeyNetworks, null)
@@ -708,7 +711,18 @@ class EvmRepository(context: Context) {
         insufficientGasMessage: String,
     ): EvmSendResult {
         val from = deriveAddress(wallet)
-        val nonce = nonceOverride ?: rpcQuantity(network.rpcUrl, "eth_getTransactionCount", JSONArray().put(from).put("pending"))
+        val nonce = if (nonceOverride != null) {
+            nonceOverride
+        } else {
+            val lockKey = "${from.lowercase()}:${network.chainId}"
+            val nonceLock = nonceLocks.getOrPut(lockKey) { ReentrantLock() }
+            nonceLock.lock()
+            try {
+                rpcQuantity(network.rpcUrl, "eth_getTransactionCount", JSONArray().put(from).put("pending"))
+            } finally {
+                nonceLock.unlock()
+            }
+        }
         val gasPrice = gasPriceWeiOverride?.takeIf { it > BigInteger.ZERO }
             ?: rpcQuantity(network.rpcUrl, "eth_gasPrice", JSONArray())
         val gasLimit = gasLimitOverride?.takeIf { it > BigInteger.ZERO }

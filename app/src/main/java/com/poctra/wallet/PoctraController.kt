@@ -52,6 +52,7 @@ import com.poctra.wallet.data.OctPriceRepository
 import com.poctra.wallet.data.RpcRepository
 import com.poctra.wallet.data.RpcNetwork
 import com.poctra.wallet.data.RpcStatus
+import com.poctra.wallet.data.RecentActivityPage
 import com.poctra.wallet.data.SecurityMethod
 import com.poctra.wallet.data.TransactionHistoryItem
 import com.poctra.wallet.data.TokenBalance
@@ -104,6 +105,7 @@ import com.poctra.wallet.privacy.PrivacyKeyUpgradeMode
 import com.poctra.wallet.privacy.PrivacyKeyUpgradeStatus
 import com.poctra.wallet.privacy.PrivacyUpgradeFacts
 import com.poctra.wallet.privacy.PrivacyUpgradePolicy
+import com.poctra.wallet.privacy.PrivacyCompactRefreshStage
 import com.poctra.wallet.privacy.PrivacyOperationStage
 import com.poctra.wallet.privacy.PrivacyOperationState
 import com.poctra.wallet.privacy.PrivacyOperationType
@@ -182,6 +184,7 @@ enum class AppRoute {
     EvmAddNft,
     TransactionDetails,
     DAppBrowser,
+    SwapHistory,
     About,
 }
 
@@ -227,6 +230,40 @@ data class DAppInputPreview(
 private sealed class OctraCircleOpenResult {
     data class Circle(val target: OctraCircleTarget) : OctraCircleOpenResult()
     data class ExplorerAddress(val title: String, val url: String, val displayUrl: String) : OctraCircleOpenResult()
+}
+
+data class SwapHistoryItem(
+    val id: String,
+    val fromSymbol: String,
+    val toSymbol: String,
+    val fromAmount: String,
+    val toAmount: String,
+    val status: String,
+    val hash: String?,
+    val timestamp: Long,
+) {
+    fun toJson(): JSONObject = JSONObject()
+        .put("id", id)
+        .put("fromSymbol", fromSymbol)
+        .put("toSymbol", toSymbol)
+        .put("fromAmount", fromAmount)
+        .put("toAmount", toAmount)
+        .put("status", status)
+        .put("hash", hash)
+        .put("timestamp", timestamp)
+
+    companion object {
+        fun fromJson(json: JSONObject): SwapHistoryItem = SwapHistoryItem(
+            id = json.getString("id"),
+            fromSymbol = json.getString("fromSymbol"),
+            toSymbol = json.getString("toSymbol"),
+            fromAmount = json.getString("fromAmount"),
+            toAmount = json.getString("toAmount"),
+            status = json.getString("status"),
+            hash = json.optString("hash"),
+            timestamp = json.getLong("timestamp"),
+        )
+    }
 }
 
 data class BridgeHistoryItem(
@@ -459,7 +496,15 @@ class PoctraController(private val activity: Activity) {
         private set
     var historyLimit by mutableStateOf(InitialHistoryLimit)
         private set
+    var historyDisplayLimit by mutableStateOf(InitialHistoryDisplayLimit)
+        private set
     var historyCanLoadMore by mutableStateOf(true)
+        private set
+    var recentPublicActivityCount by mutableStateOf(0)
+        private set
+    var recentPrivacyActivityCount by mutableStateOf(0)
+        private set
+    var recentActivitySourceCount by mutableStateOf(0)
         private set
     var privacySupported by mutableStateOf(true)
         private set
@@ -476,6 +521,14 @@ class PoctraController(private val activity: Activity) {
     var privacyBalanceDecrypting by mutableStateOf(false)
         private set
     var privacyHistory by mutableStateOf<List<TransactionHistoryItem>>(emptyList())
+        private set
+    var privacyHistoryLoading by mutableStateOf(false)
+        private set
+    var privacyHistoryLimit by mutableStateOf(InitialPrivacyHistoryLimit)
+        private set
+    var privacyHistoryDisplayLimit by mutableStateOf(InitialPrivacyHistoryDisplayLimit)
+        private set
+    var privacyHistoryCanLoadMore by mutableStateOf(true)
         private set
     var privacyRecommendedFeeOu by mutableStateOf(10000L)
         private set
@@ -605,6 +658,9 @@ class PoctraController(private val activity: Activity) {
         private set
     var bridgeHistoryLimit by mutableStateOf(InitialActivityLimit)
         private set
+    
+    var swapHistory by mutableStateOf<List<SwapHistoryItem>>(emptyList())
+        private set
     var bridgeDialogVisible by mutableStateOf(false)
         private set
     var bridgeDialogStarted by mutableStateOf(false)
@@ -720,6 +776,7 @@ class PoctraController(private val activity: Activity) {
     private var approvalReviewRequestSerial = 0L
     private var portfolioRefreshSerial = 0L
     private var privacySyncSerial = 0L
+    private var privacyHistoryRequestSerial = 0L
     private var privacyOperationSerial = 0L
     private var privacyFeeSerial = 0L
     private var privacyKeyStatusSerial = 0L
@@ -744,6 +801,9 @@ class PoctraController(private val activity: Activity) {
 
     val currentSecurityMethod: SecurityMethod?
         get() = secureStore.currentMethod()
+    
+    val hasPinData: Boolean
+        get() = secureStore.hasPinData()
 
     val currentRpcUrl: String
         get() = activeRpcNetwork?.url ?: rpcRepository.currentUrl()
@@ -857,6 +917,7 @@ class PoctraController(private val activity: Activity) {
         evmNetworks = evmRepository.networks()
         activeEvmNetwork = evmRepository.activeNetwork()
         bridgeHistory = loadBridgeHistory()
+        swapHistory = loadSwapHistory()
         route = if (secureStore.hasWallet()) AppRoute.Unlock else AppRoute.Welcome
         rpcStatus = RpcStatus(RpcStatus.State.Checking, currentRpcUrl, activeRpcNetwork?.networkType ?: networkFor(currentRpcUrl))
         refreshRpcStatus()
@@ -1913,6 +1974,35 @@ class PoctraController(private val activity: Activity) {
         bridgeHistory = next
         persistBridgeHistory(next)
     }
+    
+    private fun loadSwapHistory(): List<SwapHistoryItem> {
+        val raw = tradePrefs.getString(KeySwapHistory, null) ?: return emptyList()
+        return runCatching {
+            val array = JSONArray(raw)
+            buildList {
+                for (index in 0 until array.length()) {
+                    array.optJSONObject(index)?.let { add(SwapHistoryItem.fromJson(it)) }
+                }
+            }.sortedByDescending { it.timestamp }
+        }.getOrDefault(emptyList())
+    }
+    
+    private fun persistSwapHistory(items: List<SwapHistoryItem>) {
+        val array = JSONArray()
+        items.sortedByDescending { it.timestamp }.forEach { array.put(it.toJson()) }
+        tradePrefs.edit().putString(KeySwapHistory, array.toString()).apply()
+    }
+    
+    private fun addSwapHistoryItem(item: SwapHistoryItem) {
+        val next = (listOf(item) + swapHistory.filterNot { it.id == item.id }).sortedByDescending { it.timestamp }
+        swapHistory = next
+        persistSwapHistory(next)
+    }
+    
+    fun openSwapHistory() {
+        swapHistory = loadSwapHistory()
+        route = AppRoute.SwapHistory
+    }
 
     private fun updateBridgeHistoryItem(
         itemId: String,
@@ -2866,7 +2956,7 @@ class PoctraController(private val activity: Activity) {
             return
         }
         if (!tradeRepository.isSupportedPair(fromAsset, toAsset)) {
-            tradeQuoteError = "Trade supports asset pairs on Ethereum Mainnet."
+            tradeQuoteError = "Only direct Ethereum Mainnet pairs are supported."
             return
         }
         val requestId = ++tradeQuoteRequestSerial
@@ -2890,6 +2980,48 @@ class PoctraController(private val activity: Activity) {
     }
 
     fun tradeMaxAmount(asset: TradeAsset): String = tradeRepository.maxAmount(tradeBalances, asset)
+
+    fun tradeAssetUsdEstimate(asset: TradeAsset, amountText: String): String? {
+        val amount = amountText.replace(",", ".").trim().toBigDecimalOrNull()
+            ?.takeIf { it.signum() >= 0 }
+            ?: return null
+        val unitPrice = when {
+            asset.isUsdt -> BigDecimal.ONE
+            asset.isWOct -> octUsdPrice?.takeIf(Double::isFinite)?.let(BigDecimal::valueOf)
+            asset.isNative -> evmNativeUsdPrice()
+            else -> null
+        } ?: return null
+        return formatUsdEstimate(amount.multiply(unitPrice))
+    }
+
+    fun octUsdEstimate(amountText: String): String? {
+        val amount = amountText.replace(",", ".").trim().toBigDecimalOrNull()
+            ?.takeIf { it.signum() >= 0 }
+            ?: return null
+        val unitPrice = octUsdPrice?.takeIf(Double::isFinite)?.let(BigDecimal::valueOf) ?: return null
+        return formatUsdEstimate(amount.multiply(unitPrice))
+    }
+
+    fun evmSendUsdEstimate(): String? {
+        if (evmSelectedSendNft != null) return null
+        val network = activeEvmNetwork ?: return null
+        val asset = evmSelectedSendToken?.let(TradeAsset::fromToken) ?: TradeAsset.native(network)
+        return tradeAssetUsdEstimate(asset, evmSendDialogAmount)
+    }
+
+    private fun evmNativeUsdPrice(): BigDecimal? {
+        val account = evmAccount ?: return null
+        val balance = account.balance.replace(",", "").trim().toBigDecimalOrNull()
+            ?.takeIf { it > BigDecimal.ZERO }
+            ?: return null
+        val totalUsd = BigDecimal.valueOf(parseUsdEstimate(account.fiatEstimate))
+            .takeIf { it > BigDecimal.ZERO }
+            ?: return null
+        return totalUsd.divide(balance, 12, RoundingMode.HALF_UP)
+    }
+
+    private fun formatUsdEstimate(value: BigDecimal): String =
+        "~ \$${String.format(java.util.Locale.US, "%,.2f", value.setScale(2, RoundingMode.HALF_UP))} USD"
 
     fun tradeGasInfo(): String {
         val quote = tradeQuote ?: return "Gas estimate appears after quote."
@@ -3014,7 +3146,7 @@ class PoctraController(private val activity: Activity) {
             return
         }
         if (!tradeRepository.isSupportedPair(fromAsset, toAsset)) {
-            showError("Trade supports asset pairs on Ethereum Mainnet.")
+            showError("Only direct Ethereum Mainnet pairs are supported.")
             return
         }
         val quote = tradeQuote
@@ -3118,6 +3250,18 @@ class PoctraController(private val activity: Activity) {
         }
         tradeStep = TradeStep.Completed
         tradeProgress = "Swap confirmed. Balances are syncing..."
+        addSwapHistoryItem(
+            SwapHistoryItem(
+                id = "swap_${System.currentTimeMillis()}",
+                fromSymbol = tradeDialogFromAsset.symbol,
+                toSymbol = tradeDialogToAsset.symbol,
+                fromAmount = tradeDialogAmount,
+                toAmount = tradeDialogReceiveEstimate,
+                status = "confirmed",
+                hash = tradeLastTxHash,
+                timestamp = System.currentTimeMillis(),
+            )
+        )
         refreshTrade()
         refreshEvmDashboard()
     }
@@ -3311,6 +3455,7 @@ class PoctraController(private val activity: Activity) {
     fun refreshPrivacy(force: Boolean = true) {
         val activeWallet = wallet ?: return
         val requestRpcUrl = currentRpcUrl
+        restorePendingPrivacyKeySwitchIfNeeded(activeWallet, requestRpcUrl)
         val snapshotKey = "${activeWallet.address}|$requestRpcUrl"
         val now = System.currentTimeMillis()
         if (!force && privacyLoadedKey == snapshotKey && now - privacyLoadedAt < PrivacyCacheMillis) return
@@ -3319,13 +3464,20 @@ class PoctraController(private val activity: Activity) {
             privacyBalanceRaw = null
             privacyBalanceVisible = false
             privacyDecryptedCipher = null
+            privacyHistory = emptyList()
+            privacyHistoryLimit = InitialPrivacyHistoryLimit
+            privacyHistoryDisplayLimit = InitialPrivacyHistoryDisplayLimit
+            privacyHistoryCanLoadMore = true
         }
         if (force) {
             privacyBalanceVisible = false
         }
 
         val serial = ++privacySyncSerial
+        val historySerial = ++privacyHistoryRequestSerial
+        val requestHistoryLimit = privacyHistoryLimit
         privacySyncing = true
+        privacyHistoryLoading = true
         privacySyncSteps = initialPrivacySyncSteps().mapIndexed { index, step ->
             if (index == 0) step.copy(status = PrivacySyncStatus.Running) else step
         }
@@ -3339,14 +3491,14 @@ class PoctraController(private val activity: Activity) {
                         detail = if (privacySupported) "Privacy engine ready" else "Hardware AES is unavailable on this device",
                     )
                     delay(120)
-                    val balanceDeferred = async {
+                    val balanceDeferred = async(Dispatchers.IO) {
                         runCatching { rpcRepository.fetchEncryptedBalance(activeWallet, requestRpcUrl) }
                     }
-                    val historyDeferred = async {
+                    val historyDeferred = async(Dispatchers.IO) {
                         runCatching {
-                            rpcRepository.fetchPrivacyHistory(
+                            rpcRepository.fetchRecentActivityPage(
                                 address = activeWallet.address,
-                                limit = InitialPrivacyHistoryLimit,
+                                limit = requestHistoryLimit,
                                 url = requestRpcUrl,
                             )
                         }
@@ -3378,22 +3530,24 @@ class PoctraController(private val activity: Activity) {
 
                     updatePrivacySyncStep(2, PrivacySyncStatus.Running)
                     val historyResult = historyDeferred.await()
-                    if (serial == privacySyncSerial && isActiveRpcSnapshot(activeWallet.address, requestRpcUrl)) {
-                        historyResult.onSuccess { history ->
-                            val localPending = privacyHistory.filter { transaction ->
-                                transaction.status.equals("pending", ignoreCase = true) &&
-                                    history.none { it.hash == transaction.hash }
-                            }
-                            privacyHistory = (history + localPending)
-                                .distinctBy { it.hash }
-                                .sortedByDescending { it.timestamp }
-                                .take(InitialPrivacyHistoryLimit)
+                    if (
+                        serial == privacySyncSerial &&
+                        historySerial == privacyHistoryRequestSerial &&
+                        isActiveRpcSnapshot(activeWallet.address, requestRpcUrl)
+                    ) {
+                        historyResult.onSuccess { page ->
+                            applyRecentActivityPage(page, requestHistoryLimit)
                             updatePrivacySyncStep(
                                 2,
                                 PrivacySyncStatus.Complete,
-                                if (history.isEmpty()) "No privacy activity" else "${history.size} activities loaded",
+                                if (page.privacyTransactions.isEmpty()) {
+                                    "No privacy activity"
+                                } else {
+                                    "${page.privacyTransactions.size} activities loaded"
+                                },
                             )
                         }.onFailure { failure ->
+                            if (privacyHistory.isEmpty()) privacyHistoryCanLoadMore = false
                             updatePrivacySyncStep(2, PrivacySyncStatus.Failed, failure.message ?: "History unavailable")
                         }
                     }
@@ -3445,8 +3599,120 @@ class PoctraController(private val activity: Activity) {
                 }
             } finally {
                 if (serial == privacySyncSerial) privacySyncing = false
+                if (historySerial == privacyHistoryRequestSerial) privacyHistoryLoading = false
             }
         }
+    }
+
+    fun loadMorePrivacyHistory() {
+        if (
+            privacySyncing ||
+            privacyHistoryLoading ||
+            !privacyHistoryCanLoadMore ||
+            privacyHistoryDisplayLimit >= MaxPrivacyHistoryLimit - 1
+        ) {
+            return
+        }
+        val activeWallet = wallet ?: return
+        val requestRpcUrl = currentRpcUrl
+        privacyHistoryDisplayLimit = (privacyHistoryDisplayLimit + PrivacyHistoryPageSize)
+            .coerceAtMost(MaxPrivacyHistoryLimit - 1)
+        val requestLimit = (privacyHistoryDisplayLimit + 1).coerceAtMost(MaxPrivacyHistoryLimit)
+        privacyHistoryLimit = requestLimit
+        val requestSerial = ++privacyHistoryRequestSerial
+        privacyHistoryLoading = true
+        scope.launch {
+            try {
+                val page = rpcRepository.fetchRecentActivityPage(
+                    address = activeWallet.address,
+                    limit = requestLimit,
+                    url = requestRpcUrl,
+                )
+                if (
+                    requestSerial == privacyHistoryRequestSerial &&
+                    privacyHistoryLimit == requestLimit &&
+                    isActiveRpcSnapshot(activeWallet.address, requestRpcUrl)
+                ) {
+                    applyRecentActivityPage(page, requestLimit)
+                }
+            } catch (_: Exception) {
+                if (
+                    requestSerial == privacyHistoryRequestSerial &&
+                    privacyHistory.isEmpty()
+                ) {
+                    privacyHistoryCanLoadMore = false
+                }
+            } finally {
+                if (requestSerial == privacyHistoryRequestSerial) privacyHistoryLoading = false
+            }
+        }
+    }
+
+    fun searchRecentPrivacyHistory() {
+        if (privacySyncing || privacyHistoryLoading || privacyHistory.isNotEmpty()) return
+        val activeWallet = wallet ?: return
+        val requestRpcUrl = currentRpcUrl
+        val requestSerial = ++privacyHistoryRequestSerial
+        privacyHistoryLoading = true
+        scope.launch {
+            try {
+                val history = withContext(Dispatchers.IO) {
+                    rpcRepository.searchPrivacyHistory(
+                        address = activeWallet.address,
+                        resultLimit = PrivacyHistorySearchResultLimit,
+                        url = requestRpcUrl,
+                    )
+                }
+                if (
+                    requestSerial == privacyHistoryRequestSerial &&
+                    isActiveRpcSnapshot(activeWallet.address, requestRpcUrl)
+                ) {
+                    applyPrivacyHistory(history, PrivacyHistorySearchResultLimit)
+                    privacyHistoryCanLoadMore = false
+                    if (history.isEmpty()) showMessage("No recent Privacy activity found.")
+                }
+            } catch (exception: Exception) {
+                if (requestSerial == privacyHistoryRequestSerial) {
+                    showError(exception.message ?: "Privacy history search failed.")
+                }
+            } finally {
+                if (requestSerial == privacyHistoryRequestSerial) privacyHistoryLoading = false
+            }
+        }
+    }
+
+    private fun applyPrivacyHistory(
+        history: List<TransactionHistoryItem>,
+        limit: Int,
+    ) {
+        val localPending = privacyHistory.filter { transaction ->
+            transaction.status.equals("pending", ignoreCase = true) &&
+                history.none { it.hash == transaction.hash }
+        }
+        privacyHistory = (history + localPending)
+            .distinctBy { it.hash }
+            .sortedByDescending { it.timestamp }
+            .take(limit)
+        privacyHistoryCanLoadMore = limit < MaxPrivacyHistoryLimit && history.size >= limit
+    }
+
+    private fun applyRecentActivityPage(page: RecentActivityPage, requestLimit: Int) {
+        recentPublicActivityCount = page.publicTransactions.size
+        recentPrivacyActivityCount = page.privacyTransactions.size
+        recentActivitySourceCount = page.sourceCount
+        val localPublicPending = recentTransactions.filter { transaction ->
+            transaction.status.equals("pending", ignoreCase = true) &&
+                page.publicTransactions.none { it.hash == transaction.hash }
+        }
+        recentTransactions = (page.publicTransactions + localPublicPending)
+            .distinctBy { it.hash }
+            .sortedByDescending { it.timestamp }
+            .take(requestLimit)
+        applyPrivacyHistory(page.privacyTransactions, requestLimit)
+        val canLoadMore = page.sourceCount >= requestLimit
+        historyCanLoadMore = requestLimit < MaxHistoryLimit && canLoadMore
+        privacyHistoryCanLoadMore = requestLimit < MaxPrivacyHistoryLimit && canLoadMore
+        refreshRecentActivityIdentityNames(recentTransactions)
     }
 
     fun refreshPrivacyKeyStatus(forceRefresh: Boolean = false) {
@@ -3470,8 +3736,9 @@ class PoctraController(private val activity: Activity) {
     ) {
         val activeWallet = wallet ?: return
         if (privacyKeyStatusLoading || privacyOperationActive) return
-        val serial = ++privacyKeyStatusSerial
         val rpcUrl = currentRpcUrl
+        if (restorePendingPrivacyKeySwitchIfNeeded(activeWallet, rpcUrl)) return
+        val serial = ++privacyKeyStatusSerial
         privacyKeyStatusLoading = true
         scope.launch {
             try {
@@ -3596,6 +3863,7 @@ class PoctraController(private val activity: Activity) {
                 extendsLocalKey = registeredKeyCurrent,
                 legacyV1Profile = false,
                 proofProfile = registeredKeyCurrent,
+                secretProfile = registeredKeyCurrent,
             )
 
         var localBalance: Long? = null
@@ -3608,7 +3876,7 @@ class PoctraController(private val activity: Activity) {
                     localBalance = runCatching {
                         privacyCrypto.decryptBalance(activeWallet, cipher)
                     }.getOrNull()
-                } else if (registeredKey != null && compatibility.proofProfile) {
+                } else if (registeredKey != null && compatibility.secretProfile) {
                     registeredKeyBalance = runCatching {
                         privacyCrypto.decryptBalanceWithRegisteredKey(
                             activeWallet,
@@ -3757,6 +4025,8 @@ class PoctraController(private val activity: Activity) {
         if (privacyOperationActive || privacyBalanceDecrypting) {
             return showError("A Privacy process is already running.")
         }
+        val requestRpcUrl = currentRpcUrl
+        if (restorePendingPrivacyKeySwitchIfNeeded(activeWallet, requestRpcUrl)) return
         val requestedStatus = privacyKeyStatus
         if (!requestedStatus.canSubmit) {
             return showError(requestedStatus.reason)
@@ -3769,7 +4039,6 @@ class PoctraController(private val activity: Activity) {
         }
         requestedStatus.requiredPublicFeeRaw
             ?: return showError("Refresh the Privacy key status to load the network fee.")
-        val requestRpcUrl = currentRpcUrl
         val forceRefresh = privacyForceRefreshRequested
         val operationId = ++privacyOperationSerial
         privacyOperation = PrivacyOperationState(
@@ -3924,36 +4193,21 @@ class PoctraController(private val activity: Activity) {
                     "Key switch accepted. Waiting for blockchain confirmation...",
                     result.hash,
                 )
+                savePendingPrivacyKeySwitch(activeWallet.address, requestRpcUrl, result.hash)
                 addPrivacyPending(result.hash, activeWallet, 0L, "key_switch")
-                awaitPrivacyConfirmation(operationId, result.hash, requestRpcUrl)
-                privacyForceRefreshRequested = false
-                val (settledBalance, settledStatus) = readPrivacyKeySnapshot(
+                awaitPrivacyKeySwitchConfirmation(
+                    operationId = operationId,
+                    hash = result.hash,
+                    address = activeWallet.address,
+                    rpcUrl = requestRpcUrl,
+                    compactRefresh = false,
+                )
+                completePrivacyKeySwitchConfirmation(
+                    operationId = operationId,
+                    hash = result.hash,
                     activeWallet = activeWallet,
                     rpcUrl = requestRpcUrl,
-                    forceRefresh = false,
-                    attempts = PrivacyKeyRecheckAttempts,
                 )
-                ensurePrivacyOperationCurrent(operationId)
-                if (isActiveRpcSnapshot(activeWallet.address, requestRpcUrl)) {
-                    applyPrivacyKeySnapshot(
-                        activeWallet = activeWallet,
-                        rpcUrl = requestRpcUrl,
-                        encryptedBalance = settledBalance,
-                        status = settledStatus,
-                    )
-                }
-                val keyReady = settledStatus.isReadyForPrivateOperations
-                updatePrivacyOperation(
-                    operationId,
-                    PrivacyOperationStage.Confirmed,
-                    if (keyReady) {
-                        "Privacy key and encrypted balance are current."
-                    } else {
-                        "Key switch confirmed. Network state is still syncing; recheck Privacy Settings."
-                    },
-                    result.hash,
-                )
-                refreshAfterPrivacyConfirmation(refreshPrivacyState = false)
             } catch (error: Exception) {
                 failPrivacyOperation(operationId, error.message ?: "Privacy key switch failed.")
             } finally {
@@ -3967,6 +4221,85 @@ class PoctraController(private val activity: Activity) {
         MessageDigest.getInstance("SHA-256")
             .digest(value.toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+
+    private fun restorePendingPrivacyKeySwitchIfNeeded(
+        activeWallet: Wallet,
+        rpcUrl: String,
+    ): Boolean {
+        val hash = pendingPrivacyKeySwitchHash(activeWallet.address, rpcUrl) ?: return false
+        if (privacyOperationActive) return true
+
+        val operationId = ++privacyOperationSerial
+        privacyOperation = PrivacyOperationState(
+            id = operationId,
+            type = PrivacyOperationType.KeySwitch,
+            stage = PrivacyOperationStage.Accepted,
+            amountOct = privacyKeyStatus.encryptedBalanceRaw?.let(::formatPrivacyAmount).orEmpty(),
+            message = "A previous key switch is still being confirmed. Monitoring it before another submission...",
+            progressIndex = privacyProgressIndex(PrivacyOperationStage.Accepted),
+            txHash = hash,
+            dialogVisible = true,
+        )
+        addPrivacyPending(hash, activeWallet, 0L, "key_switch")
+        scope.launch {
+            try {
+                awaitPrivacyKeySwitchConfirmation(
+                    operationId = operationId,
+                    hash = hash,
+                    address = activeWallet.address,
+                    rpcUrl = rpcUrl,
+                    compactRefresh = false,
+                )
+                completePrivacyKeySwitchConfirmation(
+                    operationId = operationId,
+                    hash = hash,
+                    activeWallet = activeWallet,
+                    rpcUrl = rpcUrl,
+                )
+            } catch (error: Exception) {
+                failPrivacyOperation(
+                    operationId,
+                    error.message ?: "The pending Privacy key switch could not be confirmed.",
+                )
+            }
+        }
+        return true
+    }
+
+    private suspend fun completePrivacyKeySwitchConfirmation(
+        operationId: Long,
+        hash: String,
+        activeWallet: Wallet,
+        rpcUrl: String,
+    ) {
+        privacyForceRefreshRequested = false
+        val (settledBalance, settledStatus) = readPrivacyKeySnapshot(
+            activeWallet = activeWallet,
+            rpcUrl = rpcUrl,
+            forceRefresh = false,
+            attempts = PrivacyKeyRecheckAttempts,
+        )
+        ensurePrivacyOperationCurrent(operationId)
+        if (isActiveRpcSnapshot(activeWallet.address, rpcUrl)) {
+            applyPrivacyKeySnapshot(
+                activeWallet = activeWallet,
+                rpcUrl = rpcUrl,
+                encryptedBalance = settledBalance,
+                status = settledStatus,
+            )
+        }
+        updatePrivacyOperation(
+            operationId,
+            PrivacyOperationStage.Confirmed,
+            if (settledStatus.isReadyForPrivateOperations) {
+                "Privacy key and encrypted balance are current."
+            } else {
+                "Key switch confirmed. Network state is still syncing; recheck Privacy Settings."
+            },
+            hash,
+        )
+        refreshAfterPrivacyConfirmation(refreshPrivacyState = false)
+    }
 
     fun openPrivacyDecrypt() {
         openPrivacyAction(AppRoute.PrivacyDecrypt, PrivacyOperationType.Decrypt)
@@ -3991,7 +4324,7 @@ class PoctraController(private val activity: Activity) {
             showError("Minimize the active Privacy process before opening another screen.")
             return false
         }
-        if (!privacyKeyStatus.isReadyForPrivateOperations) {
+        if (!privacyCanStartOperation(type)) {
             showError("Privacy key setup or encrypted balance refresh is required first.")
             openPrivacySettings()
             return false
@@ -4032,7 +4365,8 @@ class PoctraController(private val activity: Activity) {
                     .movePointRight(6)
                     .setScale(0, RoundingMode.DOWN)
                     .toLong()
-                (publicRaw - feeOu.coerceAtLeast(0L)).coerceAtLeast(0L)
+                val totalFee = privacyTotalNetworkFeeOu(type, feeOu) ?: return ""
+                (publicRaw - totalFee.coerceAtLeast(0L)).coerceAtLeast(0L)
             }
             PrivacyOperationType.Decrypt,
             PrivacyOperationType.Stealth -> privacyBalanceRaw?.coerceAtLeast(0L) ?: return ""
@@ -4043,6 +4377,36 @@ class PoctraController(private val activity: Activity) {
     }
 
     fun privacyFeeAffordable(feeOu: Long): Boolean = hasPublicFeeBalance(feeOu)
+
+    fun privacyCompactRefreshFeeOu(type: PrivacyOperationType): Long? =
+        privacyKeyStatus
+            .takeIf { type.supportsAutomaticCompactRefresh() && it.canAutoCompactRefresh() }
+            ?.requiredPublicFeeRaw
+
+    fun privacyTotalNetworkFeeOu(type: PrivacyOperationType, operationFeeOu: Long): Long? =
+        runCatching {
+            Math.addExact(
+                operationFeeOu,
+                privacyCompactRefreshFeeOu(type) ?: 0L,
+            )
+        }.getOrNull()
+
+    private fun privacyCanStartOperation(type: PrivacyOperationType): Boolean =
+        privacyKeyStatus.isReadyForPrivateOperations ||
+            (type.supportsAutomaticCompactRefresh() && privacyKeyStatus.canAutoCompactRefresh())
+
+    private fun PrivacyOperationType.supportsAutomaticCompactRefresh(): Boolean =
+        this in setOf(
+            PrivacyOperationType.Encrypt,
+            PrivacyOperationType.Decrypt,
+            PrivacyOperationType.Stealth,
+        )
+
+    private fun PrivacyKeyUpgradeStatus.canAutoCompactRefresh(): Boolean =
+        mode == PrivacyKeyUpgradeMode.KeyBoundMigration &&
+            compactRefresh &&
+            canSubmit &&
+            requiredPublicFeeRaw != null
 
     fun closePrivacyAction() {
         if (privacyOperationActive) {
@@ -4063,7 +4427,9 @@ class PoctraController(private val activity: Activity) {
 
     fun startPrivacyEncrypt(amountText: String, feeText: String) {
         val activeWallet = wallet ?: return showError("Unlock wallet first.")
-        if (!privacyKeyStatus.isReadyForPrivateOperations) return showError(privacyKeyStatus.reason)
+        if (!privacyCanStartOperation(PrivacyOperationType.Encrypt)) {
+            return showError(privacyKeyStatus.reason)
+        }
         if (privacyOperationActive) return showError("A Privacy process is already running.")
         val amountRaw = parsePrivacyAmount(amountText)
             ?: return showError("Enter an OCT amount with no more than 6 decimal places.")
@@ -4073,7 +4439,10 @@ class PoctraController(private val activity: Activity) {
             .movePointRight(6)
             .setScale(0, RoundingMode.DOWN)
             .toLong()
-        if (feeOu >= availableRaw || amountRaw > availableRaw - feeOu) {
+        val compactFeeOu = privacyCompactRefreshFeeOu(PrivacyOperationType.Encrypt)
+        val totalFeeOu = privacyTotalNetworkFeeOu(PrivacyOperationType.Encrypt, feeOu)
+            ?: return showError("The combined Privacy network fee is too large.")
+        if (totalFeeOu >= availableRaw || amountRaw > availableRaw - totalFeeOu) {
             return showError("Amount and network fee exceed the available OCT balance.")
         }
 
@@ -4086,6 +4455,8 @@ class PoctraController(private val activity: Activity) {
             stage = PrivacyOperationStage.Preparing,
             amountOct = formatPrivacyAmount(amountRaw),
             message = "Preparing local encryption...",
+            compactRefreshRequired = compactFeeOu != null,
+            compactRefreshFeeOu = compactFeeOu,
         )
         scope.launch {
             try {
@@ -4094,7 +4465,16 @@ class PoctraController(private val activity: Activity) {
                 updatePrivacyOperation(operationId, PrivacyOperationStage.Registering, "Checking Privacy key registration...")
                 ensurePrivacyKeyRegistered(activeWallet, identity, requestRpcUrl)
                 ensurePrivacyOperationCurrent(operationId)
-                requirePrivacySpendableCipher(activeWallet, requestRpcUrl, allowMissing = true)
+                preparePrivacySpendCipher(
+                    activeWallet = activeWallet,
+                    identity = identity,
+                    rpcUrl = requestRpcUrl,
+                    operationId = operationId,
+                    operationFeeOu = feeOu,
+                    publicAmountRaw = amountRaw,
+                    approvedCompactFeeOu = compactFeeOu,
+                    allowMissing = true,
+                )
                 ensurePrivacyOperationCurrent(operationId)
                 updatePrivacyOperation(operationId, PrivacyOperationStage.Preparing, "Generating encrypted amount and proof locally...")
                 val payload = privacyCrypto.createEncryptPayload(activeWallet, amountRaw)
@@ -4137,7 +4517,9 @@ class PoctraController(private val activity: Activity) {
 
     fun startPrivacyDecrypt(amountText: String, feeText: String) {
         val activeWallet = wallet ?: return showError("Unlock wallet first.")
-        if (!privacyKeyStatus.isReadyForPrivateOperations) return showError(privacyKeyStatus.reason)
+        if (!privacyCanStartOperation(PrivacyOperationType.Decrypt)) {
+            return showError(privacyKeyStatus.reason)
+        }
         if (privacyOperationActive) return showError("A Privacy process is already running.")
         if (privacyEncryptedBalance?.cipher.isNullOrBlank()) {
             return showError("No encrypted balance is available on the active network.")
@@ -4146,7 +4528,12 @@ class PoctraController(private val activity: Activity) {
             ?: return showError("Enter an OCT amount with no more than 6 decimal places.")
         val feeOu = feeText.filter(Char::isDigit).toLongOrNull()?.takeIf { it > 0L }
             ?: return showError("Enter a valid network fee.")
-        if (!hasPublicFeeBalance(feeOu)) return showError("Public OCT balance is insufficient for the network fee.")
+        val compactFeeOu = privacyCompactRefreshFeeOu(PrivacyOperationType.Decrypt)
+        val totalFeeOu = privacyTotalNetworkFeeOu(PrivacyOperationType.Decrypt, feeOu)
+            ?: return showError("The combined Privacy network fee is too large.")
+        if (!hasPublicFeeBalance(totalFeeOu)) {
+            return showError("Public OCT balance is insufficient for the combined network fees.")
+        }
 
         closePrivacyAction()
         val requestRpcUrl = currentRpcUrl
@@ -4157,6 +4544,8 @@ class PoctraController(private val activity: Activity) {
             stage = PrivacyOperationStage.Preparing,
             amountOct = formatPrivacyAmount(amountRaw),
             message = "Reading encrypted balance locally...",
+            compactRefreshRequired = compactFeeOu != null,
+            compactRefreshFeeOu = compactFeeOu,
         )
         scope.launch {
             try {
@@ -4166,7 +4555,15 @@ class PoctraController(private val activity: Activity) {
                 ensurePrivacyKeyRegistered(activeWallet, identity, requestRpcUrl)
                 ensurePrivacyOperationCurrent(operationId)
                 val spendCipher = requireNotNull(
-                    requirePrivacySpendableCipher(activeWallet, requestRpcUrl),
+                    preparePrivacySpendCipher(
+                        activeWallet = activeWallet,
+                        identity = identity,
+                        rpcUrl = requestRpcUrl,
+                        operationId = operationId,
+                        operationFeeOu = feeOu,
+                        publicAmountRaw = 0L,
+                        approvedCompactFeeOu = compactFeeOu,
+                    ),
                 )
                 ensurePrivacyOperationCurrent(operationId)
                 val currentBalance = privacyCrypto.decryptBalance(activeWallet, spendCipher)
@@ -4227,7 +4624,9 @@ class PoctraController(private val activity: Activity) {
 
     fun startPrivacyStealth(recipientInput: String, amountText: String, feeText: String) {
         val activeWallet = wallet ?: return showError("Unlock wallet first.")
-        if (!privacyKeyStatus.isReadyForPrivateOperations) return showError(privacyKeyStatus.reason)
+        if (!privacyCanStartOperation(PrivacyOperationType.Stealth)) {
+            return showError(privacyKeyStatus.reason)
+        }
         if (privacyOperationActive) return showError("A Privacy process is already running.")
         if (!isOctraRecipientInput(recipientInput)) {
             return showError("Enter foo.oct or a valid Octra recipient address.")
@@ -4239,7 +4638,12 @@ class PoctraController(private val activity: Activity) {
             ?: return showError("Enter an OCT amount with no more than 6 decimal places.")
         val feeOu = feeText.filter(Char::isDigit).toLongOrNull()?.takeIf { it > 0L }
             ?: return showError("Enter a valid network fee.")
-        if (!hasPublicFeeBalance(feeOu)) return showError("Public OCT balance is insufficient for the network fee.")
+        val compactFeeOu = privacyCompactRefreshFeeOu(PrivacyOperationType.Stealth)
+        val totalFeeOu = privacyTotalNetworkFeeOu(PrivacyOperationType.Stealth, feeOu)
+            ?: return showError("The combined Privacy network fee is too large.")
+        if (!hasPublicFeeBalance(totalFeeOu)) {
+            return showError("Public OCT balance is insufficient for the combined network fees.")
+        }
 
         closePrivacyAction()
         val requestRpcUrl = currentRpcUrl
@@ -4251,6 +4655,8 @@ class PoctraController(private val activity: Activity) {
             amountOct = formatPrivacyAmount(amountRaw),
             recipient = recipientInput.trim(),
             message = "Resolving recipient on the active Octra network...",
+            compactRefreshRequired = compactFeeOu != null,
+            compactRefreshFeeOu = compactFeeOu,
         )
         scope.launch {
             var envelope: com.poctra.wallet.privacy.PrivacyStealthEnvelope? = null
@@ -4268,7 +4674,15 @@ class PoctraController(private val activity: Activity) {
                 ensurePrivacyKeyRegistered(activeWallet, identity, requestRpcUrl)
                 ensurePrivacyOperationCurrent(operationId)
                 val spendCipher = requireNotNull(
-                    requirePrivacySpendableCipher(activeWallet, requestRpcUrl),
+                    preparePrivacySpendCipher(
+                        activeWallet = activeWallet,
+                        identity = identity,
+                        rpcUrl = requestRpcUrl,
+                        operationId = operationId,
+                        operationFeeOu = feeOu,
+                        publicAmountRaw = 0L,
+                        approvedCompactFeeOu = compactFeeOu,
+                    ),
                 )
                 ensurePrivacyOperationCurrent(operationId)
                 val currentBalance = privacyCrypto.decryptBalance(activeWallet, spendCipher)
@@ -4539,6 +4953,7 @@ class PoctraController(private val activity: Activity) {
             } catch (exception: Exception) {
                 failPrivacyOperation(operationId, exception.message ?: "Bulk Claim failed.")
             } finally {
+                clearPrivacyClaimSecrets()
                 releasePrivacyCryptoIfLocked()
             }
         }
@@ -4585,7 +5000,9 @@ class PoctraController(private val activity: Activity) {
     }
 
     private suspend fun awaitPrivacyConfirmation(operationId: Long, hash: String, rpcUrl: String) {
-        repeat(PrivacyConfirmationAttempts) {
+        val maxAttempts = PrivacyMaxConfirmationAttempts
+        var attempts = 0
+        while (attempts < maxAttempts) {
             delay(TransactionPollingIntervalMs)
             ensurePrivacyOperationCurrent(operationId)
             val state = rpcRepository.checkTransactionStatus(hash, rpcUrl)
@@ -4597,11 +5014,114 @@ class PoctraController(private val activity: Activity) {
                 )
                 else -> Unit
             }
+            attempts++
+            // At 15s mark: first follow-up message
+            if (attempts == PrivacyConfirmationFollowUpAttempts) {
+                val operationLabel = privacyOperation
+                    ?.takeIf { it.id == operationId }
+                    ?.type
+                    ?.label
+                    ?: "Privacy transaction"
+                updatePrivacyOperation(
+                    operationId = operationId,
+                    stage = PrivacyOperationStage.Accepted,
+                    message = "$operationLabel submitted. Still waiting for blockchain confirmation...",
+                    hash = hash,
+                )
+            }
         }
-        throw IllegalStateException(
-            "Confirmation timed out. The transaction may still be pending; check its hash on the explorer.",
+        // Max wait reached (1 min) — stop polling, inform user clearly
+        val operationLabel = privacyOperation
+            ?.takeIf { it.id == operationId }
+            ?.type
+            ?.label
+            ?: "Privacy transaction"
+        updatePrivacyOperation(
+            operationId = operationId,
+            stage = PrivacyOperationStage.Accepted,
+            message = "$operationLabel is still pending after 1 minute. The network may be congested. " +
+                "Your transaction hash is $hash — check the block explorer. Do NOT resubmit.",
+            hash = hash,
         )
+        // Do not throw — tx may still confirm later, operation stays in Accepted state visible to user
     }
+
+    private suspend fun awaitPrivacyKeySwitchConfirmation(
+        operationId: Long,
+        hash: String,
+        address: String,
+        rpcUrl: String,
+        compactRefresh: Boolean,
+    ) {
+        var attempts = 0
+        while (true) {
+            delay(
+                if (attempts < PrivacyConfirmationFollowUpAttempts) {
+                    TransactionPollingIntervalMs
+                } else {
+                    PrivacyExtendedPollingIntervalMs
+                },
+            )
+            ensurePrivacyOperationCurrent(operationId)
+            val state = rpcRepository.checkTransactionStatus(hash, rpcUrl)
+            when (state.status) {
+                TransactionNetworkStatus.Confirmed -> {
+                    clearPendingPrivacyKeySwitch(address, hash, rpcUrl)
+                    return
+                }
+                TransactionNetworkStatus.Rejected,
+                TransactionNetworkStatus.Dropped -> {
+                    clearPendingPrivacyKeySwitch(address, hash, rpcUrl)
+                    throw IllegalStateException(
+                        state.reason ?: "Privacy key switch was not confirmed.",
+                    )
+                }
+                TransactionNetworkStatus.Pending,
+                TransactionNetworkStatus.NotFound -> Unit
+            }
+            attempts++
+            if (attempts == PrivacyConfirmationFollowUpAttempts) {
+                if (compactRefresh) {
+                    updatePrivacyCompactRefresh(
+                        operationId = operationId,
+                        stage = PrivacyCompactRefreshStage.Accepted,
+                        message = "Compact refresh is taking longer to confirm. Monitoring continues; no new key switch will be submitted.",
+                        hash = hash,
+                    )
+                } else {
+                    updatePrivacyOperation(
+                        operationId = operationId,
+                        stage = PrivacyOperationStage.Accepted,
+                        message = "Key switch is taking longer to confirm. Monitoring continues; do not submit another key switch.",
+                        hash = hash,
+                    )
+                }
+            }
+        }
+    }
+
+    private fun pendingPrivacyKeySwitchHash(address: String, rpcUrl: String): String? =
+        uiPrefs.getString(pendingPrivacyKeySwitchKey(address, rpcUrl), null)
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+
+    private fun savePendingPrivacyKeySwitch(address: String, rpcUrl: String, hash: String) {
+        uiPrefs.edit()
+            .putString(pendingPrivacyKeySwitchKey(address, rpcUrl), hash.trim())
+            .apply()
+    }
+
+    private fun clearPendingPrivacyKeySwitch(address: String, hash: String, rpcUrl: String) {
+        val key = pendingPrivacyKeySwitchKey(address, rpcUrl)
+        if (uiPrefs.getString(key, null) == hash) {
+            uiPrefs.edit().remove(key).apply()
+        }
+    }
+
+    private fun pendingPrivacyKeySwitchKey(address: String, rpcUrl: String): String =
+        KeyPendingPrivacyKeySwitchPrefix + sha256Hex(
+            "${address.trim().lowercase()}|${rpcUrl.trim().trimEnd('/').lowercase()}",
+        )
 
     private fun refreshAfterPrivacyConfirmation(refreshPrivacyState: Boolean = true) {
         privacyClaimCacheKey = null
@@ -4651,6 +5171,18 @@ class PoctraController(private val activity: Activity) {
     }
 
     private fun failPrivacyOperation(operationId: Long, message: String) {
+        val current = privacyOperation
+        if (
+            current?.id == operationId &&
+            current.compactRefreshRequired &&
+            current.compactRefreshStage != PrivacyCompactRefreshStage.Confirmed
+        ) {
+            updatePrivacyCompactRefresh(
+                operationId = operationId,
+                stage = PrivacyCompactRefreshStage.Failed,
+                message = message,
+            )
+        }
         updatePrivacyOperation(
             operationId,
             PrivacyOperationStage.Failed,
@@ -4678,12 +5210,203 @@ class PoctraController(private val activity: Activity) {
         if (wallet == null) runCatching { privacyCrypto.clear() }
     }
 
+    private suspend fun preparePrivacySpendCipher(
+        activeWallet: Wallet,
+        identity: PrivacyIdentity,
+        rpcUrl: String,
+        operationId: Long,
+        operationFeeOu: Long,
+        publicAmountRaw: Long,
+        approvedCompactFeeOu: Long?,
+        allowMissing: Boolean = false,
+    ): String? {
+        var encryptedBalance = rpcRepository.fetchEncryptedBalance(activeWallet, rpcUrl)
+        var status = readPrivacyKeyStatus(
+            activeWallet = activeWallet,
+            encryptedBalance = encryptedBalance,
+            rpcUrl = rpcUrl,
+            forceRefresh = false,
+        )
+        ensurePrivacyOperationCurrent(operationId)
+
+        if (status.isReadyForPrivateOperations) {
+            if (isActiveRpcSnapshot(activeWallet.address, rpcUrl)) {
+                applyPrivacyKeySnapshot(activeWallet, rpcUrl, encryptedBalance, status)
+            }
+            return validatePrivacySpendableCipher(activeWallet, encryptedBalance, allowMissing)
+        }
+
+        require(status.canAutoCompactRefresh()) { status.reason }
+        val compactFeeOu = approvedCompactFeeOu
+        require(compactFeeOu != null) {
+            "Encrypted balance now requires compact refresh. Review the operation again to approve its additional fee."
+        }
+        require(compactFeeOu in PrivacyUpgradePolicy.MinimumFeeRaw..PrivacyUpgradePolicy.MaximumFeeRaw) {
+            "The approved compact refresh fee is outside the wallet safety limit."
+        }
+        val totalPublicCost = runCatching {
+            Math.addExact(publicAmountRaw, Math.addExact(operationFeeOu, compactFeeOu))
+        }.getOrElse {
+            throw IllegalStateException("The combined Privacy operation cost is too large.")
+        }
+        val publicBalanceRaw = BigDecimal.valueOf(
+            rpcRepository.fetchBalance(activeWallet.address, rpcUrl).balance,
+        )
+            .movePointRight(6)
+            .setScale(0, RoundingMode.DOWN)
+            .longValueExact()
+        require(publicBalanceRaw >= totalPublicCost) {
+            "Public OCT balance is insufficient for compact refresh and the requested Privacy operation."
+        }
+
+        val sourceCipher = encryptedBalance?.cipher
+            ?: throw IllegalStateException("Encrypted balance source is missing.")
+        updatePrivacyCompactRefresh(
+            operationId = operationId,
+            stage = PrivacyCompactRefreshStage.BuildingProof,
+            message = "Building compact encrypted balance proof...",
+            feeOu = compactFeeOu,
+        )
+        val registeredKey = rpcRepository.fetchPvacPublicKey(activeWallet.address, rpcUrl)
+        val migrationPayload = privacyCrypto.createMigrationPayload(
+            wallet = activeWallet,
+            mode = PrivacyKeyUpgradeMode.KeyBoundMigration,
+            amountRaw = status.encryptedBalanceRaw
+                ?: throw IllegalStateException("Encrypted balance amount is unavailable."),
+            currentCipher = sourceCipher,
+            registeredPublicKeyBase64 = registeredKey,
+        )
+        ensurePrivacyOperationCurrent(operationId)
+
+        val newPublicKeyBase64 = android.util.Base64.encodeToString(
+            identity.publicKey,
+            android.util.Base64.NO_WRAP,
+        )
+        val encryptedData = JSONObject()
+            .put("new_pubkey", newPublicKeyBase64)
+            .put("aes_kat", identity.aesKat.toHex())
+            .put("new_cipher", migrationPayload.newCipher)
+            .put("new_zero_proof", migrationPayload.newZeroProof)
+            .put("amount_commitment", migrationPayload.amountCommitment)
+            .put(
+                "old_zero_proof",
+                migrationPayload.oldZeroProof
+                    ?: throw IllegalStateException("Old balance proof is missing."),
+            )
+            .put("source_cipher_hash", sha256Hex(sourceCipher))
+            .toWebcliJson()
+
+        val latestCipher = rpcRepository.fetchEncryptedBalance(activeWallet, rpcUrl)?.cipher
+        require(latestCipher != null && sha256Hex(latestCipher) == sha256Hex(sourceCipher)) {
+            "Encrypted balance changed while building the compact refresh proof. Review and retry."
+        }
+
+        updatePrivacyCompactRefresh(
+            operationId = operationId,
+            stage = PrivacyCompactRefreshStage.Submitting,
+            message = "Submitting compact encrypted balance refresh...",
+            feeOu = compactFeeOu,
+        )
+        val result = rpcRepository.submitPrivacyKeySwitch(
+            wallet = activeWallet,
+            feeOu = compactFeeOu,
+            encryptedData = encryptedData,
+            newPublicKey = identity.publicKey,
+            url = rpcUrl,
+        )
+        ensurePrivacyOperationCurrent(operationId)
+        if (!result.success || result.hash.isNullOrBlank()) {
+            throw IllegalStateException(result.error ?: "Compact refresh was rejected.")
+        }
+
+        updatePrivacyCompactRefresh(
+            operationId = operationId,
+            stage = PrivacyCompactRefreshStage.Accepted,
+            message = "Compact refresh accepted. Waiting for confirmation...",
+            hash = result.hash,
+            feeOu = compactFeeOu,
+        )
+        savePendingPrivacyKeySwitch(activeWallet.address, rpcUrl, result.hash)
+        addPrivacyPending(result.hash, activeWallet, 0L, "key_switch")
+        awaitPrivacyKeySwitchConfirmation(
+            operationId = operationId,
+            hash = result.hash,
+            address = activeWallet.address,
+            rpcUrl = rpcUrl,
+            compactRefresh = true,
+        )
+        updatePrivacyCompactRefresh(
+            operationId = operationId,
+            stage = PrivacyCompactRefreshStage.Confirmed,
+            message = "Encrypted balance compacted. Continuing ${privacyOperation?.type?.label.orEmpty()}...",
+            hash = result.hash,
+            feeOu = compactFeeOu,
+        )
+
+        var settledSnapshot: Pair<PrivacyEncryptedBalance?, PrivacyKeyUpgradeStatus>? = null
+        for (attempt in 0 until PrivacyKeyRecheckAttempts) {
+            val candidate = readPrivacyKeySnapshot(
+                activeWallet = activeWallet,
+                rpcUrl = rpcUrl,
+                forceRefresh = false,
+                attempts = 1,
+            )
+            settledSnapshot = candidate
+            if (candidate.second.isReadyForPrivateOperations) break
+            if (attempt < PrivacyKeyRecheckAttempts - 1) delay(PrivacyKeyRecheckDelayMs)
+        }
+        ensurePrivacyOperationCurrent(operationId)
+        encryptedBalance = settledSnapshot?.first
+        status = settledSnapshot?.second
+            ?: throw IllegalStateException("Compact refresh state is unavailable.")
+        require(status.isReadyForPrivateOperations) {
+            "Compact refresh confirmed, but the encrypted balance state is still syncing. Retry after refreshing Privacy."
+        }
+        if (isActiveRpcSnapshot(activeWallet.address, rpcUrl)) {
+            applyPrivacyKeySnapshot(activeWallet, rpcUrl, encryptedBalance, status)
+        }
+        return validatePrivacySpendableCipher(activeWallet, encryptedBalance, allowMissing)
+    }
+
+    private fun updatePrivacyCompactRefresh(
+        operationId: Long,
+        stage: PrivacyCompactRefreshStage,
+        message: String,
+        hash: String? = privacyOperation?.compactRefreshTxHash,
+        feeOu: Long? = privacyOperation?.compactRefreshFeeOu,
+    ) {
+        val current = privacyOperation ?: return
+        if (current.id != operationId) return
+        privacyOperation = current.copy(
+            message = message,
+            compactRefreshRequired = true,
+            compactRefreshStage = stage,
+            compactRefreshProgressIndex = when (stage) {
+                PrivacyCompactRefreshStage.BuildingProof -> 0
+                PrivacyCompactRefreshStage.Submitting -> 1
+                PrivacyCompactRefreshStage.Accepted -> 2
+                PrivacyCompactRefreshStage.Confirmed -> 3
+                PrivacyCompactRefreshStage.Failed -> current.compactRefreshProgressIndex
+            },
+            compactRefreshTxHash = hash,
+            compactRefreshFeeOu = feeOu,
+        )
+    }
+
     private suspend fun requirePrivacySpendableCipher(
         activeWallet: Wallet,
         rpcUrl: String,
         allowMissing: Boolean = false,
     ): String? {
         val encryptedBalance = rpcRepository.fetchEncryptedBalance(activeWallet, rpcUrl)
+        return validatePrivacySpendableCipher(activeWallet, encryptedBalance, allowMissing)
+    }
+
+    private suspend fun validatePrivacySpendableCipher(
+        activeWallet: Wallet,
+        encryptedBalance: PrivacyEncryptedBalance?,
+        allowMissing: Boolean,
+    ): String? {
         val cipher = encryptedBalance?.cipher
         if (cipher.isNullOrBlank()) {
             if (allowMissing) return null
@@ -4693,10 +5416,13 @@ class PoctraController(private val activity: Activity) {
         require(diagnostics.keyBound && diagnostics.canonicalRandomnessCommitment) {
             "Encrypted balance privacy refresh is required before private spend. Open Privacy Settings to recrypt it."
         }
-        require(diagnostics.baseLayerCount <= PrivacyUpgradePolicy.PrivateSpendMaxBaseLayers) {
+        require(
+            diagnostics.baseLayerCount < PrivacyUpgradePolicy.PrivateSpendRefreshBaseLayers,
+        ) {
             "Encrypted balance compact refresh is required before private spend " +
-                "(${diagnostics.baseLayerCount} base layers; maximum " +
-                "${PrivacyUpgradePolicy.PrivateSpendMaxBaseLayers}). Open Privacy Settings to recrypt it."
+                "(${diagnostics.baseLayerCount} base layers; refresh threshold " +
+                "${PrivacyUpgradePolicy.PrivateSpendRefreshBaseLayers}). " +
+                "Open Privacy Settings to refresh it."
         }
         privacyEncryptedBalance = encryptedBalance
         return cipher
@@ -4726,11 +5452,11 @@ class PoctraController(private val activity: Activity) {
             opType = opType,
         )
         privacyHistory = (listOf(pending) + privacyHistory.filterNot { it.hash == hash })
-            .take(InitialPrivacyHistoryLimit)
+            .take(privacyHistoryLimit)
     }
 
-    fun openPrivacyTransactionExplorer() {
-        val hash = privacyOperation?.txHash
+    fun openPrivacyTransactionExplorer(requestedHash: String? = null) {
+        val hash = requestedHash ?: privacyOperation?.txHash
         if (hash.isNullOrBlank()) return showError("Transaction hash is not ready.")
         val url = explorerTxUrl(hash)
         if (url == null) showError("Explorer URL is not configured.")
@@ -4799,11 +5525,12 @@ class PoctraController(private val activity: Activity) {
             .movePointRight(6)
             .setScale(0, RoundingMode.DOWN)
             .toLong()
-        return feeOu > 0L && feeOu < availableRaw
+        return feeOu > 0L && feeOu <= availableRaw
     }
 
     private fun resetPrivacyState() {
         privacySyncSerial++
+        privacyHistoryRequestSerial++
         privacyOperationSerial++
         privacyFeeSerial++
         privacyKeyStatusSerial++
@@ -4819,6 +5546,10 @@ class PoctraController(private val activity: Activity) {
         privacyDecryptedCipher = null
         privacyBalanceDecrypting = false
         privacyHistory = emptyList()
+        privacyHistoryLoading = false
+        privacyHistoryLimit = InitialPrivacyHistoryLimit
+        privacyHistoryDisplayLimit = InitialPrivacyHistoryDisplayLimit
+        privacyHistoryCanLoadMore = true
         privacyKeyStatus = PrivacyKeyUpgradeStatus()
         privacyKeyStatusLoading = false
         privacyForceRefreshRequested = false
@@ -5938,17 +6669,19 @@ class PoctraController(private val activity: Activity) {
             valueUsd = (octUsdPrice ?: 0.0) * availableBalance,
         )
         octraTokens.forEach { token ->
+            val balanceValue = token.formattedBalance.replace(",", "").toDoubleOrNull() ?: 0.0
             holdings += PortfolioHolding(
                 title = token.symbol,
                 subtitle = token.name,
                 balance = token.formattedBalance,
-                fiatEstimate = "OCS01 asset",
+                fiatEstimate = if (balanceValue > 0.0) "OCS01 token" else "No balance",
                 source = "Octra",
                 riskLevel = ConsumerRiskLevel.Notice,
                 assetId = "octra:${token.address.lowercase()}",
                 symbol = token.symbol,
                 network = activeRpcNetwork?.networkType ?: "Octra",
                 assetAddress = token.address,
+                valueUsd = 0.0, // OCS01 tokens don't have USD pricing yet
             )
         }
         val evmNetwork = activeEvmNetwork ?: runCatching { evmRepository.activeNetwork() }.getOrNull()
@@ -6045,12 +6778,13 @@ class PoctraController(private val activity: Activity) {
             buildList {
                 for (index in 0 until array.length()) {
                     val item = array.optJSONObject(index) ?: continue
+                    val fiatEstimate = item.optString("fiatEstimate")
                     add(
                         PortfolioHolding(
                             title = item.optString("title"),
                             subtitle = item.optString("subtitle"),
                             balance = item.optString("balance"),
-                            fiatEstimate = item.optString("fiatEstimate"),
+                            fiatEstimate = fiatEstimate,
                             source = item.optString("source"),
                             riskLevel = runCatching {
                                 ConsumerRiskLevel.valueOf(item.optString("riskLevel"))
@@ -6059,7 +6793,7 @@ class PoctraController(private val activity: Activity) {
                             symbol = item.optString("symbol"),
                             network = item.optString("network"),
                             assetAddress = item.optString("assetAddress").ifBlank { null },
-                            valueUsd = item.optDouble("valueUsd", 0.0),
+                            valueUsd = parseUsdEstimate(fiatEstimate), // Recalculate from fiatEstimate string
                         ),
                     )
                 }
@@ -6610,14 +7344,30 @@ class PoctraController(private val activity: Activity) {
         val balance = token.balance.replace(",", ".").toBigDecimalOrNull()
         return when {
             token.symbol.equals("USDT", ignoreCase = true) && balance != null -> "~ ${formatUsd(balance.toDouble())} USD"
+            token.symbol.equals("USDC", ignoreCase = true) && balance != null -> "~ ${formatUsd(balance.toDouble())} USD"
+            token.symbol.equals("DAI", ignoreCase = true) && balance != null -> "~ ${formatUsd(balance.toDouble())} USD"
             token.symbol.equals("wOCT", ignoreCase = true) && balance != null && octUsdPrice != null -> "~ ${formatUsd(balance.toDouble() * (octUsdPrice ?: 0.0))} USD"
+            token.symbol.equals("WETH", ignoreCase = true) && balance != null -> {
+                // Rough ETH price estimate - should be fetched from API in production
+                val ethPriceUsd = 2500.0 // Placeholder - ideally fetch real price
+                "~ ${formatUsd(balance.toDouble() * ethPriceUsd)} USD"
+            }
+            balance != null && balance.toDouble() > 0.0 -> "ERC20 token"
             else -> "Token balance"
         }
     }
 
     private fun parseUsdEstimate(value: String): Double {
-        val match = Regex("""([0-9][0-9,]*\.?[0-9]*)""").find(value) ?: return 0.0
-        return match.value.replace(",", "").toDoubleOrNull() ?: 0.0
+        // Extract number from "~ $2.83K USD" or "~ $2,820.00 USD" format
+        val match = Regex("""([0-9,]+\.?[0-9]*)\s*([KMB])?""").find(value) ?: return 0.0
+        val number = match.groupValues[1].replace(",", "").toDoubleOrNull() ?: return 0.0
+        val multiplier = when (match.groupValues[2].uppercase()) {
+            "K" -> 1000.0
+            "M" -> 1000000.0
+            "B" -> 1000000000.0
+            else -> 1.0
+        }
+        return number * multiplier
     }
 
     private data class ApprovalSpender(val name: String, val address: String)
@@ -7754,8 +8504,9 @@ class PoctraController(private val activity: Activity) {
     }
 
     fun loadMoreHistory() {
-        if (historyLoading || !historyCanLoadMore || historyLimit >= MaxHistoryLimit) return
-        historyLimit = (historyLimit + HistoryPageSize).coerceAtMost(MaxHistoryLimit)
+        if (historyLoading || !historyCanLoadMore || historyDisplayLimit >= MaxHistoryLimit - 1) return
+        historyDisplayLimit = (historyDisplayLimit + HistoryPageSize).coerceAtMost(MaxHistoryLimit - 1)
+        historyLimit = (historyDisplayLimit + 1).coerceAtMost(MaxHistoryLimit)
         refreshHistory(reset = false)
     }
 
@@ -8503,6 +9254,16 @@ class PoctraController(private val activity: Activity) {
         scope.cancel()
     }
 
+    fun handleDeepLink(uri: android.net.Uri) {
+        if (uri.scheme != "octra") return
+        if (vault == null || route == AppRoute.Loading || route == AppRoute.Unlock) return
+        val address = uri.host ?: uri.path?.trimStart('/') ?: return
+        if (address.isBlank()) return
+        pendingRecipientAddress = address
+        dashboardTab = DashboardTab.Overview
+        route = AppRoute.Send
+    }
+
     fun handleBack(): Boolean {
         return when (route) {
             AppRoute.DAppBrowser -> {
@@ -8836,6 +9597,7 @@ class PoctraController(private val activity: Activity) {
     private fun refreshHistory(activeWallet: Wallet, reset: Boolean = true) = scope.launch {
         if (reset) {
             historyLimit = InitialHistoryLimit
+            historyDisplayLimit = InitialHistoryDisplayLimit
             historyCanLoadMore = true
         }
         val requestLimit = historyLimit
@@ -8845,13 +9607,11 @@ class PoctraController(private val activity: Activity) {
         historyLoading = true
         kotlinx.coroutines.coroutineScope {
             try {
-                val transactions = withContext(Dispatchers.IO) {
-                    rpcRepository.fetchTransactionHistory(walletAddress, requestLimit, requestRpcUrl)
+                val page = withContext(Dispatchers.IO) {
+                    rpcRepository.fetchRecentActivityPage(walletAddress, requestLimit, requestRpcUrl)
                 }
                 if (requestSerial == historyRequestSerial && historyLimit == requestLimit && isActiveRpcSnapshot(walletAddress, requestRpcUrl)) {
-                    recentTransactions = transactions
-                    historyCanLoadMore = requestLimit < MaxHistoryLimit && transactions.size >= requestLimit
-                    refreshRecentActivityIdentityNames(transactions)
+                    applyRecentActivityPage(page, requestLimit)
                     if (selectedPortfolioHolding != null) syncPortfolioHoldingsAfterDataChange()
                 }
             } catch (_: Exception) {
@@ -9715,7 +10475,8 @@ class PoctraController(private val activity: Activity) {
         private const val KeyDarkMode = "dark_mode"
         private const val KeyDarkDefaultMigrated = "dark_default_migrated"
         private const val KeyTradeChartCachePrefix = "trade_chart_cache_"
-        private const val InitialHistoryLimit = 7
+        private const val InitialHistoryDisplayLimit = 7
+        private const val InitialHistoryLimit = InitialHistoryDisplayLimit + 1
         private const val HistoryPageSize = 7
         private const val InitialActivityLimit = 7
         private const val ActivityPageSize = 7
@@ -9723,12 +10484,19 @@ class PoctraController(private val activity: Activity) {
         private const val MaxUnifiedActivityItems = 80
         private const val MaxEvmActivityItems = 20
         private const val ActivityCenterSyncTimeoutMs = 8_000L
-        private const val InitialPrivacyHistoryLimit = 7
+        private const val InitialPrivacyHistoryDisplayLimit = 7
+        private const val InitialPrivacyHistoryLimit = InitialPrivacyHistoryDisplayLimit + 1
+        private const val PrivacyHistoryPageSize = 7
+        private const val PrivacyHistorySearchResultLimit = 3
+        private const val MaxPrivacyHistoryLimit = 50
         private const val PrivacyCacheMillis = 30_000L
         private const val PrivacyKeyRecheckAttempts = 3
         private const val PrivacyKeyRecheckDelayMs = 2_500L
         private const val PrivacyClaimCacheMillis = 5 * 60_000L
-        private const val PrivacyConfirmationAttempts = 45
+        private const val PrivacyConfirmationFollowUpAttempts = 8
+        private const val PrivacyMaxConfirmationAttempts = 30
+        private const val PrivacyExtendedPollingIntervalMs = 10_000L
+        private const val KeyPendingPrivacyKeySwitchPrefix = "pending_privacy_key_switch_"
         private const val IdentityLookupBatchSize = 4
         private const val MaxCircleBridgePayloadBytes = 64_000
         private const val MaxCircleAssetBridgePayloadBytes = 1_500_000
@@ -9745,6 +10513,8 @@ class PoctraController(private val activity: Activity) {
         private const val EvmAccountsPermission = "evm_accounts"
         private const val KeyBridgeHistory = "bridge_history"
         private const val MaxBridgeHistoryItems = 25
+        private const val KeySwapHistory = "swap_history"
+        private const val MaxSwapHistoryItems = 25
         private const val KeyPortfolioHoldings = "portfolio_holdings"
         private const val MicroUnits = 1_000_000L
         private const val BridgeFeeReserveOu = 10_000L

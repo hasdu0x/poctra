@@ -1,5 +1,7 @@
 package com.poctra.wallet
 
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.Stable
 import org.json.JSONObject
 import java.net.URLEncoder
 
@@ -10,12 +12,14 @@ enum class ConsumerRiskLevel {
     Critical,
 }
 
+@Immutable
 data class ConsumerRiskItem(
     val title: String,
     val description: String,
     val level: ConsumerRiskLevel,
 )
 
+@Immutable
 data class UnifiedActivityItem(
     val id: String,
     val title: String,
@@ -29,6 +33,7 @@ data class UnifiedActivityItem(
     val assetSymbol: String? = null,
 )
 
+@Stable
 data class PortfolioHolding(
     val title: String,
     val subtitle: String,

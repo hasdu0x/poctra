@@ -30,6 +30,7 @@ data class Eip712Review(
     val verifyingContract: String?,
     val signingHash: String,
     val warnings: List<String>,
+    val isPreviewTruncated: Boolean = false,
 )
 
 data class Eip712TypedData(
@@ -122,16 +123,21 @@ object Eip712TypedDataCodec {
                 add("The signing domain has no name or version.")
             }
         }
+        val (messagePreviewText, isPreviewTruncated) = previewJson(message)
         val review = Eip712Review(
             primaryType = primaryType,
             domainSummary = domainSummary(domain, chainId, verifyingContract),
             typeSummary = typeSummary(allTypes, primaryType),
-            messagePreview = previewJson(message),
+            messagePreview = messagePreviewText,
             chainId = chainId,
             verifyingContract = verifyingContract,
             signingHash = "0x${signingHash.toHex()}",
             warnings = warnings,
+            isPreviewTruncated = isPreviewTruncated,
         )
+        require(!review.isPreviewTruncated) {
+            "EIP-712 payload is too large to review completely."
+        }
         return Eip712TypedData(primaryType, domain, message, allTypes, signingHash, review)
     }
 
@@ -467,9 +473,13 @@ object Eip712TypedDataCodec {
             }
     }
 
-    private fun previewJson(value: Map<String, Any?>): String {
+    private fun previewJson(value: Map<String, Any?>): Pair<String, Boolean> {
         val preview = prettyValue(value, 0)
-        return if (preview.length <= MaxPreviewChars) preview else "${preview.take(MaxPreviewChars - 18)}... [truncated]"
+        return if (preview.length <= MaxPreviewChars) {
+            preview to false
+        } else {
+            "${preview.take(MaxPreviewChars - 18)}... [truncated]" to true
+        }
     }
 
     private fun prettyValue(value: Any?, depth: Int): String {
@@ -480,7 +490,16 @@ object Eip712TypedDataCodec {
                 "\"$key\": ${prettyValue(item, depth + 1)}"
             }
             is List<*> -> value.joinToString(", ", "[", "]") { prettyValue(it, depth + 1) }
-            is String -> "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+            is String -> "\"${value
+                .replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\n", "\\n")
+                .replace("\r", "\\r")
+                .replace("\t", "\\t")
+                .replace(Regex("[\u202A-\u202E\u2066-\u2069\u200F\u200E]")) { m ->
+                    "[U+${m.value[0].code.toString(16).uppercase().padStart(4, '0')}]"
+                }
+            }\""
             else -> value.toString()
         }
     }
